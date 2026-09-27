@@ -285,6 +285,22 @@ export class RecoveryManager {
                 taskId: cto.task_id, sessionKey: cto.openclaw_session_key, runId: cto.openclaw_run_id || runtime.runId || null, outcome: 'success'
               }, `${jobId}|job-runtime-reconciled|success`);
             }
+            else if (runtimeStatus === 'done' && required.some(child => !child)) {
+              // A terminal CTO runtime with a missing required specialist is a
+              // recoverable failure state, not an indefinitely EXECUTING Job.
+              // Do not synthesize or replace the missing child; close this Job
+              // through the normal durable failure path before any fresh E2E.
+              this.store.complete(jobId, [
+                '[RECOVERY FAILURE]',
+                'CTO runtime completed before all required production E2E specialist children were spawned.',
+                completion
+              ].join('\n'), 'failure');
+              const session = this.store.getSessionByOpenClawKey(cto.openclaw_session_key);
+              if (session) this.store.updateAgentSession(session.session_id, { state: 'FAILED' });
+              this.store.recordEvent(jobId, 'job.runtime_reconciled', {
+                taskId: cto.task_id, sessionKey: cto.openclaw_session_key, runId: cto.openclaw_run_id || runtime.runId || null, outcome: 'failure', reason: 'missing required specialist child'
+              }, `${jobId}|job-runtime-reconciled|missing-child`);
+            }
             else if (runtimeStatus === 'done'
               && required.every(child => child && ['completed', 'failed', 'cancelled'].includes(String(child.status).toLowerCase()))) {
               // Failure-only recovery: never bypass successful terminalization.
