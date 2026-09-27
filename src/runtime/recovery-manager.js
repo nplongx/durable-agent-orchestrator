@@ -269,7 +269,7 @@ export class RecoveryManager {
                 role: 'cto', taskId: cto.task_id, sessionKey: cto.openclaw_session_key,
                 retryAt: new Date(retryAt).toISOString(), reason: 'cto_runtime_rate_limit'
               }, `${jobId}|cto-rate-limit|${new Date(retryAt).toISOString()}`);
-              continue;
+              return { staleSessions: [], staleExecutions: [], providerWaiting: true };
             }
             const children = (trace.tasks || []).filter(t => t.parent_task_id === cto.task_id);
             const required = ['architect', 'qa'].map(role => children.find(t => String(t.role).toLowerCase() === role));
