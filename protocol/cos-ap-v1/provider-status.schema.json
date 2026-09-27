@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cos-ap/1/provider-status",
+  "title": "COS Agent Protocol v1 Provider Status",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state"],
+  "properties": {
+    "state": { "enum": ["READY", "IN_USE", "COOLDOWN", "PROBE"] },
+    "provider": { "type": "string" },
+    "account": { "type": "string" },
+    "cooldown_until": { "type": ["string", "null"] }
+  }
+}

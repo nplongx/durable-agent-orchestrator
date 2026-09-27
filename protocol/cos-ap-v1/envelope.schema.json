@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cos-ap/1/envelope",
+  "title": "COS Agent Protocol v1 Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "version", "message_id", "message_type", "job_id", "task_id", "attempt", "sender", "recipient", "created_at", "payload"],
+  "properties": {
+    "protocol": { "const": "cos-ap" },
+    "version": { "const": 1 },
+    "message_id": { "type": "string", "minLength": 1 },
+    "message_type": { "type": "string", "enum": ["job.proposed", "job.approved", "session.spawn", "session.message", "execution.batch", "execution.result", "child.result", "synthesis.request", "synthesis.result", "job.progress", "job.completed", "job.failed", "provider.status"] },
+    "job_id": { "type": "string", "pattern": "^job_[A-Za-z0-9_-]+$" },
+    "task_id": { "type": ["string", "null"] },
+    "attempt": { "type": "integer", "minimum": 1 },
+    "sender": { "type": "string", "minLength": 1 },
+    "recipient": { "type": "string", "minLength": 1 },
+    "correlation_id": { "type": ["string", "null"] },
+    "created_at": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" }
+  }
+}

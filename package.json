@@ -1,0 +1,26 @@
+{
+  "name": "durable-agent-orchestrator",
+  "version": "1.0.0",
+  "description": "Provider-neutral durable orchestration runtime for approval-gated multi-agent work",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test-e2e.js",
+    "test:langgraph": "node test-langgraph-orchestrator.js",
+    "test:protocol": "node test-cos-ap-v1.js",
+    "test:batch": "node test-execution-batch-m2.js",
+    "test:provider-admission": "node test-provider-admission-m3.js",
+    "test:provider-admission-integration": "node test-provider-admission-integration-m3.js",
+    "test:slack-projection": "node test-slack-projection-m4.js",
+    "test:terminalization": "node test-terminalization-m5.js",
+    "test:e2e:v27": "node run-v27-e2e.js",
+    "test:execution-manager": "node test-execution-manager.js",
+    "test:production-guards": "node test-production-guards.js",
+    "test:phase5-recovery": "node test-phase5-recovery.js"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.13",
+    "@langchain/langgraph": "^1.4.18"
+  }
+}

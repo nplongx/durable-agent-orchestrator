@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cos-ap/1/execution-result",
+  "title": "COS Agent Protocol v1 Execution Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["batch_id", "status", "summary", "items"],
+  "properties": {
+    "batch_id": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["completed", "failed", "partial"] },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "passed", "failed"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "items": { "type": "array" }
+  }
+}

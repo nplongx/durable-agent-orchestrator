@@ -1,0 +1,27 @@
+node_modules/
+.env
+.env.*
+!.env.example
+
+# Local durable state / runtime data
+data/*.db
+data/*.db-shm
+data/*.db-wal
+*.log
+
+# Runtime exports and temporary artifacts
+.openclaw/
+/tmp/
+*.tmp
+
+# Local/editor/OS noise
+.DS_Store
+.vscode/
+.idea/
+
+# Historical local backups
+*.bak
+*.bak-*
+*.pre-fsm.bak
+*.phase1-pre
+*.phase5-pre

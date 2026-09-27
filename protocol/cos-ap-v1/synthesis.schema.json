@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cos-ap/1/synthesis",
+  "title": "COS Agent Protocol v1 Synthesis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "evidence_refs"],
+  "properties": {
+    "status": { "enum": ["passed", "failed", "partial"] },
+    "evidence_refs": { "type": "array", "items": { "type": "string" } },
+    "summary": { "type": "string" }
+  }
+}
