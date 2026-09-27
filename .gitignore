@@ -25,3 +25,7 @@ data/*.db-wal
 *.pre-fsm.bak
 *.phase1-pre
 *.phase5-pre
+
+# Local one-off patch helpers
+patch_*.py
+update-server.cjs
