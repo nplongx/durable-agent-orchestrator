@@ -26,7 +26,8 @@ executionManager.cleanupOrphanedArtifacts().then(count => {
 }).catch(error => console.warn(`[Adapter:Execution] artifact cleanup skipped: ${error.message}`));
 const recoveryManager = new RecoveryManager(workflowStore, {
   sessionStaleMs: Math.max(30_000, Number(process.env.RECOVERY_SESSION_STALE_MS) || 5 * 60 * 1000),
-  executionStaleMs: Math.max(10_000, Number(process.env.RECOVERY_EXECUTION_STALE_MS) || 2 * 60 * 1000)
+  executionStaleMs: Math.max(10_000, Number(process.env.RECOVERY_EXECUTION_STALE_MS) || 2 * 60 * 1000),
+  executionManager
 });
 const providerAdmission = new ProviderAdmissionController(workflowStore);
 
@@ -123,7 +124,25 @@ async function executeDurableDeterministicToolCall(toolCall, messages, targetRol
   const command = String(args.command || '').trim();
   if (!/^(?:node|npm|npx|git|python(?:3)?|bash|sh|pnpm|yarn)\b/.test(command)) return null;
   const normalizedCommand = command.replace(/^node\s+--check\s+~\/work\/chatgpt-adapter\//i, 'node --check /home/long/work/chatgpt-adapter/');
-  const task = workflowStore.findDeterministicTask(jobId, { role, command: normalizedCommand });
+  let task = workflowStore.findDeterministicTask(jobId, { role, command: normalizedCommand });
+  if (!task) {
+    // Completion can race the adapter tool turn. If the durable child already
+    // exists but lacks ExecutionManager evidence, select that exact child even
+    // when its OpenClaw status is terminal. Never revive a child that already
+    // has verified durable execution evidence.
+    const trace = workflowStore.getJobTrace(jobId);
+    task = (trace?.tasks || []).find(candidate => {
+      if (String(candidate.role || '').toLowerCase() !== role) return false;
+      const description = String(candidate.description || '');
+      if (!description.includes(normalizedCommand)) return false;
+      if (candidate.execution_status || candidate.execution_session_id) return false;
+      // A native OpenClaw exec result is transport evidence only. It may exist
+      // before ExecutionManager claims the durable task and must not suppress
+      // deterministic recovery. Only ACTUAL EXECUTION EVIDENCE is authoritative.
+      const latest = workflowStore.db.prepare('SELECT content FROM results WHERE task_id = ? ORDER BY created_at DESC LIMIT 1').get(candidate.task_id);
+      return !/\[ACTUAL EXECUTION EVIDENCE\]/i.test(String(latest?.content || ''));
+    }) || null;
+  }
   if (!task) return null;
   const metadata = JSON.parse(task.metadata_json || '{}');
   const taskScope = String(metadata.command || task.description || '').trim();
@@ -143,6 +162,16 @@ async function executeDurableDeterministicToolCall(toolCall, messages, targetRol
     `execution status: ${result.timedOut ? 'timeout' : result.exitCode === 0 ? 'completed' : 'failed'}`,
     '</prompt-data>'
   ].join('\n');
+  // ExecutionManager is the durable execution authority. Preserve its actual
+  // evidence even if OpenClaw already terminalized the child on a race.
+  workflowStore.repairResultEvidence(task.task_id, evidence);
+  if (workflowStore.getTask(task.task_id)?.status === 'failed') {
+    workflowStore.reconcileFailedTaskByRuntime(task.task_id, {
+      content: evidence,
+      runId: task.openclaw_run_id || null,
+      sessionKey: task.openclaw_session_key || null
+    });
+  }
   return { ...result, content: evidence, durableTaskId: task.task_id };
 }
 
@@ -197,7 +226,7 @@ function cleanupOpenClawPluginBuildDirs(maxAgeMs = 120000) {
   } catch (_) {}
 }
 
-function openclawMessageSend({ channel, target, message, replyTo = null }) {
+export function openclawMessageSend({ channel, target, message, replyTo = null }) {
   return new Promise((resolve, reject) => {
     const args = ['message', 'send', '--channel', channel, '--target', target, '--message', message, '--delivery', JSON.stringify({ queuePolicy: 'best_effort' }), '--json'];
     if (replyTo) args.push('--reply-to', replyTo);
@@ -236,7 +265,7 @@ function formatSlackProjection(event) {
   return `[Job ${event.job_id}] ${label} | ${progress}${taskContext}${details ? ` | ${details}` : ''}`;
 }
 
-async function projectWorkflowEvents() {
+export async function projectWorkflowEvents() {
   if (slackProjectionBusy) return;
   slackProjectionBusy = true;
   const events = workflowStore.listUnprojectedEvents(25);
@@ -1774,10 +1803,27 @@ Báo cáo lại đầy đủ kết quả: Chủ đề, Trace luồng dữ liệu
       console.warn(`[Adapter:LifecycleGuard] Blocked sessions_spawn for Job ${durableJob.job_id} state=${durableJob.state}`);
       return null;
     }
+    let spawnArgs = {};
+    try { spawnArgs = typeof toolArgs === 'string' ? JSON.parse(toolArgs) : (toolArgs || {}); } catch (_) {}
+    const role = String(spawnArgs.agentId || spawnArgs.agent_id || '').toLowerCase();
+
+    // Duplicate detection MUST precede provider admission. Otherwise a repeated
+    // native sessions_spawn for an already durable child consumes a provider
+    // lease before the lifecycle guard rejects the duplicate, leaking capacity
+    // and eventually tripping the global cooldown.
+    if (durableJob && role && role !== 'cto') {
+      const trace = workflowStore.getJobTrace(durableJob.job_id);
+      const duplicate = trace?.tasks?.find(t => t.parent_task_id && String(t.role).toLowerCase() === role &&
+        !['failed', 'cancelled'].includes(String(t.status).toLowerCase()) &&
+        /EXECUTION NOW|Durable Job ID|exactly this command|exact command/i.test(t.description || ''));
+      if (duplicate) {
+        console.warn(`[Adapter:LifecycleGuard] Blocked duplicate ${role} sessions_spawn for Job ${durableJob.job_id}; existing task=${duplicate.task_id} status=${duplicate.status}`);
+        return null;
+      }
+    }
+
     if (durableJob) {
       try {
-        const spawnArgs = typeof toolArgs === 'string' ? JSON.parse(toolArgs) : (toolArgs || {});
-        const role = String(spawnArgs.agentId || spawnArgs.agent_id || 'unknown').toLowerCase();
         const admission = admitNativeSpawn({ jobId: durableJob.job_id, taskId: durableJob.active_task_id, role });
         workflowStore.clearProviderWaiting(durableJob.job_id);
         console.log(`[Adapter:ProviderAdmission] admitted sessions_spawn role=${role} job=${durableJob.job_id} provider=${admission.providerId} lease=${admission.leaseId}`);
@@ -1792,21 +1838,6 @@ Báo cáo lại đầy đủ kết quả: Chủ đề, Trace luồng dữ liệu
           };
         }
         throw error;
-      }
-    }
-    if (durableJob) {
-      let spawnArgs = {};
-      try { spawnArgs = typeof toolArgs === 'string' ? JSON.parse(toolArgs) : (toolArgs || {}); } catch (_) {}
-      const role = String(spawnArgs.agentId || spawnArgs.agent_id || '').toLowerCase();
-      if (role && role !== 'cto') {
-        const trace = workflowStore.getJobTrace(durableJob.job_id);
-        const duplicate = trace?.tasks?.find(t => t.parent_task_id && String(t.role).toLowerCase() === role &&
-          !['failed'].includes(String(t.status).toLowerCase()) &&
-          /EXECUTION NOW|Durable Job ID|exactly this command|exact command/i.test(t.description || ''));
-        if (duplicate) {
-          console.warn(`[Adapter:LifecycleGuard] Blocked duplicate ${role} sessions_spawn for Job ${durableJob.job_id}; existing task=${duplicate.task_id} status=${duplicate.status}`);
-          return null;
-        }
       }
     }
   }
@@ -1936,7 +1967,9 @@ Báo cáo lại đầy đủ kết quả: Chủ đề, Trace luồng dữ liệu
 export function recoverSpecialistExecToolCall(text, tools = [], messages = [], targetRole = 'coordinator') {
   if (!['architect', 'qa'].includes(String(targetRole || '').toLowerCase())) return null;
   if (!Array.isArray(tools) || !tools.some(t => (t.function?.name || t.name) === 'exec')) return null;
-  if (messages.some(m => m?.role === 'tool' || (typeof m?.content === 'string' && /tool result|\(no output\)/i.test(m.content)))) return null;
+  // OpenClaw may already have a native exec result in the transcript. That
+  // result is not durable ExecutionManager evidence, so it must not suppress
+  // recovery when the durable child still lacks execution evidence.
   const raw = messages.map(m => typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content || '')).join('\n');
   if (!/\b(?:Subagent Task|execution now|Run immediately)\b/i.test(raw)) return null;
   const match = raw.match(/\bnode\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/[A-Za-z0-9._/-]+/i);

@@ -121,6 +121,17 @@ workflowStore.attachOpenClawRun(jobId, { runId: null, sessionKey: ctoSessionKey 
 assert.equal(workflowStore.getTask(workflowStore.getJob(jobId).active_task_id).openclaw_session_key, ctoSessionKey);
 await runOpenClaw(ctoSessionKey, spawnArgs.task, 180);
 
+// Provider admission can move the SAME approved Job into provider_waiting
+// during CTO/child execution. Preserve the same CTO session and wait for the
+// durable retry point; never create a replacement Job or bypass cooldown.
+let postSpawnState = snapshot(jobId);
+if (postSpawnState.job?.provider_waiting && postSpawnState.job.provider_retry_at) {
+  const waitMs = Math.max(0, new Date(postSpawnState.job.provider_retry_at).getTime() - Date.now()) + 1000;
+  console.warn(`[E2E] provider admission waiting during execution; preserving SAME CTO session until retry_at=${postSpawnState.job.provider_retry_at}`);
+  await new Promise(r => setTimeout(r, waitMs));
+  await runOpenClaw(ctoSessionKey, spawnArgs.task, 180);
+}
+
 let state = await waitFor(jobId,
   s => s.tasks.some(t => t.role === 'architect') || s.tasks.some(t => t.role === 'qa') || ['completed','failed'].includes(s.job?.state),
   'children-created', 180000);
