@@ -261,6 +261,16 @@ export class RecoveryManager {
           && ['completed', 'failed', 'running'].includes(String(cto.status || '').toLowerCase())) {
           try {
             const completion = await this.exportTrajectory(cto.openclaw_session_key, this.trajectoryTimeoutMs);
+            if (/rate[_ -]?limit|too many requests|chưa nhận được phản hồi từ nguồn AI/i.test(String(completion || ''))) {
+              const cooldown = this.store.db.prepare("SELECT MIN(cooldown_until) AS retry_at FROM provider_admission WHERE provider_id <> 'chatgpt:global' AND state='COOLDOWN' AND cooldown_until IS NOT NULL").get();
+              const retryAt = cooldown?.retry_at ? Date.parse(cooldown.retry_at) : Date.now() + 60_000;
+              this.store.setProviderWaiting(jobId, Math.max(0, retryAt - Date.now()), 'CTO runtime hit provider rate limit; preserve same durable session');
+              this.store.recordEvent(jobId, 'provider.waiting', {
+                role: 'cto', taskId: cto.task_id, sessionKey: cto.openclaw_session_key,
+                retryAt: new Date(retryAt).toISOString(), reason: 'cto_runtime_rate_limit'
+              }, `${jobId}|cto-rate-limit|${new Date(retryAt).toISOString()}`);
+              continue;
+            }
             const children = (trace.tasks || []).filter(t => t.parent_task_id === cto.task_id);
             const required = ['architect', 'qa'].map(role => children.find(t => String(t.role).toLowerCase() === role));
             const childEvidenceValid = required.every(child => {
