@@ -52,6 +52,21 @@ function syncProviderAdmissionFromBridge() {
   return providerAdmission.all();
 }
 
+function reconcileBridgeRateLimitForJob(jobId, error) {
+  const states = syncProviderAdmissionFromBridge();
+  const accounts = states.filter(s => s.provider_id !== 'chatgpt:global');
+  const limited = accounts.filter(s => s.state === ProviderStates.COOLDOWN);
+  if (!accounts.length || limited.length !== accounts.length) return null;
+  const retryAfterMs = Math.max(60_000, Math.min(...limited.map(s => s.cooldownRemainingMs || 0).filter(Number.isFinite)) || 0);
+  providerAdmission.markRateLimited('chatgpt:global', 'bridge_all_accounts_rate_limited', retryAfterMs);
+  if (jobId) {
+    workflowStore.setProviderWaiting(jobId, retryAfterMs, error?.message || 'bridge_all_accounts_rate_limited');
+    const leases = workflowStore.db.prepare("SELECT lease_id FROM provider_admission_leases WHERE state='ACTIVE' AND job_id=?").all(jobId);
+    for (const lease of leases) providerAdmission.release(lease.lease_id, { success: false, reason: 'bridge provider rate limit' });
+  }
+  return retryAfterMs;
+}
+
 function admitNativeSpawn({ jobId, taskId, role }) {
   const states = syncProviderAdmissionFromBridge();
   const admission = providerAdmission.admit({
@@ -2839,6 +2854,10 @@ function isImmediateSilentRequest(messages) {
           console.error('[Adapter] Error:', err);
           if (isProviderRateLimitError(err) && err.accountId) {
             providerAdmission.markRateLimited(`chatgpt:account:${err.accountId}`, err.message);
+          }
+          if (isProviderRateLimitError(err)) {
+            const referencedJobId = workflowStore.findJobIdFromMessages(messages);
+            reconcileBridgeRateLimitForJob(referencedJobId, err);
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
