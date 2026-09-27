@@ -413,6 +413,16 @@ export class RecoveryManager {
       this.store.recordEvent(prepared.task.job_id, 'task.retry_failed', { taskId, sessionKey, attempt: prepared.attempt, error: error.message }, `${taskId}|retry-failed|${prepared.attempt}`);
       throw error;
     }
+    // A same-session retry gets a new OpenClaw run id. Persist it against the
+    // new durable attempt so late completion from the previous run cannot
+    // settle the retry, even though both attempts share one session key.
+    const rawText = String(raw || '');
+    const retryRunId = rawText.match(/(?:^|[,{\s])"?runId"?\s*[:=]\s*"?([A-Za-z0-9._:-]+)/i)?.[1] || null;
+    if (retryRunId) {
+      const ts = new Date().toISOString();
+      this.store.db.prepare('UPDATE attempts SET openclaw_run_id = ? WHERE attempt_id = ? AND status = \'started\'').run(retryRunId, prepared.attemptRecord.attempt_id);
+      this.store.db.prepare('UPDATE tasks SET openclaw_run_id = ?, updated_at = ? WHERE task_id = ? AND status = \'running\'').run(retryRunId, ts, taskId);
+    }
     this.store.heartbeatAgentSession(prepared.session.session_id);
     this.store.recordEvent(prepared.task.job_id, 'task.retry_dispatched', { taskId, sessionKey, attempt: prepared.attempt }, `${taskId}|retry-dispatched|${prepared.attempt}`);
     return { ...prepared, raw };
