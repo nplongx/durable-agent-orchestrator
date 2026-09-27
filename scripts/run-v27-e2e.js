@@ -92,7 +92,9 @@ for (let retry = 0; !spawn && retry < 2; retry++) {
   spawn = approvalMessage?.tool_calls?.find(x => x.function?.name === 'sessions_spawn');
 }
 if (!spawn) {
-  const approvalJobId = workflowStore.findJobIdFromMessages(secondMessages);
+  const approvalJobId = workflowStore.findJobIdFromMessages(secondMessages)
+    || workflowStore.db.prepare("SELECT job_id FROM jobs WHERE status='active' AND title LIKE ? ORDER BY created_at DESC LIMIT 1")
+      .get(`%${DIRECTIVE.slice(0, 45)}%`)?.job_id;
   const waitingJob = approvalJobId ? workflowStore.getJob(approvalJobId) : null;
   if (waitingJob?.provider_waiting && waitingJob.provider_retry_at) {
     const waitMs = Math.max(0, new Date(waitingJob.provider_retry_at).getTime() - Date.now()) + 1000;

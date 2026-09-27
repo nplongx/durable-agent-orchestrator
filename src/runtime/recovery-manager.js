@@ -275,10 +275,25 @@ export class RecoveryManager {
             const synthesisValid = childEvidenceValid
               && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/server\.js/i.test(synthesisText)
               && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/test-tool-turn\.js/i.test(synthesisText)
-              && /exit\s+(?:status|code)(?:\/code)?\s*[:=]\s*0/i.test(synthesisText)
-              && /(?:dod|dođ|both required child|cả hai child)/i.test(synthesisText);
+              && /exit\s+(?:status|code)(?:\/code)?\s*[:=]\s*0/i.test(synthesisText);
             if (childEvidenceValid && synthesisValid) {
-              this.store.complete(jobId, completion, 'success');
+              this.store.completeTaskByRuntime(jobId, {
+                runId: cto.openclaw_run_id || runtime.runId || null,
+                sessionKey: cto.openclaw_session_key,
+                content: completion,
+                outcome: 'success'
+              });
+              const reportId = this.store.createReport(jobId, 'executive_summary', completion);
+              const deliveryChannel = 'slack';
+              const deliveryTarget = process.env.SLACK_WAR_ROOM || 'C0C3RJKNKPG';
+              this.store.claimDelivery(jobId, reportId, deliveryChannel, deliveryTarget);
+              this.store.terminalizeJob(jobId, {
+                outcome: 'success',
+                reportId,
+                deliveryChannel,
+                deliveryTarget,
+                content: completion
+              });
               const session = this.store.getSessionByOpenClawKey(cto.openclaw_session_key);
               if (session) this.store.updateAgentSession(session.session_id, { state: 'TERMINATED' });
               this.store.recordEvent(jobId, 'job.runtime_reconciled', {
