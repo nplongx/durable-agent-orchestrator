@@ -60,14 +60,30 @@ The runtime is intentionally split into durable orchestration, execution, provid
 
 ## Repository layout
 
-- `server.js` — HTTP adapter and orchestration boundary.
-- `job-store.js` — SQLite durable state and terminalization guards.
-- `execution-manager.js` — deterministic command execution and evidence capture.
-- `provider-admission.js` — provider/account admission and cooldown control.
-- `recovery-manager.js` — stale runtime reconciliation and safe recovery.
-- `protocol/cos-ap-v1/` — structured machine protocol and schemas.
-- `coordinator-workflow.js` / `langgraph-orchestrator.js` — orchestration logic.
-- `test-*.js` — focused regression and acceptance tests.
+```text
+.
+├── server.js                 # stable HTTP entrypoint
+├── test-tool-turn.js         # stable deterministic QA entrypoint
+├── cdp.js                    # browser transport
+├── coordinator-workflow.js   # orchestration state machine
+├── debate-engine.js          # optional debate workflow
+├── execution-manager.js      # deterministic execution + evidence
+├── job-store.js              # SQLite durable state + terminalization
+├── provider-admission.js     # provider leases / cooldowns / admission
+├── recovery-manager.js       # runtime reconciliation + recovery
+├── session-transport.js      # structured session transport
+├── langgraph-orchestrator.js # optional LangGraph integration
+├── workflow-dashboard.js     # local workflow inspection
+├── protocol/                 # COS-AP v1 machine protocol + schemas
+├── tests/                    # automated regression / acceptance tests
+├── scripts/                  # probes, E2E runners, startup/watchdog helpers
+│   └── tools/                # local patch/debug helpers
+├── docs/                     # architecture and design documentation
+└── archive/backups/          # ignored historical local snapshots
+```
+
+The root keeps only stable runtime entrypoints and core modules so existing absolute
+execution contracts remain valid. Tests and operational helpers are grouped by purpose.
 
 ## Requirements
 
