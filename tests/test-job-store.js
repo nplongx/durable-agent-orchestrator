@@ -7,8 +7,8 @@ const testDb = `/home/long/work/chatgpt-adapter/data/test-workflow-${crypto.rand
 process.env.WORKFLOW_DB = testDb;
 process.env.WORKFLOW_DATA_DIR = path.dirname(testDb);
 
-const { WorkflowStore, conversationKeyFromMessages } = await import('./job-store.js');
-const { parseOpenClawAgentReceipt } = await import('./session-transport.js');
+const { WorkflowStore, conversationKeyFromMessages } = await import('../job-store.js');
+const { parseOpenClawAgentReceipt } = await import('../session-transport.js');
 
 const store = new WorkflowStore();
 const messages = [{ role: 'user', content: 'Triển khai Phase 2 durable workflow.' }];

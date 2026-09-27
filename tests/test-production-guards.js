@@ -40,8 +40,8 @@ process.exit(2);
 `);
 await fsPromises.chmod(fakeOpenClaw, 0o755);
 
-const { WorkflowStore } = await import('./job-store.js');
-const { RecoveryManager } = await import('./recovery-manager.js');
+const { WorkflowStore } = await import('../job-store.js');
+const { RecoveryManager } = await import('../recovery-manager.js');
 const store = new WorkflowStore();
 
 function makeProductionJob(suffix) {

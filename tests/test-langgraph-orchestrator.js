@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { evaluateLangGraph, LangGraphActions } from './langgraph-orchestrator.js';
+import { evaluateLangGraph, LangGraphActions } from '../langgraph-orchestrator.js';
 
 const baseJob = {
   job_id: 'job_poc',

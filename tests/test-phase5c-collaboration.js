@@ -5,7 +5,7 @@ import path from 'node:path';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adapter-phase5c-'));
 process.env.WORKFLOW_DB = path.join(dir, 'workflow.db');
-const { workflowStore } = await import('./job-store.js');
+const { workflowStore } = await import('../job-store.js');
 
 const job = workflowStore.createJob({ conversationKey: 'phase5c', title: 'collaboration graph' });
 workflowStore.dispatch(job.job_id, { role: 'cto', description: 'lead task' });

@@ -1,7 +1,7 @@
 // stress-test-coordinator.js
 // Comprehensive Stress Test for Coordinator State Machine & Multi-Agent Flow
 import assert from 'node:assert';
-import { States, Intents, Actions, IntentClassifier, CoordinatorSessionStateMachine } from './coordinator-workflow.js';
+import { States, Intents, Actions, IntentClassifier, CoordinatorSessionStateMachine } from '../coordinator-workflow.js';
 
 console.log('='.repeat(70));
 console.log('🚀 BẮT ĐẦU STRESS TEST HỆ THỐNG ĐIỀU PHỐI (COORDINATOR MULTI-AGENT WORKFLOW)');

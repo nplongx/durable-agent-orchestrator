@@ -9,8 +9,8 @@ process.env.WORKFLOW_DB = dbPath;
 process.env.WORKFLOW_DATA_DIR = path.dirname(dbPath);
 process.env.EXECUTION_TIMEOUT_MS = '10000';
 
-const { WorkflowStore } = await import('./job-store.js');
-const { ExecutionManager } = await import('./execution-manager.js');
+const { WorkflowStore } = await import('../job-store.js');
+const { ExecutionManager } = await import('../execution-manager.js');
 const store = new WorkflowStore();
 const manager = new ExecutionManager(store, { timeoutMs: 10000 });
 

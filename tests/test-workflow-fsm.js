@@ -1,6 +1,6 @@
 // test-workflow-fsm.js
 import assert from 'node:assert';
-import { States, Intents, Actions, IntentClassifier, CoordinatorSessionStateMachine } from './coordinator-workflow.js';
+import { States, Intents, Actions, IntentClassifier, CoordinatorSessionStateMachine } from '../coordinator-workflow.js';
 
 console.log('====================================================');
 console.log('🧪 BẮT ĐẦU TEST FSM & STRATEGY ENGINE (COORDINATOR WORKFLOW)');

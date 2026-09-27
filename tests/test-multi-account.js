@@ -1,6 +1,6 @@
 // test-multi-account.js — Test suite for Multi-Account Rotation, Cooldown, and Circuit Breaker
 import assert from 'node:assert';
-import { MultiAccountChatGPTBridge } from './cdp.js';
+import { MultiAccountChatGPTBridge } from '../cdp.js';
 
 console.log('========================================================');
 console.log('🧪 BẮT ĐẦU KIỂM THỬ: MULTI-ACCOUNT ROTATION & COOLDOWN & CIRCUIT BREAKER');

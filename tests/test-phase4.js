@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 
 const dbPath = `/home/long/work/chatgpt-adapter/data/test-phase4-${crypto.randomUUID()}.db`;
 process.env.WORKFLOW_DB = dbPath;
-const { WorkflowStore } = await import('./job-store.js');
+const { WorkflowStore } = await import('../job-store.js');
 const store = new WorkflowStore();
 
 const job = store.createJob({ conversationKey: 'obs', title: 'observability test' });

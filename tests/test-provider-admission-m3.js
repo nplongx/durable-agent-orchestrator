@@ -6,8 +6,8 @@ for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) fs.rmSync(p, { force
 process.env.WORKFLOW_DB = dbPath;
 process.env.WORKFLOW_DATA_DIR = '/tmp';
 
-const { WorkflowStore } = await import('./job-store.js');
-const { ProviderAdmissionController, ProviderStates } = await import('./provider-admission.js');
+const { WorkflowStore } = await import('../job-store.js');
+const { ProviderAdmissionController, ProviderStates } = await import('../provider-admission.js');
 const store = new WorkflowStore();
 const admission = new ProviderAdmissionController(store, { hardBlockMs: 60_000, leaseMs: 30_000 });
 const providers = ['chatgpt:account:1', 'chatgpt:account:2', 'chatgpt:account:3', 'chatgpt:account:4'];

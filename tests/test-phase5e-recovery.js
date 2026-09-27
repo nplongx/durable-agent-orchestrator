@@ -38,8 +38,8 @@ process.env.WORKFLOW_DB = dbPath;
 process.env.WORKFLOW_DATA_DIR = dir;
 process.env.OPENCLAW_BIN = fakeOpenClaw;
 
-const { WorkflowStore } = await import('./job-store.js');
-const { RecoveryManager } = await import('./recovery-manager.js');
+const { WorkflowStore } = await import('../job-store.js');
+const { RecoveryManager } = await import('../recovery-manager.js');
 const store = new WorkflowStore();
 
 function makeFailedChild({ sessionKey, runId, title }) {

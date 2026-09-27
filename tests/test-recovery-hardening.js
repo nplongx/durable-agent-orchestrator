@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { workflowStore } from './job-store.js';
-import { RecoveryManager, hasVerifiedSuccessfulRuntimeEvidence } from './recovery-manager.js';
+import { workflowStore } from '../job-store.js';
+import { RecoveryManager, hasVerifiedSuccessfulRuntimeEvidence } from '../recovery-manager.js';
 
 const store = workflowStore;
 if (!process.env.WORKFLOW_DB) {

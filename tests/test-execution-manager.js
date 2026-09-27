@@ -7,8 +7,8 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-phase4-'));
 process.env.WORKFLOW_DATA_DIR = dir;
 process.env.WORKFLOW_DB = path.join(dir, 'workflow.db');
 
-const { WorkflowStore } = await import('./job-store.js');
-const { ExecutionManager } = await import('./execution-manager.js');
+const { WorkflowStore } = await import('../job-store.js');
+const { ExecutionManager } = await import('../execution-manager.js');
 
 const store = new WorkflowStore();
 const job = store.createJob({ conversationKey: 'phase4-test', title: 'Phase 4 deterministic execution' });

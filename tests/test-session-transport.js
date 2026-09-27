@@ -1,5 +1,5 @@
 import assert from 'node:assert';
-import { parseOpenClawAgentReceipt, classifyTransportError } from './session-transport.js';
+import { parseOpenClawAgentReceipt, classifyTransportError } from '../session-transport.js';
 
 const receipt = parseOpenClawAgentReceipt(JSON.stringify({ runId: 'run-1', sessionKey: 'agent:architect:subagent:x', result: 'done' }));
 assert.strictEqual(receipt.status, 'OK');

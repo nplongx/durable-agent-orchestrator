@@ -15,7 +15,7 @@ const {
   validateExecutionBatch,
   validateExecutionResult,
   readSchema
-} = await import('./protocol/cos-ap-v1/index.js');
+} = await import('../protocol/cos-ap-v1/index.js');
 
 const batch = {
   batch_id: 'batch_test',
@@ -55,8 +55,8 @@ for (const schema of ['envelope', 'execution-batch', 'execution-result', 'child-
   assert.equal(parsed.$id, `cos-ap/1/${schema}`);
 }
 
-const { WorkflowStore } = await import('./job-store.js');
-const { buildDurableWireEnvelope } = await import('./session-transport.js');
+const { WorkflowStore } = await import('../job-store.js');
+const { buildDurableWireEnvelope } = await import('../session-transport.js');
 const store = new WorkflowStore();
 const job = store.getOrCreateJob({ conversationKey: 'cos-ap-test', title: 'protocol test' });
 store.transition(job.job_id, 'PROPOSED');

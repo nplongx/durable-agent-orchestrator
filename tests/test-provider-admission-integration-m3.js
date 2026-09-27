@@ -6,8 +6,8 @@ for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) fs.rmSync(p, { force
 process.env.WORKFLOW_DB = dbPath;
 process.env.WORKFLOW_DATA_DIR = '/tmp';
 
-const { WorkflowStore } = await import('./job-store.js');
-const { ProviderAdmissionController } = await import('./provider-admission.js');
+const { WorkflowStore } = await import('../job-store.js');
+const { ProviderAdmissionController } = await import('../provider-admission.js');
 const store = new WorkflowStore();
 const admission = new ProviderAdmissionController(store, { hardBlockMs: 60_000, leaseMs: 30_000 });
 const job = store.createJob({ conversationKey: `m3-int-${process.pid}`, title: 'M3 integration' });

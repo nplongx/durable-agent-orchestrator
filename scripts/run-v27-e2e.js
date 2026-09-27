@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { workflowStore } from './job-store.js';
-import { RecoveryManager } from './recovery-manager.js';
+import { workflowStore } from '../job-store.js';
+import { RecoveryManager } from '../recovery-manager.js';
 
 const execFileAsync = promisify(execFile);
 const ADAPTER_URL = 'http://127.0.0.1:8318/v1/chat/completions';

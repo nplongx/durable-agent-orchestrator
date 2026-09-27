@@ -6,7 +6,7 @@ for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) fs.rmSync(p, { force
 process.env.WORKFLOW_DB = dbPath;
 process.env.WORKFLOW_DATA_DIR = '/tmp';
 
-const { WorkflowStore } = await import('./job-store.js');
+const { WorkflowStore } = await import('../job-store.js');
 const store = new WorkflowStore();
 const job = store.createJob({ conversationKey: `m4-${process.pid}`, title: 'M4 Slack projection' });
 store.dispatch(job.job_id, { role: 'cto', description: 'M4 projection test' });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ChatGPTBrowserBridge, TabWorker } from './cdp.js';
+import { ChatGPTBrowserBridge, TabWorker } from '../cdp.js';
 
 test('each browser tab is a serialized execution lane', async () => {
   const bridge = new ChatGPTBrowserBridge({ singleTabMode: false });

@@ -1,7 +1,7 @@
 // test-coordinator-logic.js
 // Independent unit tests verifying Coordinator FSM, Intent Strategies, and Anti-Spam protection
 import assert from 'node:assert';
-import { States, Intents, Actions, IntentClassifier, CoordinatorSessionStateMachine } from './coordinator-workflow.js';
+import { States, Intents, Actions, IntentClassifier, CoordinatorSessionStateMachine } from '../coordinator-workflow.js';
 
 console.log('='.repeat(70));
 console.log('🧪 BẮT ĐẦU TEST LOGIC COORDINATOR FSM & PHÂN BIỆT NGỮ NGHĨA');
