@@ -62,32 +62,53 @@ async function runTests() {
   assert.strictEqual(status.accounts.length, 4, 'Danh sách accounts phải có 4 phần tử');
   console.log('✅ TEST 1 ĐẠT: Khởi tạo thành công 4 accounts trong Pool!');
 
-  console.log('\n--- TEST 2: Cooldown Pacing & Round-Robin Rotation ---');
+  console.log('\n--- TEST 2: Account-Level Serialization & Control-Plane Pacing ---');
   // Request 1 -> Account 1
   const t0 = Date.now();
   const res1 = await pool.ask('Yêu cầu 1');
   assert(res1.includes('Account 1'), 'Yêu cầu 1 phải vào Account 1');
   console.log(`✓ Request 1 xử lý bởi: ${res1.split(']')[0]}]`);
 
-  // Request 2 -> Account 1 is in 500ms cooldown, Account 2 is cooled down (0ms wait!)
+  // Control-plane traffic stays pinned to Account 1, but is serialized instead
+  // of creating concurrent requests on the same ChatGPT account.
   const res2 = await pool.ask('Yêu cầu 2');
-  assert(res2.includes('Account 2'), 'Yêu cầu 2 phải chuyển sang Account 2 do Account 1 đang cooldown');
-  console.log(`✓ Request 2 xử lý bởi: ${res2.split(']')[0]}] (0 wait time!)`);
+  assert(res2.includes('Account 1'), 'Control-plane request 2 phải chờ Account 1 thay vì chạy đồng thời');
+  console.log(`✓ Request 2 xử lý bởi: ${res2.split(']')[0]}] (đã serialize theo account)`);
 
-  // Request 3 -> Account 3
-  const res3 = await pool.ask('Yêu cầu 3');
-  assert(res3.includes('Account 3'), 'Yêu cầu 3 phải chuyển sang Account 3');
-  console.log(`✓ Request 3 xử lý bởi: ${res3.split(']')[0]}]`);
+  // Specialist traffic can still use independent healthy accounts.
+  const res3 = await pool.ask('Yêu cầu 3', null, 180000, 'qa');
+  assert(res3.includes('Account 2'), 'Specialist request phải tận dụng account độc lập khi Account 1 đang pacing');
+  console.log(`✓ QA request xử lý bởi: ${res3.split(']')[0]}]`);
 
-  // Request 4 -> Account 4
+  // Request 4 -> control-plane stays on Account 1.
   const res4 = await pool.ask('Yêu cầu 4');
-  assert(res4.includes('Account 4'), 'Yêu cầu 4 phải chuyển sang Account 4');
+  assert(res4.includes('Account 1'), 'Control-plane request vẫn phải về Account 1');
   console.log(`✓ Request 4 xử lý bởi: ${res4.split(']')[0]}]`);
 
   const elapsed = Date.now() - t0;
-  console.log(`⏱️ Thời gian xử lý 4 requests liên tục qua 4 accounts: ${elapsed}ms (Không bị nghẽn cooldown!)`);
-  assert(elapsed < 400, 'Xoay vòng 4 accounts không phải chờ cooldown');
-  console.log('✅ TEST 2 ĐẠT: Xoay vòng 4 tài khoản mượt mà, triệt tiêu thời gian chờ cooldown!');
+  console.log(`⏱️ Chuỗi control-plane serialize: ${elapsed}ms`);
+  assert(elapsed >= 500, 'Control-plane phải tôn trọng pacing cooldown');
+  console.log('✅ TEST 2 ĐẠT: Account-level serialization + control-plane pacing hoạt động!');
+
+  console.log('\n--- TEST 2B: Concurrent requests không được cùng chiếm một account ---');
+  const concurrentPool = new TestableMultiAccountBridge({ cooldownMs: 1 });
+  const seen = [];
+  for (const acc of concurrentPool.accounts) {
+    const original = acc.bridge.ask.bind(acc.bridge);
+    acc.bridge.ask = async (...args) => {
+      seen.push({ account: acc.id, active: acc.activeRequests, reserved: acc.reservedRequests });
+      await new Promise(resolve => setTimeout(resolve, 30));
+      return original(...args);
+    };
+  }
+  await Promise.all([
+    concurrentPool.ask('parallel-a', null, 180000, 'qa'),
+    concurrentPool.ask('parallel-b', null, 180000, 'qa'),
+    concurrentPool.ask('parallel-c', null, 180000, 'qa')
+  ]);
+  assert(seen.every(x => x.active <= 1), 'Không được có account nào có >1 active request');
+  console.log(`✓ Concurrent requests observed: ${seen.map(x => `A${x.account}:active=${x.active}`).join(', ')}`);
+  console.log('✅ TEST 2B ĐẠT: Không còn selection race gây concurrent burst trên cùng account!');
 
   console.log('\n--- TEST 3: Tự động Failover khi Account 1 bị Rate Limit ---');
   // Create a pool where Account 1 is rate limited

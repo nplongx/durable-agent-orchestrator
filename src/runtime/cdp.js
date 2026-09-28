@@ -1363,7 +1363,15 @@ export class MultiAccountChatGPTBridge {
   constructor(options = {}) {
     this.cdpHost = options.cdpHost || '127.0.0.1';
     this.cooldownMs = options.cooldownMs !== undefined ? options.cooldownMs : 10000; // 10s pacing cooldown
-    this.rateLimitCooldownMs = options.rateLimitCooldownMs || (20 * 60 * 1000); // 20m if hard blocked
+    this.rateLimitCooldownMs = options.rateLimitCooldownMs || (3 * 60 * 1000); // ChatGPT UI says 2-3m for burst throttles
+    this.rateLimitMaxCooldownMs = options.rateLimitMaxCooldownMs || (20 * 60 * 1000);
+    this.rateLimitJitterRatio = Math.min(0.25, Math.max(0, Number(options.rateLimitJitterRatio) || 0.10));
+    // ChatGPT web applies account/session-level burst protection. Do not rely on
+    // the per-role tab model for admission: CTO + Architect + QA can otherwise
+    // all observe activeRequests=0 during the same async selection window.
+    // One in-flight model request per account is the safe default; parallelism
+    // comes from genuinely independent account profiles.
+    this.maxConcurrentRequestsPerAccount = Math.max(1, Number(options.maxConcurrentRequestsPerAccount) || 1);
     this.singleTabMode = options.singleTabMode !== undefined ? options.singleTabMode : true;
 
     const defaultConfigs = [
@@ -1390,8 +1398,10 @@ export class MultiAccountChatGPTBridge {
       rateLimitedUntil: 0,
       lastCompletedAt: 0,
       activeRequests: 0,
+      reservedRequests: 0,
       totalRequests: 0,
-      failedAttempts: 0
+      failedAttempts: 0,
+      rateLimitStreak: 0
     }));
 
     this.rrIndex = 0;
@@ -1442,6 +1452,17 @@ export class MultiAccountChatGPTBridge {
     console.log('[AccountPool] All account rate limits and cooldowns have been manually reset.');
   }
 
+  restoreRateLimits(providerStates = []) {
+    const byAccount = new Map((providerStates || []).map(s => [String(s.provider_id), s]));
+    for (const acc of this.accounts) {
+      const state = byAccount.get(`chatgpt:account:${acc.id}`);
+      const until = state?.cooldown_until ? Date.parse(state.cooldown_until) : 0;
+      if (Number.isFinite(until) && until > Date.now()) {
+        acc.rateLimitedUntil = Math.max(acc.rateLimitedUntil, until);
+      }
+    }
+  }
+
   getStatus() {
     return {
       totalAccounts: this.accounts.length,
@@ -1460,6 +1481,8 @@ export class MultiAccountChatGPTBridge {
           isCooledDown: cooldownRemainingMs === 0,
           cooldownRemainingMs,
           activeRequests: acc.activeRequests,
+          reservedRequests: acc.reservedRequests,
+          effectiveLoad: acc.activeRequests + acc.reservedRequests,
           totalRequests: acc.totalRequests,
           bridgeStatus: acc.bridge.getStatus()
         };
@@ -1499,82 +1522,100 @@ export class MultiAccountChatGPTBridge {
   }
 
   async pickAccount(priority = 2, role = null) {
-    const candidates = await this.getAvailableAccounts(role);
+    // Selection itself contains awaits (CDP probes). Reserve the chosen slot
+    // before any further await so concurrent callers cannot select the same
+    // account based on the same stale activeRequests value.
+    for (;;) {
+      const candidates = await this.getAvailableAccounts(role);
 
-    if (candidates.length === 0) {
-      const rateLimited = this.accounts.filter(a => Date.now() < a.rateLimitedUntil);
-      if (rateLimited.length > 0) {
-        let minUntil = Infinity;
-        let earliestAcc = null;
-        for (const a of rateLimited) {
-          if (a.rateLimitedUntil < minUntil) {
-            minUntil = a.rateLimitedUntil;
-            earliestAcc = a;
+      if (candidates.length === 0) {
+        const rateLimited = this.accounts.filter(a => Date.now() < a.rateLimitedUntil);
+        if (rateLimited.length > 0) {
+          let minUntil = Infinity;
+          let earliestAcc = null;
+          for (const a of rateLimited) {
+            if (a.rateLimitedUntil < minUntil) {
+              minUntil = a.rateLimitedUntil;
+              earliestAcc = a;
+            }
           }
+          const waitMinutes = Math.ceil((minUntil - Date.now()) / 60000);
+          throw new Error(`⚠️ [ChatGPT Bridge] Toàn bộ ${rateLimited.length} tài khoản ChatGPT đang chạy đều bị Rate Limit (rate_limit_hard_block). Tài khoản sớm nhất (${earliestAcc.name}) sẽ phục hồi sau ~${waitMinutes} phút.`);
         }
-        const waitMinutes = Math.ceil((minUntil - Date.now()) / 60000);
-        throw new Error(`⚠️ [ChatGPT Bridge] Toàn bộ ${rateLimited.length} tài khoản ChatGPT đang chạy đều bị Rate Limit (rate_limit_hard_block). Tài khoản sớm nhất (${earliestAcc.name}) sẽ phục hồi sau ~${waitMinutes} phút.`);
+        return this.accounts[0];
       }
-      return this.accounts[0];
-    }
 
-    const now = Date.now();
-    // Prefer already running accounts
-    const runningCandidates = candidates.filter(c => c.isRunning);
-    const pool = runningCandidates.length > 0 ? runningCandidates : candidates;
+      const now = Date.now();
+      // Prefer already running accounts
+      const runningCandidates = candidates.filter(c => c.isRunning);
+      const pool = runningCandidates.length > 0 ? runningCandidates : candidates;
+      const freePool = pool.filter(c => (c.acc.activeRequests + c.acc.reservedRequests) < this.maxConcurrentRequestsPerAccount);
 
-    // Control-plane lanes stay on the primary account. Waiting for its
-    // normal pacing cooldown is safer than switching browser profile and
-    // inheriting a different ChatGPT composer/conversation state.
-    if (this.normalizeRole(role) === 'coordinator' || this.normalizeRole(role) === 'cto') {
-      const primary = pool.find(c => c.acc.id === 1 && c.acc.activeRequests === 0);
-      if (primary) {
-        const remainingWaitMs = Math.max(0, this.cooldownMs - (now - primary.acc.lastCompletedAt));
-        if (remainingWaitMs > 0) {
-          console.log(`[AccountPool] Control-plane pacing: waiting ${remainingWaitMs}ms on Account 1 for role '${role}'.`);
-          await new Promise(r => setTimeout(r, remainingWaitMs));
+      // No account has a free model slot. Backpressure instead of launching a
+      // concurrent request that can trigger ChatGPT's burst protection.
+      if (freePool.length === 0) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        continue;
+      }
+
+      // Control-plane lanes stay on the primary account. Waiting for its
+      // normal pacing cooldown is safer than switching browser profile and
+      // inheriting a different ChatGPT composer/conversation state.
+      if (this.normalizeRole(role) === 'coordinator' || this.normalizeRole(role) === 'cto') {
+        const primary = freePool.find(c => c.acc.id === 1);
+        if (primary) {
+          primary.acc.reservedRequests++;
+          const remainingWaitMs = Math.max(0, this.cooldownMs - (now - primary.acc.lastCompletedAt));
+          if (remainingWaitMs > 0) {
+            console.log(`[AccountPool] Control-plane pacing: waiting ${remainingWaitMs}ms on Account 1 for role '${role}'.`);
+            await new Promise(r => setTimeout(r, remainingWaitMs));
+          }
+          return primary.acc;
         }
-        return primary.acc;
-      }
-    }
-
-    // Check cooled down accounts in pool
-    const cooledDown = pool.filter(c => (now - c.acc.lastCompletedAt >= this.cooldownMs));
-
-    if (cooledDown.length > 0) {
-      // Coordinator/CTO are control-plane lanes. Prefer the primary account when
-      // idle; spreading these roles across stale secondary browser profiles adds
-      // avoidable composer-state variance. Specialist throughput still uses the
-      // normal LRU distribution.
-      if ((this.normalizeRole(role) === 'coordinator' || this.normalizeRole(role) === 'cto')) {
-        const primary = cooledDown.find(c => c.acc.id === 1 && c.acc.activeRequests === 0);
-        if (primary) return primary.acc;
-      }
-      // Sort by activeRequests asc, then by lastCompletedAt asc (Round Robin / LRU)
-      cooledDown.sort((a, b) => {
-        if (a.acc.activeRequests !== b.acc.activeRequests) {
-          return a.acc.activeRequests - b.acc.activeRequests;
+        // If the primary account is absent from the candidate pool because it
+        // is rate-limited/unavailable, fail over to a genuinely healthy account.
+        // If it is present but busy, freePool would be empty and the backpressure
+        // branch above waits instead of creating concurrent control-plane work.
+        if (!pool.some(c => c.acc.id === 1)) {
+          freePool[0].acc.reservedRequests++;
+          return freePool[0].acc;
         }
-        return a.acc.lastCompletedAt - b.acc.lastCompletedAt;
+        await new Promise(resolve => setTimeout(resolve, 250));
+        continue;
+      }
+
+      // Check cooled down accounts in pool
+      const cooledDown = freePool.filter(c => (now - c.acc.lastCompletedAt >= this.cooldownMs));
+
+      if (cooledDown.length > 0) {
+        cooledDown.sort((a, b) => {
+          const loadA = a.acc.activeRequests + a.acc.reservedRequests;
+          const loadB = b.acc.activeRequests + b.acc.reservedRequests;
+          if (loadA !== loadB) return loadA - loadB;
+          return a.acc.lastCompletedAt - b.acc.lastCompletedAt;
+        });
+        cooledDown[0].acc.reservedRequests++;
+        return cooledDown[0].acc;
+      }
+
+      // All free slots are inside the normal pacing cooldown. Reserve the
+      // earliest one and wait; reservation prevents another caller from
+      // selecting it during this wait.
+      freePool.sort((a, b) => {
+        const remA = Math.max(0, this.cooldownMs - (now - a.acc.lastCompletedAt));
+        const remB = Math.max(0, this.cooldownMs - (now - b.acc.lastCompletedAt));
+        return remA - remB;
       });
-      return cooledDown[0].acc;
-    }
 
-    // All available accounts in pool are in cooldown!
-    // Pick the one that will finish cooldown earliest
-    pool.sort((a, b) => {
-      const remA = Math.max(0, this.cooldownMs - (now - a.acc.lastCompletedAt));
-      const remB = Math.max(0, this.cooldownMs - (now - b.acc.lastCompletedAt));
-      return remA - remB;
-    });
-
-    const chosen = pool[0].acc;
-    const remainingWaitMs = Math.max(0, this.cooldownMs - (now - chosen.lastCompletedAt));
-    if (remainingWaitMs > 0) {
-      console.log(`[AccountPool] ⏳ Pacing Cooldown: Đang chờ ${remainingWaitMs}ms trên ${chosen.name} để chống burst rate limit...`);
-      await new Promise(r => setTimeout(r, remainingWaitMs));
+      const chosen = freePool[0].acc;
+      chosen.reservedRequests++;
+      const remainingWaitMs = Math.max(0, this.cooldownMs - (now - chosen.lastCompletedAt));
+      if (remainingWaitMs > 0) {
+        console.log(`[AccountPool] ⏳ Pacing Cooldown: Đang chờ ${remainingWaitMs}ms trên ${chosen.name} để chống burst rate limit...`);
+        await new Promise(r => setTimeout(r, remainingWaitMs));
+      }
+      return chosen;
     }
-    return chosen;
   }
 
   async ask(prompt, onChunk = null, timeoutMs = 180000, role = 'coordinator', priority = null) {
@@ -1590,6 +1631,7 @@ export class MultiAccountChatGPTBridge {
       }
 
       console.log(`[AccountPool] Routing request for role '${role}' to ${chosenAcc.name} (Port ${chosenAcc.port}, Active: ${chosenAcc.activeRequests}, Attempt: ${attempt + 1}/${maxRetries})...`);
+      chosenAcc.reservedRequests = Math.max(0, chosenAcc.reservedRequests - 1);
       chosenAcc.activeRequests++;
       chosenAcc.totalRequests++;
 
@@ -1597,6 +1639,7 @@ export class MultiAccountChatGPTBridge {
         const result = await chosenAcc.bridge.ask(prompt, onChunk, timeoutMs, role, priority);
         chosenAcc.lastCompletedAt = Date.now();
         chosenAcc.failedAttempts = 0;
+        chosenAcc.rateLimitStreak = 0;
         return result;
       } catch (err) {
         lastError = err;
@@ -1610,8 +1653,24 @@ export class MultiAccountChatGPTBridge {
           || err?.constructor?.name === 'ErrorEvent';
 
         if (isRateLimit) {
-          chosenAcc.rateLimitedUntil = Date.now() + this.rateLimitCooldownMs;
-          console.warn(`[AccountPool] ⚠️ ${chosenAcc.name} (Port ${chosenAcc.port}) bị Rate Limit! Đánh dấu cooldown ${this.rateLimitCooldownMs / 60000} phút. Đang tự động chuyển sang tài khoản khác...`);
+          chosenAcc.rateLimitStreak = Math.min(8, (chosenAcc.rateLimitStreak || 0) + 1);
+          const text = String(errMsg);
+          const minuteMatches = [...text.matchAll(/(\d+)\s*(?:-|–|to)\s*(\d+)\s*(?:phút|minutes?|mins?)/ig)];
+          const singleMinuteMatches = [...text.matchAll(/(\d+)\s*(?:phút|minutes?|mins?)/ig)];
+          const observedWaitMs = minuteMatches.length
+            ? Math.max(...minuteMatches.map(m => Number(m[2]) * 60_000))
+            : singleMinuteMatches.length
+              ? Math.max(...singleMinuteMatches.map(m => Number(m[1]) * 60_000))
+              : 0;
+          const exponentialMs = Math.min(
+            this.rateLimitMaxCooldownMs,
+            Math.max(this.rateLimitCooldownMs, this.rateLimitCooldownMs * (2 ** (chosenAcc.rateLimitStreak - 1)))
+          );
+          const baseMs = Math.max(observedWaitMs, exponentialMs);
+          const jitterMs = Math.round(baseMs * this.rateLimitJitterRatio * Math.random());
+          const cooldownMs = Math.min(this.rateLimitMaxCooldownMs, baseMs + jitterMs);
+          chosenAcc.rateLimitedUntil = Date.now() + cooldownMs;
+          console.warn(`[AccountPool] ⚠️ ${chosenAcc.name} (Port ${chosenAcc.port}) bị Rate Limit! streak=${chosenAcc.rateLimitStreak}, cooldown=${Math.ceil(cooldownMs / 1000)}s. Không retry nóng.`);
 
           // Check if ALL accounts in pool are now rate limited
           const allLimited = this.accounts.every(a => Date.now() < a.rateLimitedUntil);

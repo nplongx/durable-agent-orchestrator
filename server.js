@@ -42,11 +42,18 @@ function syncProviderAdmissionFromBridge() {
   const limitedAccounts = (status.accounts || []).filter(account => account.isRateLimited);
   if (limitedAccounts.length === (status.accounts || []).length && limitedAccounts.length > 0) {
     const remaining = Math.min(...limitedAccounts.map(account => Number(account.rateLimitRemainingMs) || 0));
-    providerAdmission.markRateLimited('chatgpt:global', 'all_accounts_rate_limited', Math.max(60_000, remaining));
+    const existing = providerAdmission.status('chatgpt:global');
+    if (!(existing?.state === ProviderStates.COOLDOWN && existing.cooldownRemainingMs > 0)) {
+      providerAdmission.markRateLimited('chatgpt:global', 'all_accounts_rate_limited', Math.max(60_000, remaining));
+    }
   }
   for (const account of status.accounts || []) {
     if (account.isRateLimited) {
-      providerAdmission.markRateLimited(`chatgpt:account:${account.id}`, 'bridge_rate_limit', Math.max(60_000, account.rateLimitRemainingMs || 0));
+      const providerId = `chatgpt:account:${account.id}`;
+      const existing = providerAdmission.status(providerId);
+      if (!(existing?.state === ProviderStates.COOLDOWN && existing.cooldownRemainingMs > 0)) {
+        providerAdmission.markRateLimited(providerId, 'bridge_rate_limit', Math.max(60_000, account.rateLimitRemainingMs || 0));
+      }
     }
   }
   return providerAdmission.all();
@@ -351,9 +358,13 @@ const BRIDGE_ASK_TIMEOUT_MS = Number(process.env.BRIDGE_ASK_TIMEOUT_MS) || 30000
 
 const bridge = new MultiAccountChatGPTBridge({
   cdpHost: CDP_HOST,
-  // One tab = one serialized execution lane. Different lanes can run in parallel.
+  // Account-level admission serializes model requests per browser account.
+  // Parallelism is only allowed across genuinely independent account profiles.
   singleTabMode: process.env.SINGLE_TAB_MODE === 'true',
   cooldownMs: parseInt(process.env.COOLDOWN_MS || '10000', 10), // 10s pacing cooldown
+  maxConcurrentRequestsPerAccount: parseInt(process.env.MAX_CONCURRENT_REQUESTS_PER_ACCOUNT || '1', 10),
+  rateLimitCooldownMs: parseInt(process.env.RATE_LIMIT_COOLDOWN_MS || String(3 * 60 * 1000), 10),
+  rateLimitMaxCooldownMs: parseInt(process.env.RATE_LIMIT_MAX_COOLDOWN_MS || String(20 * 60 * 1000), 10),
   accounts: [
     { id: 1, name: 'Account 1', port: 9021, dataDir: '/home/long/.config/google-chrome-chatgpt' },
     { id: 2, name: 'Account 2', port: 9022, dataDir: '/home/long/.config/google-chrome-chatgpt-2' },
@@ -361,6 +372,11 @@ const bridge = new MultiAccountChatGPTBridge({
     { id: 4, name: 'Account 4', port: 9024, dataDir: '/home/long/.config/google-chrome-chatgpt-4' }
   ]
 });
+
+// Rate-limit state must survive an adapter restart. Otherwise a restart during
+// an active ChatGPT block would immediately forget the cooldown and resend the
+// request, creating exactly the retry storm we are trying to prevent.
+bridge.restoreRateLimits(providerAdmission.all());
 
 function cleanMessageContent(content) {
   if (!content) return '';
@@ -2683,7 +2699,7 @@ function isImmediateSilentRequest(messages) {
         } catch (err) {
           console.error('[Adapter] Stream error:', err);
           if (isProviderRateLimitError(err) && err.accountId) {
-            providerAdmission.markRateLimited(`chatgpt:account:${err.accountId}`, err.message);
+            syncProviderAdmissionFromBridge();
           }
           const errorMsg = '⚠️ Xin lỗi, hệ thống chưa nhận được phản hồi từ nguồn AI trong thời gian cho phép. Vui lòng thử lại ạ.';
           const fallbackChunk = {
@@ -2868,7 +2884,7 @@ function isImmediateSilentRequest(messages) {
         } catch (err) {
           console.error('[Adapter] Error:', err);
           if (isProviderRateLimitError(err) && err.accountId) {
-            providerAdmission.markRateLimited(`chatgpt:account:${err.accountId}`, err.message);
+            syncProviderAdmissionFromBridge();
           }
           if (isProviderRateLimitError(err)) {
             const referencedJobId = workflowStore.findJobIdFromMessages(body.messages || []);
