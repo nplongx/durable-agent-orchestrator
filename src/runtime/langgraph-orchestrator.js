@@ -140,8 +140,10 @@ export async function evaluateLangGraph({ job, tasks = [], results = [], runtime
       const message = String(error?.message || error);
       const waitMatch = message.match(/PROVIDER_UNAVAILABLE:.*?retry after\s+(\d+)s/i);
       if (waitMatch) {
-        const resumeAfter = new Date(Date.now() + Number(waitMatch[1]) * 1000).toISOString();
+        const retryAfterMs = Number(waitMatch[1]) * 1000;
+        const resumeAfter = new Date(Date.now() + retryAfterMs).toISOString();
         store.setWorkflowRuntimeState(job.job_id, phase, { resumeAfter, lastError: message });
+        store.setProviderWaiting?.(job.job_id, retryAfterMs, message);
       }
       return { ...decision, action: LangGraphActions.BLOCK, reason: `child assignment failed: ${error.message}` };
     }

@@ -25,5 +25,31 @@ const event = store.db.prepare("SELECT type,payload_json FROM events WHERE event
 assert.equal(event.type, 'provider.waiting');
 assert.match(event.payload_json, /retryAfterMs/);
 
+store.setWorkflowRuntimeState(job.job_id, 'ASSIGN_CHILDREN', {
+  resumeAfter: new Date(Date.now() + 60_000).toISOString(),
+  lastError: 'provider unavailable'
+});
+store.setProviderWaiting(job.job_id, 60_000, 'provider unavailable');
+const waitingState = store.getWorkflowRuntimeState(job.job_id);
+assert.ok(Date.parse(waitingState.resume_after) > Date.now());
+assert.equal(store.getJob(job.job_id).provider_waiting, 1);
+store.clearProviderWaiting(job.job_id);
+assert.equal(store.getJob(job.job_id).provider_waiting, 0);
+assert.equal(store.getWorkflowRuntimeState(job.job_id).resume_after, null);
+assert.equal(store.getWorkflowRuntimeState(job.job_id).last_error, null);
+
+const singleFlightJob = store.createJob({ conversationKey: 'm3-single-' + process.pid, title: 'M3 single flight' });
+const singleFlight = new ProviderAdmissionController(store, { hardBlockMs: 60_000, leaseMs: 30_000 });
+singleFlight.syncProviders(['chatgpt:single']);
+const firstLease = singleFlight.admit({ providerIds: ['chatgpt:single'], jobId: singleFlightJob.job_id, role: 'architect' });
+assert.throws(
+  () => singleFlight.admit({ providerIds: ['chatgpt:single'], jobId: singleFlightJob.job_id, role: 'qa' }),
+  error => error.code === 'PROVIDER_UNAVAILABLE'
+);
+singleFlight.release(firstLease.leaseId);
+const secondLease = singleFlight.admit({ providerIds: ['chatgpt:single'], jobId: singleFlightJob.job_id, role: 'qa' });
+assert.equal(secondLease.providerId, 'chatgpt:single');
+singleFlight.release(secondLease.leaseId);
+
 console.log('M3 DURABLE WAIT EVENT PASS');
 for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) fs.rmSync(p, { force: true });

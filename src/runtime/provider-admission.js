@@ -187,39 +187,41 @@ export class ProviderAdmissionController {
     if (!ids.length) throw new Error('Provider admission has no providers');
     this.syncProviders(ids);
     this.expireLeases();
-    const rows = ids.map(id => this.status(id)).filter(Boolean);
-    const global = rows.find(r => r.provider_id === 'chatgpt:global');
-    if (global && [ProviderStates.COOLDOWN, ProviderStates.IN_USE].includes(global.state)) {
-      const err = new Error(`PROVIDER_UNAVAILABLE: global provider gate is ${global.state}; retry after ${Math.ceil((global.cooldownRemainingMs || 0) / 1000)}s`);
-      err.code = 'PROVIDER_UNAVAILABLE';
-      err.retryAfterMs = global.cooldownRemainingMs || 0;
-      err.providerStates = rows;
-      throw err;
-    }
-    const accountRows = rows.filter(r => r.provider_id !== 'chatgpt:global');
-    const ready = accountRows.find(r => r.state === ProviderStates.READY && r.in_flight === 0);
-    const probe = accountRows.find(r => r.state === ProviderStates.PROBE && r.in_flight === 0);
-    const chosen = ready || probe;
-    if (!chosen) {
-      const earliest = accountRows.filter(r => r.cooldownRemainingMs > 0).sort((a, b) => a.cooldownRemainingMs - b.cooldownRemainingMs)[0];
-      const waitMs = earliest?.cooldownRemainingMs || 0;
-      const err = new Error(`PROVIDER_UNAVAILABLE: all admitted providers are cooling down; retry after ${Math.ceil(waitMs / 1000)}s`);
-      err.code = 'PROVIDER_UNAVAILABLE';
-      err.retryAfterMs = waitMs;
-      err.providerStates = rows;
-      throw err;
-    }
     const leaseId = token('provider_lease');
     const created = nowIso();
     const expires = new Date(Date.now() + this.leaseMs).toISOString();
     this.store.db.exec('BEGIN IMMEDIATE');
     try {
+      const rows = ids
+        .map(id => this._normalize(this.store.db.prepare('SELECT * FROM provider_admission WHERE provider_id=?').get(id)))
+        .filter(Boolean);
+      const global = rows.find(r => r.provider_id === 'chatgpt:global');
+      if (global && [ProviderStates.COOLDOWN, ProviderStates.IN_USE].includes(global.state)) {
+        const err = new Error(`PROVIDER_UNAVAILABLE: global provider gate is ${global.state}; retry after ${Math.ceil((global.cooldownRemainingMs || 0) / 1000)}s`);
+        err.code = 'PROVIDER_UNAVAILABLE';
+        err.retryAfterMs = global.cooldownRemainingMs || 0;
+        err.providerStates = rows;
+        throw err;
+      }
+      const accountRows = rows.filter(r => r.provider_id !== 'chatgpt:global');
+      const ready = accountRows.find(r => r.state === ProviderStates.READY && r.in_flight === 0);
+      const probe = accountRows.find(r => r.state === ProviderStates.PROBE && r.in_flight === 0);
+      const chosen = ready || probe;
+      if (!chosen) {
+        const earliest = accountRows.filter(r => r.cooldownRemainingMs > 0).sort((a, b) => a.cooldownRemainingMs - b.cooldownRemainingMs)[0];
+        const waitMs = earliest?.cooldownRemainingMs || 0;
+        const err = new Error(`PROVIDER_UNAVAILABLE: all admitted providers are cooling down; retry after ${Math.ceil(waitMs / 1000)}s`);
+        err.code = 'PROVIDER_UNAVAILABLE';
+        err.retryAfterMs = waitMs;
+        err.providerStates = rows;
+        throw err;
+      }
       this.store.db.prepare(`UPDATE provider_admission SET state='IN_USE', in_flight=in_flight+1, updated_at=? WHERE provider_id=?`).run(created, chosen.provider_id);
       this.store.db.prepare(`INSERT INTO provider_admission_leases(lease_id,provider_id,job_id,task_id,role,state,created_at,expires_at)
         VALUES(?,?,?,?,?,'ACTIVE',?,?)`).run(leaseId, chosen.provider_id, jobId, taskId, role, created, expires);
       this.store.db.exec('COMMIT');
+      return { leaseId, providerId: chosen.provider_id, expiresAt: expires };
     } catch (e) { try { this.store.db.exec('ROLLBACK'); } catch (_) {} throw e; }
-    return { leaseId, providerId: chosen.provider_id, expiresAt: expires };
   }
 
   release(leaseId, { success = true, rateLimited = false, reason = null } = {}) {

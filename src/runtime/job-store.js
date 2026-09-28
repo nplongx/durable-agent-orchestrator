@@ -380,6 +380,14 @@ export class WorkflowStore {
   }
   clearProviderWaiting(jobId) {
     this.db.prepare('UPDATE jobs SET provider_waiting=0, provider_retry_at=NULL, updated_at=? WHERE job_id=?').run(now(), jobId);
+    const runtime = this.getWorkflowRuntimeState(jobId);
+    if (runtime?.resume_after || runtime?.last_error) {
+      this.setWorkflowRuntimeState(jobId, runtime.phase, {
+        attempt: runtime.attempt,
+        resumeAfter: null,
+        lastError: null
+      });
+    }
     return this.getJob(jobId);
   }
   createJob({ conversationKey, title }) {

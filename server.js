@@ -233,46 +233,48 @@ async function evaluateRequestLangGraph(messages) {
   return decision;
 }
 
-let workflowControllerBusy = false;
+const workflowControllerJobsInFlight = new Set();
 async function runWorkflowControllerTick() {
-  if (workflowControllerBusy || LANGGRAPH_ORCHESTRATOR_MODE === 'off') return;
-  workflowControllerBusy = true;
-  try {
-    const jobs = [
-      ...workflowStore.listActiveJobs(100),
-      ...workflowStore.listProjectableJobs(100)
-    ];
-    const seen = new Set();
-    for (const job of jobs) {
-      if (seen.has(job.job_id)) continue;
-      seen.add(job.job_id);
-      if (!isProductionWorkflow(job)) continue;
-      const runtime = workflowStore.getWorkflowRuntimeState(job.job_id);
-      if (!runtime || ['COMPLETED', 'FAILED'].includes(runtime.phase)) continue;
-      if (runtime.resume_after && Date.parse(runtime.resume_after) > Date.now()) continue;
-      const trace = workflowStore.getJobTrace(job.job_id);
-      if (runtime.phase === 'SYNTHESIZE') await reconcileCtoSynthesis(job, trace?.tasks || [], trace?.results || []);
-      const refreshed = workflowStore.getJobTrace(job.job_id);
-      const decision = await evaluateLangGraph({
-        job,
-        tasks: refreshed?.tasks || [],
-        results: refreshed?.results || [],
-        event: 'workflow_controller_tick',
-        persist: true,
-        store: workflowStore,
-        spawnCto: ({ job, tasks, store }) => spawnProductionCto(job, tasks, store),
-        executeTask: task => executionManager.executeAuthorizedTask(task.task_id),
-        assignChildren: ({ job, tasks }) => assignProductionChildren(job, tasks),
-        synthesize: ({ job, tasks, results, store }) => dispatchCtoSynthesis(job, tasks, results, store),
-        terminalize: ({ job, tasks, results, store }) => terminalizeFromCtoResult(job, tasks, results, store),
-        project: ({ job, store }) => projectTerminalJob(job, store)
-      });
-      if (decision.action !== LangGraphActions.NOOP) console.log(`[Adapter:WorkflowController] job=${job.job_id} phase=${runtime.phase} action=${decision.action} reason=${decision.reason}`);
-    }
-  } catch (error) {
-    console.warn(`[Adapter:WorkflowController] tick failed: ${error.message}`);
-  } finally {
-    workflowControllerBusy = false;
+  if (LANGGRAPH_ORCHESTRATOR_MODE === 'off') return;
+  const jobs = [
+    ...workflowStore.listActiveJobs(100),
+    ...workflowStore.listProjectableJobs(100)
+  ];
+  const seen = new Set();
+  for (const job of jobs) {
+    if (seen.has(job.job_id) || workflowControllerJobsInFlight.has(job.job_id)) continue;
+    seen.add(job.job_id);
+    if (!isProductionWorkflow(job)) continue;
+    const runtime = workflowStore.getWorkflowRuntimeState(job.job_id);
+    if (!runtime || ['COMPLETED', 'FAILED'].includes(runtime.phase)) continue;
+    if (runtime.resume_after && Date.parse(runtime.resume_after) > Date.now()) continue;
+    workflowControllerJobsInFlight.add(job.job_id);
+    void (async () => {
+      try {
+        const trace = workflowStore.getJobTrace(job.job_id);
+        if (runtime.phase === 'SYNTHESIZE') await reconcileCtoSynthesis(job, trace?.tasks || [], trace?.results || []);
+        const refreshed = workflowStore.getJobTrace(job.job_id);
+        const decision = await evaluateLangGraph({
+          job,
+          tasks: refreshed?.tasks || [],
+          results: refreshed?.results || [],
+          event: 'workflow_controller_tick',
+          persist: true,
+          store: workflowStore,
+          spawnCto: ({ job, tasks, store }) => spawnProductionCto(job, tasks, store),
+          executeTask: task => executionManager.executeAuthorizedTask(task.task_id),
+          assignChildren: ({ job, tasks }) => assignProductionChildren(job, tasks),
+          synthesize: ({ job, tasks, results, store }) => dispatchCtoSynthesis(job, tasks, results, store),
+          terminalize: ({ job, tasks, results, store }) => terminalizeFromCtoResult(job, tasks, results, store),
+          project: ({ job, store }) => projectTerminalJob(job, store)
+        });
+        if (decision.action !== LangGraphActions.NOOP) console.log(`[Adapter:WorkflowController] job=${job.job_id} phase=${runtime.phase} action=${decision.action} reason=${decision.reason}`);
+      } catch (error) {
+        console.warn(`[Adapter:WorkflowController] job=${job.job_id} tick failed: ${error.message}`);
+      } finally {
+        workflowControllerJobsInFlight.delete(job.job_id);
+      }
+    })();
   }
 }
 
@@ -287,6 +289,8 @@ async function gatewayJson(method, params) {
     });
   });
 }
+
+setInterval(() => { void runWorkflowControllerTick(); }, 1000).unref();
 
 async function reconcileCtoSynthesis(job, tasks) {
   const cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
