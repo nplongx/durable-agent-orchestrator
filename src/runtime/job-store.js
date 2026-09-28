@@ -4,7 +4,9 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { createEnvelope, validateEnvelope, validatePayload } from '../../protocol/cos-ap-v1/index.js';
 import { isProductionWorkflow } from './workflow/definitions/production.js';
-import { ProductionRoles, productionTaskSpec } from './workflow/catalog/production.js';
+import { ProductionRoles } from './workflow/catalog/production.js';
+import { compileWorkflowPlan } from './workflow/compiler.js';
+import { canonicalJson } from './workflow/plan.js';
 
 const DATA_DIR = process.env.WORKFLOW_DATA_DIR || '/home/long/work/chatgpt-adapter/data';
 const DB_PATH = process.env.WORKFLOW_DB || path.join(DATA_DIR, 'workflow.db');
@@ -187,6 +189,15 @@ CREATE TABLE IF NOT EXISTS workflow_runtime_state (
   last_error TEXT,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS workflow_plans (
+  job_id TEXT PRIMARY KEY REFERENCES jobs(job_id),
+  workflow_id TEXT NOT NULL,
+  workflow_version INTEGER NOT NULL,
+  plan_hash TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  compiled_at TEXT NOT NULL,
+  approved_at TEXT
+);
 `);
 
 const WORKFLOW_PHASES = Object.freeze([
@@ -317,6 +328,33 @@ export class WorkflowStore {
   getWorkflowRuntimeState(jobId) {
     return this.db.prepare('SELECT * FROM workflow_runtime_state WHERE job_id = ?').get(jobId) || null;
   }
+  getExecutionPlan(jobId) {
+    const row = this.db.prepare('SELECT * FROM workflow_plans WHERE job_id = ?').get(jobId);
+    if (!row) return null;
+    return { ...JSON.parse(row.plan_json), plan_hash: row.plan_hash, compiled_at: row.compiled_at, approved_at: row.approved_at };
+  }
+  compileExecutionPlan(jobId, { workspace = process.env.WORKFLOW_WORKSPACE } = {}) {
+    const job = this.getJob(jobId);
+    if (!job) throw new Error('job not found: ' + jobId);
+    const existing = this.getExecutionPlan(jobId);
+    const plan = compileWorkflowPlan(job, { workspace });
+    const planJson = canonicalJson(Object.fromEntries(Object.entries(plan).filter(([key]) => key !== 'plan_hash')));
+    if (existing) {
+      const storedPlan = this.db.prepare('SELECT plan_json, plan_hash FROM workflow_plans WHERE job_id = ?').get(jobId);
+      if (storedPlan?.plan_hash !== plan.plan_hash || storedPlan?.plan_json !== planJson) {
+        throw new Error('immutable execution plan mismatch: ' + jobId);
+      }
+      return existing;
+    }
+    const ts = now();
+    this.db.prepare('INSERT INTO workflow_plans(job_id, workflow_id, workflow_version, plan_hash, plan_json, compiled_at, approved_at) VALUES(?, ?, ?, ?, ?, ?, ?)').run(
+      jobId, plan.workflow_id, plan.workflow_version, plan.plan_hash, planJson, ts, job.approved_at || ts
+    );
+    this.recordEvent(jobId, 'workflow.plan_compiled', {
+      workflowId: plan.workflow_id, workflowVersion: plan.workflow_version, planHash: plan.plan_hash
+    }, plan.plan_hash);
+    return this.getExecutionPlan(jobId);
+  }
   setWorkflowRuntimeState(jobId, phase, { attempt = null, resumeAfter = null, lastError = null } = {}) {
     const current = this.getWorkflowRuntimeState(jobId);
     const nextAttempt = attempt == null ? Number(current?.attempt || 0) : Number(attempt);
@@ -409,7 +447,7 @@ export class WorkflowStore {
       if (!task || task.job_id !== jobId) throw new Error(`batch task not found in Job: ${item.taskId}`);
       const metadata = JSON.parse(task.metadata_json || '{}');
       const command = String(item.command || metadata.command || '').trim();
-      if (!metadata.command || !command || metadata.command !== command || metadata.executor !== 'ExecutionManager') {
+      if (!metadata.deterministic || !metadata.command || !command || metadata.command !== command || (metadata.executor && metadata.executor !== 'ExecutionManager')) {
         throw new Error(`batch task is not an exact deterministic task: ${item.taskId}`);
       }
       const cwd = String(item.cwd || metadata.cwd || '').trim() || null;
@@ -894,11 +932,15 @@ export class WorkflowStore {
     if (existing) return existing;
     const job = this.getJob(jobId);
     const normalizedRole = String(role).toLowerCase();
-    const productionTask = isProductionWorkflow(job) && ProductionRoles.includes(normalizedRole)
-      ? productionTaskSpec(
-          normalizedRole === 'architect' ? 'architect-check' : 'qa-check'
-        )
-      : null;
+    const plan = isProductionWorkflow(job) ? this.getExecutionPlan(jobId) : null;
+    if (isProductionWorkflow(job) && ProductionRoles.includes(normalizedRole) && !plan) {
+      throw new Error('immutable execution plan missing before production task creation: ' + jobId);
+    }
+    const plannedTask = plan?.children?.find(item => String(item.role).toLowerCase() === normalizedRole) || null;
+    if (isProductionWorkflow(job) && ProductionRoles.includes(normalizedRole) && !plannedTask) {
+      throw new Error('production role is absent from immutable execution plan: ' + normalizedRole);
+    }
+    const productionTask = plannedTask || null;
     const productionExecution = productionTask?.execution || null;
     const durableMetadata = productionExecution ? { ...productionExecution, ...metadata } : metadata;
     const taskId = id('task'); const ts = now();
@@ -1124,6 +1166,7 @@ export class WorkflowStore {
     const runtime = this.getWorkflowRuntimeState(jobId);
     if (runtime?.phase === 'PROPOSED') this.transitionWorkflowPhase(jobId, 'APPROVED', { event: 'workflow.approved', payload: { actor } });
     this.recordEvent(jobId, 'approval.approved', { actor, rawText }, hash(rawText));
+    if (isProductionWorkflow(this.getJob(jobId))) this.compileExecutionPlan(jobId);
     return this.getJob(jobId);
   }
   dispatch(jobId, { role = 'cto', description }) {

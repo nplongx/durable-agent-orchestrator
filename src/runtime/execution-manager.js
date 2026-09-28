@@ -8,6 +8,9 @@ const DEFAULT_TIMEOUT_MS = Math.max(1000, Number(process.env.EXECUTION_TIMEOUT_M
 
 function id(prefix) { return `${prefix}_${crypto.randomUUID()}`; }
 function shellQuote(value) { return `'${String(value).replace(/'/g, `'\\''`)}'`; }
+function structuredCommand(executable, args = []) {
+  return [executable, ...args].map(shellQuote).join(' ');
+}
 
 function run(command, args, { timeoutMs = 30000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -132,9 +135,60 @@ export class ExecutionManager {
     const task = this.getTask(taskId);
     if (!task) throw new Error(`task not found: ${taskId}`);
     const metadata = JSON.parse(task.metadata_json || '{}');
+    if (metadata.deterministic && metadata.executable) {
+      if (metadata.executor !== 'ExecutionManager') throw new Error(`deterministic task ${taskId} has invalid executor`);
+      if (!metadata.executable || !Array.isArray(metadata.args)) throw new Error(`structured execution contract required for task ${taskId}`);
+      return this.executeStructuredTask(taskId, {
+        executable: metadata.executable,
+        args: metadata.args,
+        timeoutMs,
+        cwd: cwd || metadata.cwd || process.cwd(),
+        env
+      });
+    }
     const command = String(metadata.command || task.description || '').trim();
-    if (!metadata.deterministic && !metadata.command) throw new Error(`task ${taskId} is not marked deterministic`);
+    if (!command) throw new Error(`task ${taskId} has no execution command`);
     return this.executeTask(taskId, { command, timeoutMs, cwd: cwd || metadata.cwd || process.cwd(), env });
+  }
+
+  async executeStructuredTask(taskId, { executable, args = [], timeoutMs = this.timeoutMs, cwd = process.cwd(), env = {} } = {}) {
+    const exactExecutable = String(executable || '').trim();
+    if (!exactExecutable || !Array.isArray(args) || args.some(arg => typeof arg !== 'string')) {
+      throw new Error(`invalid structured execution contract for task ${taskId}`);
+    }
+    const command = structuredCommand(exactExecutable, args);
+    if (!/^[A-Za-z0-9_.+-]+$/.test(exactExecutable)) throw new Error(`unsupported deterministic executable: ${exactExecutable}`);
+    const task = this.getTask(taskId);
+    if (!task) throw new Error(`task not found: ${taskId}`);
+    if (task.execution_status === 'running') throw new Error(`task already executing: ${taskId}`);
+    if (task.execution_status === 'completed' && task.execution_exit_code === 0) return task;
+    const nextAttempt = Number(task.execution_attempt || 0) + 1;
+    const executionSessionId = id('exec');
+    const tmuxName = `cos-exec-${executionSessionId.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+    const startedAt = new Date().toISOString();
+    this.store.prepareExecution(taskId, { executionSessionId, attempt: nextAttempt, command, cwd, startedAt, tmuxName });
+    const script = `cd ${shellQuote(cwd)} && env ${Object.entries(env).map(([k,v]) => `${shellQuote(k)}=${shellQuote(v)}`).join(' ')} ${command} > ${shellQuote(`/tmp/${tmuxName}.stdout`)} 2> ${shellQuote(`/tmp/${tmuxName}.stderr`)}; printf '%s' $? > ${shellQuote(`/tmp/${tmuxName}.exit`)}`;
+    try {
+      await run(this.tmuxBin, ['new-session', '-d', '-s', tmuxName, 'bash', '-lc', script], { timeoutMs: 10000 });
+      const pid = await run(this.tmuxBin, ['display-message', '-p', '-t', `${tmuxName}:0`, '#{pane_pid}'], { timeoutMs: 5000 });
+      if (/^\d+$/.test(pid.stdout.trim())) this.store.setExecutionPid(taskId, Number(pid.stdout.trim()));
+      const started = Date.now();
+      let exitCode = null;
+      while (Date.now() - started < timeoutMs) {
+        const value = await fs.readFile(`/tmp/${tmuxName}.exit`, 'utf8').catch(() => '');
+        if (/^-?\d+$/.test(value.trim())) { exitCode = Number(value.trim()); break; }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (exitCode === null) {
+        await run(this.tmuxBin, ['kill-session', '-t', tmuxName], { timeoutMs: 5000 }).catch(() => {});
+        return await this.collect(taskId, { executionSessionId, attempt: nextAttempt, command, exitCode: null, timeout: true });
+      }
+      await run(this.tmuxBin, ['kill-session', '-t', tmuxName], { timeoutMs: 5000 }).catch(() => {});
+      return await this.collect(taskId, { executionSessionId, attempt: nextAttempt, command, exitCode, timeout: false });
+    } catch (error) {
+      this.store.finishExecution(taskId, { executionSessionId, attempt: nextAttempt, command, exitCode: null, stdout: '', stderr: error.message, status: 'failed', error: error.message });
+      throw error;
+    }
   }
 
   async executeTask(taskId, { command, timeoutMs = this.timeoutMs, attempt = null, cwd = process.cwd(), env = {} } = {}) {

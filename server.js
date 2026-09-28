@@ -13,7 +13,7 @@ import { RecoveryManager } from './recovery-manager.js';
 import { validateExecutionBatch, validateExecutionResult } from './protocol/cos-ap-v1/index.js';
 import { ProviderAdmissionController, ProviderStates, isProviderRateLimitError } from './provider-admission.js';
 import { isProductionWorkflow } from './src/runtime/workflow/definitions/production.js';
-import { ProductionRoles, productionChildTaskSpecs } from './src/runtime/workflow/catalog/production.js';
+import { ProductionRoles } from './src/runtime/workflow/catalog/production.js';
 
 const LANGGRAPH_ORCHESTRATOR_MODE = process.env.LANGGRAPH_ORCHESTRATOR || 'shadow';
 const SESSION_TRANSPORT_MODE = process.env.SESSION_TRANSPORT || 'shadow';
@@ -223,14 +223,7 @@ async function evaluateRequestLangGraph(messages) {
     persist: true,
     store: workflowStore,
     spawnCto: ({ job, tasks, store }) => spawnProductionCto(job, tasks, store),
-    executeTask: task => {
-      const metadata = JSON.parse(task.metadata_json || '{}');
-      return executionManager.executeTask(task.task_id, {
-        command: metadata.command,
-        cwd: metadata.cwd,
-        timeoutMs: metadata.timeout_ms
-      });
-    },
+    executeTask: task => executionManager.executeAuthorizedTask(task.task_id),
     assignChildren: ({ job, tasks }) => assignProductionChildren(job, tasks),
     synthesize: ({ job, tasks, results, store }) => dispatchCtoSynthesis(job, tasks, results, store),
     terminalize: ({ job, tasks, results, store }) => terminalizeFromCtoResult(job, tasks, results, store),
@@ -268,14 +261,7 @@ async function runWorkflowControllerTick() {
         persist: true,
         store: workflowStore,
         spawnCto: ({ job, tasks, store }) => spawnProductionCto(job, tasks, store),
-        executeTask: task => {
-          const metadata = JSON.parse(task.metadata_json || '{}');
-          return executionManager.executeTask(task.task_id, {
-            command: metadata.command,
-            cwd: metadata.cwd,
-            timeoutMs: metadata.timeout_ms
-          });
-        },
+        executeTask: task => executionManager.executeAuthorizedTask(task.task_id),
         assignChildren: ({ job, tasks }) => assignProductionChildren(job, tasks),
         synthesize: ({ job, tasks, results, store }) => dispatchCtoSynthesis(job, tasks, results, store),
         terminalize: ({ job, tasks, results, store }) => terminalizeFromCtoResult(job, tasks, results, store),
@@ -385,7 +371,9 @@ async function assignProductionChildren(job, tasks) {
   if (!isProductionWorkflow(job)) return;
   const cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
   if (!cto?.openclaw_session_key) throw new Error('CTO native session is required before ASSIGN_CHILDREN');
-  const required = productionChildTaskSpecs();
+  const plan = workflowStore.getExecutionPlan(job.job_id);
+  if (!plan) throw new Error('immutable execution plan missing before ASSIGN_CHILDREN: ' + job.job_id);
+  const required = plan.children;
   const trace = workflowStore.getJobTrace(job.job_id);
   const existing = new Map((trace?.tasks || [])
     .filter(t => t.parent_task_id === cto.task_id && ProductionRoles.includes(String(t.role).toLowerCase()))
@@ -408,6 +396,7 @@ async function assignProductionChildren(job, tasks) {
       const response = await fetch('http://127.0.0.1:9010/tools/invoke', {
         method: 'POST',
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        signal: AbortSignal.timeout(20_000),
         body: JSON.stringify({
           tool: 'sessions_spawn',
           sessionKey: cto.openclaw_session_key,

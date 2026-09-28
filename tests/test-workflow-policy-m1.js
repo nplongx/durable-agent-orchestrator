@@ -20,9 +20,19 @@ const workspace = '/tmp/workflow-policy-m1';
 const specs = productionChildTaskSpecs(workspace);
 assert.deepEqual(specs.map(spec => spec.role), ProductionRoles);
 assert.deepEqual(specs.map(spec => spec.id), [ProductionTaskId.ARCHITECT_CHECK, ProductionTaskId.QA_CHECK]);
-assert.deepEqual(specs.map(spec => spec.execution), [
+assert.deepEqual(specs.map(spec => ({
+  executor: spec.execution.executor,
+  executable: spec.execution.executable,
+  args: spec.execution.args,
+  command: spec.execution.command,
+  cwd: spec.execution.cwd,
+  timeout_ms: spec.execution.timeout_ms,
+  deterministic: spec.execution.deterministic
+})), [
   {
     executor: 'ExecutionManager',
+    executable: 'node',
+    args: ['--check', path.join(workspace, 'server.js')],
     command: `node --check ${path.join(workspace, 'server.js')}`,
     cwd: workspace,
     timeout_ms: 120000,
@@ -30,6 +40,8 @@ assert.deepEqual(specs.map(spec => spec.execution), [
   },
   {
     executor: 'ExecutionManager',
+    executable: 'node',
+    args: ['--check', path.join(workspace, 'test-tool-turn.js')],
     command: `node --check ${path.join(workspace, 'test-tool-turn.js')}`,
     cwd: workspace,
     timeout_ms: 120000,

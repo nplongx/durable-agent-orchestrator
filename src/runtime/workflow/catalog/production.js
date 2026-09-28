@@ -14,6 +14,20 @@ export const ProductionRoles = Object.freeze([
   'qa'
 ]);
 
+function nodeCheckExecution(workspace, file) {
+  const executable = 'node';
+  const args = Object.freeze(['--check', path.join(workspace, file)]);
+  return Object.freeze({
+    executor: 'ExecutionManager',
+    executable,
+    args,
+    command: [executable, ...args].join(' '),
+    cwd: workspace,
+    timeout_ms: 120000,
+    deterministic: true
+  });
+}
+
 export function productionTaskSpec(taskId, { workspace = process.env.WORKFLOW_WORKSPACE || DEFAULT_WORKSPACE } = {}) {
   if (!workspace) throw new Error(`workspace is required for task ${taskId}`);
 
@@ -22,25 +36,13 @@ export function productionTaskSpec(taskId, { workspace = process.env.WORKFLOW_WO
       return {
         id: taskId,
         role: 'architect',
-        execution: {
-          executor: 'ExecutionManager',
-          command: `node --check ${path.join(workspace, 'server.js')}`,
-          cwd: workspace,
-          timeout_ms: 120000,
-          deterministic: true
-        }
+        execution: nodeCheckExecution(workspace, 'server.js')
       };
     case ProductionTaskId.QA_CHECK:
       return {
         id: taskId,
         role: 'qa',
-        execution: {
-          executor: 'ExecutionManager',
-          command: `node --check ${path.join(workspace, 'test-tool-turn.js')}`,
-          cwd: workspace,
-          timeout_ms: 120000,
-          deterministic: true
-        }
+        execution: nodeCheckExecution(workspace, 'test-tool-turn.js')
       };
     case ProductionTaskId.CTO_SYNTHESIS:
       return {

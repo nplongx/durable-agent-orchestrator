@@ -2,6 +2,7 @@ import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import { WorkflowPhase } from './workflow/phases.js';
 import { ProductionRoles } from './workflow/catalog/production.js';
 import { isProductionWorkflow } from './workflow/definitions/production.js';
+import { validateEvidenceContract } from './workflow/evidence.js';
 
 export const LangGraphActions = Object.freeze({
   NOOP: 'NOOP',
@@ -25,13 +26,7 @@ function executionSpec(task) {
 }
 
 function evidenceValid(task, result) {
-  const spec = executionSpec(task);
-  return spec.executor === 'ExecutionManager'
-    && spec.command
-    && spec.cwd
-    && task?.execution_status === 'completed'
-    && Number(task?.execution_exit_code) === 0
-    && result?.outcome === 'success';
+  return validateEvidenceContract(task, result).valid;
 }
 
 const GraphState = Annotation.Root({
