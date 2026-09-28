@@ -128,6 +128,7 @@ export class RecoveryManager {
   constructor(store, {
     sessionStaleMs = 5 * 60 * 1000,
     executionStaleMs = 2 * 60 * 1000,
+    jobStaleMs = 30 * 60 * 1000,
     trajectoryTimeoutMs = 45_000,
     listSessions = listOpenClawSessions,
     exportTrajectory = exportCompletedTrajectory,
@@ -136,6 +137,7 @@ export class RecoveryManager {
     this.store = store;
     this.sessionStaleMs = sessionStaleMs;
     this.executionStaleMs = executionStaleMs;
+    this.jobStaleMs = jobStaleMs;
     this.trajectoryTimeoutMs = trajectoryTimeoutMs;
     this.listSessions = listSessions;
     this.exportTrajectory = exportTrajectory;
@@ -149,6 +151,44 @@ export class RecoveryManager {
     const runtimeMap = runtimeSessions.error
       ? null
       : new Map(runtimeSessions.map(s => [s.key, s]));
+
+    // A durable EXECUTING Job with no live OpenClaw runtime must not remain
+    // eligible forever. These orphaned jobs otherwise look runnable to the
+    // scheduler and can accumulate retry pressure after provider failures.
+    // Fail closed only when the runtime inventory is authoritative, the job is
+    // well past the normal execution window, and none of its task sessions is
+    // alive. Never mutate a fresh/active Job or one whose runtime is merely
+    // temporarily unavailable.
+    if (runtimeMap) {
+      const staleJobs = (jobId
+        ? [this.store.getJob(jobId)].filter(Boolean)
+        : this.store.db.prepare("SELECT * FROM jobs WHERE state='EXECUTING'").all())
+        .filter(job => Date.now() - Date.parse(job.updated_at || 0) > this.jobStaleMs);
+      for (const job of staleJobs) {
+        const tasks = this.store.db.prepare('SELECT * FROM tasks WHERE job_id=?').all(job.job_id);
+        const liveRuntime = tasks.some(task => {
+          if (!task.openclaw_session_key) return false;
+          const runtime = runtimeMap.get(task.openclaw_session_key);
+          const status = String(runtime?.status || '').toLowerCase();
+          return ['active', 'running', 'working', 'queued'].includes(status);
+        });
+        if (liveRuntime) continue;
+        try {
+          this.store.complete(job.job_id, [
+            '[RECOVERY FAILURE]',
+            `Job was EXECUTING for more than ${Math.round(this.jobStaleMs / 60000)} minutes, but no corresponding live OpenClaw runtime session remains.`,
+            'Recovery closed the orphaned Job without spawning replacement work.'
+          ].join('\n'), 'failure');
+          this.store.recordEvent(job.job_id, 'job.runtime_reconciled', {
+            outcome: 'failure',
+            reason: 'stale_job_without_live_runtime',
+            staleMs: Date.now() - Date.parse(job.updated_at || 0)
+          }, `${job.job_id}|stale-job-without-live-runtime`);
+        } catch (error) {
+          console.warn(`[RecoveryManager] stale Job reconciliation failed job=${job.job_id}: ${error.message}`);
+        }
+      }
+    }
     // Completion reconciliation is task-driven, not session-state-driven.
     // A session may already be STALE when OpenClaw reports it as done; that
     // must never hide a terminal runtime result from the durable task.
