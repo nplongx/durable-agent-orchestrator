@@ -101,10 +101,9 @@ function extractTrajectoryExecutionEvidence(raw) {
 }
 
 function normalizeCommand(command) {
-  return String(command || '').trim().replace(
-    /^node --check ~\/work\/chatgpt-adapter\//i,
-    'node --check /home/long/work/chatgpt-adapter/'
-  ).replace(/\.$/, '');
+  return String(command || '').trim()
+    .replace(/~\/work\/chatgpt-adapter\//gi, '/home/long/work/chatgpt-adapter/')
+    .replace(/\.$/, '');
 }
 
 function expectedCommandFromTask(task) {
