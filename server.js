@@ -12,6 +12,8 @@ import { ExecutionManager } from './execution-manager.js';
 import { RecoveryManager } from './recovery-manager.js';
 import { validateExecutionBatch, validateExecutionResult } from './protocol/cos-ap-v1/index.js';
 import { ProviderAdmissionController, ProviderStates, isProviderRateLimitError } from './provider-admission.js';
+import { isProductionWorkflow } from './src/runtime/workflow/definitions/production.js';
+import { ProductionRoles, productionChildTaskSpecs } from './src/runtime/workflow/catalog/production.js';
 
 const LANGGRAPH_ORCHESTRATOR_MODE = process.env.LANGGRAPH_ORCHESTRATOR || 'shadow';
 const SESSION_TRANSPORT_MODE = process.env.SESSION_TRANSPORT || 'shadow';
@@ -95,7 +97,7 @@ function admitNativeSpawn({ jobId, taskId, role }) {
 async function executeDurableDeterministicToolCall(toolCall, messages, targetRole) {
   if (!toolCall || !['exec', 'execute_batch'].includes(toolCall.name)) return null;
   const role = String(targetRole || '').toLowerCase();
-  if (!['architect', 'qa'].includes(role)) return null;
+  if (!ProductionRoles.includes(role)) return null;
   const jobId = workflowStore.findJobIdFromMessages(messages || []);
   if (!jobId) return null;
   const job = workflowStore.getJob(jobId);
@@ -251,7 +253,7 @@ async function runWorkflowControllerTick() {
     for (const job of jobs) {
       if (seen.has(job.job_id)) continue;
       seen.add(job.job_id);
-      if (!/production e2e/i.test(String(job.title || ''))) continue;
+      if (!isProductionWorkflow(job)) continue;
       const runtime = workflowStore.getWorkflowRuntimeState(job.job_id);
       if (!runtime || ['COMPLETED', 'FAILED'].includes(runtime.phase)) continue;
       if (runtime.resume_after && Date.parse(runtime.resume_after) > Date.now()) continue;
@@ -348,7 +350,7 @@ async function reconcileCtoSynthesis(job, tasks) {
 setInterval(() => { void runWorkflowControllerTick(); }, 1000).unref();
 
 async function spawnProductionCto(job, tasks, store) {
-  if (!/production e2e/i.test(String(job?.title || ''))) return;
+  if (!isProductionWorkflow(job)) return;
   let cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
   if (!cto) {
     const description = String(job.title || '').trim();
@@ -380,16 +382,13 @@ async function spawnProductionCto(job, tasks, store) {
 }
 
 async function assignProductionChildren(job, tasks) {
-  if (!/production e2e/i.test(String(job?.title || ''))) return;
+  if (!isProductionWorkflow(job)) return;
   const cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
   if (!cto?.openclaw_session_key) throw new Error('CTO native session is required before ASSIGN_CHILDREN');
-  const required = [
-    { role: 'architect', command: 'node --check /home/long/work/chatgpt-adapter/server.js' },
-    { role: 'qa', command: 'node --check /home/long/work/chatgpt-adapter/test-tool-turn.js' }
-  ];
+  const required = productionChildTaskSpecs();
   const trace = workflowStore.getJobTrace(job.job_id);
   const existing = new Map((trace?.tasks || [])
-    .filter(t => t.parent_task_id === cto.task_id)
+    .filter(t => t.parent_task_id === cto.task_id && ProductionRoles.includes(String(t.role).toLowerCase()))
     .map(t => [String(t.role).toLowerCase(), t]));
   const token = JSON.parse(fs.readFileSync(path.join(process.env.HOME || '/home/long', '.openclaw/openclaw.json'), 'utf8'))?.gateway?.auth?.token;
   if (!token) throw new Error('OpenClaw gateway token unavailable');
@@ -400,7 +399,7 @@ async function assignProductionChildren(job, tasks) {
       parentTaskId: cto.task_id,
       role: spec.role,
       description: `Execute deterministic runtime task for ${job.job_id}.`,
-      metadata: { executor: 'ExecutionManager', command: spec.command, cwd: '/home/long/work/chatgpt-adapter', timeout_ms: 120000, deterministic: true }
+      metadata: spec.execution
     });
     if (['completed', 'failed', 'cancelled'].includes(String(task.status).toLowerCase())) return;
     if (task.openclaw_session_key || task.openclaw_run_id) return;
@@ -413,7 +412,7 @@ async function assignProductionChildren(job, tasks) {
           tool: 'sessions_spawn',
           sessionKey: cto.openclaw_session_key,
           idempotencyKey: `${job.job_id}:spawn:${spec.role}`,
-          args: { agentId: spec.role, taskName: `cos-${spec.role}-${job.job_id.slice(-12)}`, task: `Durable Job ID: ${job.job_id}. Execute exactly: ${spec.command}`, cwd: '/home/long/work/chatgpt-adapter', runTimeoutSeconds: 120, expectsCompletionMessage: true, context: 'isolated' }
+          args: { agentId: spec.role, taskName: `cos-${spec.role}-${job.job_id.slice(-12)}`, task: `Durable Job ID: ${job.job_id}. Execute exactly: ${spec.execution.command}`, cwd: spec.execution.cwd, runTimeoutSeconds: Math.ceil(spec.execution.timeout_ms / 1000), expectsCompletionMessage: true, context: 'isolated' }
         })
       });
       const payload = await response.json();
@@ -433,7 +432,7 @@ async function assignProductionChildren(job, tasks) {
         throw new Error(`sessions_spawn returned no durable runtime receipt: ${JSON.stringify(payload).slice(0, 1000)}`);
       }
       workflowStore.attachTaskRuntime(task.task_id, { runId: receipt.runId, sessionKey: receipt.childSessionKey });
-      workflowStore.recordEvent(job.job_id, 'workflow.child_assigned', { taskId: task.task_id, role: spec.role, runId: receipt.runId, sessionKey: receipt.childSessionKey, command: spec.command }, `${job.job_id}:child-assigned:${spec.role}`);
+      workflowStore.recordEvent(job.job_id, 'workflow.child_assigned', { taskId: task.task_id, role: spec.role, runId: receipt.runId, sessionKey: receipt.childSessionKey, command: spec.execution.command }, `${job.job_id}:child-assigned:${spec.role}`);
     } catch (error) {
       try { providerAdmission.release(admission.leaseId, { reason: 'native child spawn failed' }); } catch (_) {}
       throw error;
@@ -446,7 +445,7 @@ async function dispatchCtoSynthesis(job, tasks, results, store) {
   if (!cto?.openclaw_session_key) throw new Error('CTO native session unavailable for synthesis');
   if (String(cto.status).toLowerCase() === 'running' && cto.openclaw_session_key.startsWith(`agent:cto:synthesis:${job.job_id}:attempt:`)) return;
   const evidence = tasks
-    .filter(t => t.parent_task_id === cto.task_id && ['architect', 'qa'].includes(String(t.role).toLowerCase()))
+    .filter(t => t.parent_task_id === cto.task_id && ProductionRoles.includes(String(t.role).toLowerCase()))
     .map(t => {
       const result = results.find(r => r.task_id === t.task_id);
       const spec = JSON.parse(t.metadata_json || '{}');
@@ -982,7 +981,7 @@ QUY TẮC BẮT BUỘC & PHÒNG CHỐNG ẢO GIÁC SHELL:
       prompt += 'Durable business Job ID: ' + ctoJob.job_id + ';';
       if (ctoTask?.description) {
         const children = workflowStore.getJobTrace(ctoJob.job_id)?.tasks?.filter(t => t.parent_task_id === ctoTask.task_id) || [];
-        const requiredRoles = ['architect', 'qa'];
+        const requiredRoles = ProductionRoles;
         const missingRoles = requiredRoles.filter(role => !children.some(t => String(t.role).toLowerCase() === role));
         const failedChildren = children.filter(t => ['failed', 'timeout'].includes(String(t.status).toLowerCase()));
         const openChildren = children.filter(t => !['completed', 'failed', 'cancelled'].includes(String(t.status).toLowerCase()));
@@ -1438,7 +1437,7 @@ YÊU CẦU BẮT BUỘC CHO CHIEF OF STAFF:
 
 export function toolsForSpecialistPrompt(tools = [], agentRole = '') {
   if (!Array.isArray(tools)) return [];
-  if (!['architect', 'qa'].includes(String(agentRole || '').toLowerCase())) return tools;
+  if (!ProductionRoles.includes(String(agentRole || '').toLowerCase())) return tools;
   return tools.filter(t => (t.function?.name || t.name) !== 'exec');
 }
 
@@ -1748,7 +1747,7 @@ export function extractToolCall(text, tools = [], messages = [], targetRole = 'c
         const trace = workflowStore.getJobTrace(durableJob.job_id);
         const parentTask = trace?.tasks?.find(t => t.task_id === durableJob.active_task_id) || null;
         const children = parentTask ? (trace?.tasks || []).filter(t => t.parent_task_id === parentTask.task_id) : [];
-        const requiredRoles = /production e2e/i.test(String(durableJob.title || '')) ? ['architect', 'qa'] : [];
+        const requiredRoles = isProductionWorkflow(durableJob) ? ProductionRoles : [];
         const missingRequiredRole = requiredRoles.some(role => !children.some(t => String(t.role).toLowerCase() === role));
         const openRequired = requiredRoles.some(role => {
           const child = children.find(t => String(t.role).toLowerCase() === role);
@@ -1839,7 +1838,7 @@ export function extractToolCall(text, tools = [], messages = [], targetRole = 'c
       }
     }
 
-    if (turnStep.action === Actions.DISPATCH_TASK && !isCircuitBreakerTripped && !/production e2e/i.test(String(durableJob?.title || ''))) {
+    if (turnStep.action === Actions.DISPATCH_TASK && !isCircuitBreakerTripped && !isProductionWorkflow(durableJob)) {
       // Approved: CTO is the technical lead, not the universal worker.
       // CTO must build the smallest useful team and delegate independent work
       // through OpenClaw native sessions_spawn. The browser adapter provides
@@ -1944,32 +1943,22 @@ Báo cáo lại đầy đủ kết quả: Chủ đề, Trace luồng dữ liệu
     const durableJob = referencedJobId
       ? workflowStore.getJob(referencedJobId)
       : workflowStore.getActiveJob(conversationKeyFromMessages(messages));
-    if (durableJob && durableJob.state === States.EXECUTING && !/production e2e/i.test(String(durableJob.title || ''))) {
+    if (durableJob && durableJob.state === States.EXECUTING && !isProductionWorkflow(durableJob)) {
       const trace = workflowStore.getJobTrace(durableJob.job_id);
       const existingRoles = new Set((trace?.tasks || []).filter(t => t.parent_task_id).map(t => t.role));
       const lower = text.toLowerCase();
-      const isProductionE2E = /production e2e/i.test(String(durableJob.title || ''));
-      const hasSignal = isProductionE2E || ['spawn', 'phân công', 'delegate', 'specialist', 'độc lập', 'song song'].some(x => lower.includes(x));
+      const hasSignal = ['spawn', 'phân công', 'delegate', 'specialist', 'độc lập', 'song song'].some(x => lower.includes(x));
       const explicitRefusal = ['không thể', 'không gọi', 'do not', 'cannot', 'unable'].some(x => lower.includes(x));
       const specialist = ['architect', 'engineer', 'qa', 'security', 'platform', 'researcher', 'reviewer', 'writer']
         .find(x => lower.includes(x) && !existingRoles.has(x));
       if (hasSignal && !explicitRefusal && specialist) {
         const parentTaskId = durableJob.active_task_id || trace?.tasks?.find(t => !t.parent_task_id)?.task_id || null;
-        const isProductionE2E = /production e2e/i.test(String(durableJob.title || ''));
-        const execution = isProductionE2E && specialist === 'architect'
-          ? { executor: 'ExecutionManager', command: 'node --check /home/long/work/chatgpt-adapter/server.js', cwd: '/home/long/work/chatgpt-adapter', timeout_ms: 120000 }
-          : isProductionE2E && specialist === 'qa'
-            ? { executor: 'ExecutionManager', command: 'node --check /home/long/work/chatgpt-adapter/test-tool-turn.js', cwd: '/home/long/work/chatgpt-adapter', timeout_ms: 120000 }
-            : null;
-        const task = execution
-          ? `Durable Job ID: ${durableJob.job_id}. Execute the assigned deterministic task and return findings from runtime evidence. Execution spec is authoritative.`
-          : `Durable Job ID: ${durableJob.job_id}. Specialist role: ${specialist}. Execute independently and return concise findings to CTO. Read-only verification; do not modify production code.`;
+        const task = `Durable Job ID: ${durableJob.job_id}. Specialist role: ${specialist}. Execute independently and return concise findings to CTO. Read-only verification; do not modify production code.`;
         if (parentTaskId) {
           workflowStore.createChildTask(durableJob.job_id, {
             parentTaskId,
             role: specialist,
-            description: task,
-            ...(execution ? { metadata: { deterministic: true, ...execution } } : {})
+            description: task
           });
         }
         toolName = 'sessions_spawn';
@@ -2012,7 +2001,7 @@ Báo cáo lại đầy đủ kết quả: Chủ đề, Trace luồng dữ liệu
       const trace = workflowStore.getJobTrace(durableJob.job_id);
       const duplicate = trace?.tasks?.find(t => t.parent_task_id && String(t.role).toLowerCase() === role &&
         !['failed', 'cancelled'].includes(String(t.status).toLowerCase()) &&
-        (/production e2e/i.test(String(durableJob.title || '')) || /EXECUTION NOW|Durable Job ID|exactly this command|exact command/i.test(t.description || '')));
+        (isProductionWorkflow(durableJob) || /EXECUTION NOW|Durable Job ID|exactly this command|exact command/i.test(t.description || '')));
       if (duplicate) {
         console.warn(`[Adapter:LifecycleGuard] Blocked duplicate ${role} sessions_spawn for Job ${durableJob.job_id}; existing task=${duplicate.task_id} status=${duplicate.status}`);
         return null;
@@ -2055,7 +2044,7 @@ Báo cáo lại đầy đủ kết quả: Chủ đề, Trace luồng dữ liệu
   // below. Do not infer a second exec call from post-tool prose such as
   // "node --check ... completed with exit status 0", which can become a
   // malformed shell command on the next child turn.
-  if (!toolName && Array.isArray(tools) && !['architect', 'qa'].includes(String(targetRole || '').toLowerCase())) {
+  if (!toolName && Array.isArray(tools) && !ProductionRoles.includes(String(targetRole || '').toLowerCase())) {
     const execTool = tools.find(t => {
       const n = (t.function?.name || t.name || '');
       return n === 'exec' || n.includes('exec');
@@ -2162,7 +2151,7 @@ Báo cáo lại đầy đủ kết quả: Chủ đề, Trace luồng dữ liệu
 // exec tool call. This is NOT orchestration: sessions_spawn still owns the child
 // session; this only recovers the tool-use wire format inside that child turn.
 export function recoverSpecialistExecToolCall(text, tools = [], messages = [], targetRole = 'coordinator') {
-  if (!['architect', 'qa'].includes(String(targetRole || '').toLowerCase())) return null;
+  if (!ProductionRoles.includes(String(targetRole || '').toLowerCase())) return null;
   if (!Array.isArray(tools) || !tools.some(t => (t.function?.name || t.name) === 'exec')) return null;
   // OpenClaw may already have a native exec result in the transcript. That
   // result is not durable ExecutionManager evidence, so it must not suppress
@@ -2178,7 +2167,7 @@ export function recoverSpecialistExecToolCall(text, tools = [], messages = [], t
 
 export function normalizeSpecialistExecToolCall(toolCall, messages = [], targetRole = 'coordinator') {
   if (!toolCall || toolCall.name !== 'exec') return toolCall;
-  if (!['architect', 'qa'].includes(String(targetRole || '').toLowerCase())) return toolCall;
+  if (!ProductionRoles.includes(String(targetRole || '').toLowerCase())) return toolCall;
   const raw = messages.map(m => typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content || '')).join('\n');
   const expectedFile = String(targetRole).toLowerCase() === 'qa' ? 'test-tool-turn.js' : 'server.js';
   const expected = raw.match(new RegExp(`\\bnode\\s+--check\\s+\\/home\\/long\\/work\\/chatgpt-adapter\\/${expectedFile.replace('.', '\\.') }\\b`, 'i'))?.[0];
@@ -2480,7 +2469,7 @@ function isImmediateSilentRequest(messages) {
       // advertise native `exec` to Architect/QA: the web model may otherwise
       // execute the command itself and loop on a transport-only `(no output)`
       // result before the adapter can persist durable evidence.
-      if (['architect', 'qa'].includes(String(formatted.agentRole || '').toLowerCase())) {
+      if (ProductionRoles.includes(String(formatted.agentRole || '').toLowerCase())) {
         const specialistTools = toolsForSpecialistPrompt(tools, formatted.agentRole);
         formatted = formatMessagesToPrompt(body.messages, specialistTools, model, body.metadata || {});
       }
@@ -2518,11 +2507,11 @@ function isImmediateSilentRequest(messages) {
       if (targetRole === 'cto') {
         const referencedJobId = workflowStore.findJobIdFromMessages(body.messages || []);
         const durableJob = referencedJobId ? workflowStore.getJob(referencedJobId) : null;
-        if (durableJob?.state === States.EXECUTING && /production e2e/i.test(String(durableJob.title || ''))) {
+        if (durableJob?.state === States.EXECUTING && isProductionWorkflow(durableJob)) {
           const trace = workflowStore.getJobTrace(durableJob.job_id);
           const parentTask = trace?.tasks?.find(t => t.task_id === durableJob.active_task_id) || null;
           const children = parentTask ? (trace.tasks || []).filter(t => t.parent_task_id === parentTask.task_id) : [];
-          const required = ['architect', 'qa'].map(role => children.find(t => String(t.role).toLowerCase() === role));
+          const required = ProductionRoles.map(role => children.find(t => String(t.role).toLowerCase() === role));
           const terminal = required.every(t => t && ['completed', 'failed', 'cancelled'].includes(String(t.status).toLowerCase()));
           if (terminal) {
             const evidence = required.map(t => {
@@ -2591,7 +2580,7 @@ function isImmediateSilentRequest(messages) {
             body.messages,
             targetRole
           );
-          if (langGraphDecision && /production e2e/i.test(String(workflowStore.getJob(workflowStore.findJobIdFromMessages(body.messages || []) || '')?.title || '')) &&
+          if (langGraphDecision && isProductionWorkflow(workflowStore.getJob(workflowStore.findJobIdFromMessages(body.messages || []) || '')) &&
               ['sessions_spawn', 'agents_wait'].includes(String(toolCall?.name || ''))) {
             console.warn(`[Adapter:LangGraphGuard] Suppressed coordinator ${toolCall.name} for Production E2E; LangGraph owns workflow orchestration.`);
             toolCall = null;
@@ -2920,7 +2909,7 @@ function isImmediateSilentRequest(messages) {
             body.messages,
             targetRole
           );
-          if (langGraphDecision && /production e2e/i.test(String(workflowStore.getJob(workflowStore.findJobIdFromMessages(body.messages || []) || '')?.title || '')) &&
+          if (langGraphDecision && isProductionWorkflow(workflowStore.getJob(workflowStore.findJobIdFromMessages(body.messages || []) || '')) &&
               ['sessions_spawn', 'agents_wait'].includes(String(toolCall?.name || ''))) {
             console.warn(`[Adapter:LangGraphGuard] Suppressed coordinator ${toolCall.name} for Production E2E; LangGraph owns workflow orchestration.`);
             toolCall = null;

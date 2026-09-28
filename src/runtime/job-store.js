@@ -3,6 +3,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { createEnvelope, validateEnvelope, validatePayload } from '../../protocol/cos-ap-v1/index.js';
+import { isProductionWorkflow } from './workflow/definitions/production.js';
+import { ProductionRoles, productionTaskSpec } from './workflow/catalog/production.js';
 
 const DATA_DIR = process.env.WORKFLOW_DATA_DIR || '/home/long/work/chatgpt-adapter/data';
 const DB_PATH = process.env.WORKFLOW_DB || path.join(DATA_DIR, 'workflow.db');
@@ -892,13 +894,12 @@ export class WorkflowStore {
     if (existing) return existing;
     const job = this.getJob(jobId);
     const normalizedRole = String(role).toLowerCase();
-    const productionExecution = /production e2e/i.test(String(job?.title || ''))
-      ? normalizedRole === 'architect'
-        ? { executor: 'ExecutionManager', command: 'node --check /home/long/work/chatgpt-adapter/server.js', cwd: '/home/long/work/chatgpt-adapter', timeout_ms: 120000, deterministic: true }
-        : normalizedRole === 'qa'
-          ? { executor: 'ExecutionManager', command: 'node --check /home/long/work/chatgpt-adapter/test-tool-turn.js', cwd: '/home/long/work/chatgpt-adapter', timeout_ms: 120000, deterministic: true }
-          : null
+    const productionTask = isProductionWorkflow(job) && ProductionRoles.includes(normalizedRole)
+      ? productionTaskSpec(
+          normalizedRole === 'architect' ? 'architect-check' : 'qa-check'
+        )
       : null;
+    const productionExecution = productionTask?.execution || null;
     const durableMetadata = productionExecution ? { ...productionExecution, ...metadata } : metadata;
     const taskId = id('task'); const ts = now();
     this.db.prepare("INSERT INTO tasks(task_id, job_id, role, description, status, parent_task_id, dependency_json, metadata_json, created_at, updated_at) VALUES(?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)").run(taskId, jobId, role, description, parentTaskId, JSON.stringify(dependencies), JSON.stringify(durableMetadata), ts, ts);
@@ -988,8 +989,8 @@ export class WorkflowStore {
     // part of the CTO task's execution contract and must settle first.
     if (String(task.role || '').toLowerCase() === 'cto' && outcome === 'success') {
       const children = this.db.prepare('SELECT task_id, role, status FROM tasks WHERE parent_task_id = ?').all(task.task_id);
-      const isProductionE2E = /production e2e/i.test(String(this.getJob(jobId)?.title || ''));
-      const requiredRoles = isProductionE2E ? ['architect', 'qa'] : [];
+      const isProductionE2E = isProductionWorkflow(this.getJob(jobId));
+      const requiredRoles = isProductionE2E ? ProductionRoles : [];
       const missingRequiredRole = requiredRoles.find(role => !children.some(t => String(t.role).toLowerCase() === role));
       const openChildren = children.filter(t => !['completed', 'failed', 'cancelled'].includes(String(t.status).toLowerCase()));
       const failedChildren = children.filter(t => ['failed', 'cancelled'].includes(String(t.status).toLowerCase()));
@@ -1012,7 +1013,7 @@ export class WorkflowStore {
       }
     }
     const isRequiredExecutionCheck = /Production E2E acceptance|node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/(?:server\.js|test-tool-turn\.js)/i.test(String(task.description || ''));
-    if (outcome === 'success' && isRequiredExecutionCheck && ['architect', 'qa'].includes(String(task.role || '').toLowerCase())) {
+    if (outcome === 'success' && isRequiredExecutionCheck && ProductionRoles.includes(String(task.role || '').toLowerCase())) {
       const text = String(content || '');
       const promptDataStart = text.indexOf('<prompt-data>');
       const promptDataEnd = text.indexOf('</prompt-data>');
@@ -1310,8 +1311,8 @@ export class WorkflowStore {
           return this.getJob(jobId);
         }
         const childRows = this.db.prepare('SELECT task_id, role, status, description FROM tasks WHERE parent_task_id = ?').all(taskId);
-        const isProductionE2E = /production e2e/i.test(String(this.getJob(jobId)?.title || ''));
-        const requiredRoles = isProductionE2E ? ['architect', 'qa'] : [];
+        const isProductionE2E = isProductionWorkflow(this.getJob(jobId));
+        const requiredRoles = isProductionE2E ? ProductionRoles : [];
         const missingRequiredRole = requiredRoles.find(role => !childRows.some(t => String(t.role).toLowerCase() === role));
         if (missingRequiredRole) {
           this.db.prepare("UPDATE tasks SET status = 'failed', updated_at = ? WHERE task_id = ?").run(ts, taskId);
@@ -1432,8 +1433,8 @@ export class WorkflowStore {
       const failedTasks = this.db.prepare("SELECT task_id, role FROM tasks WHERE job_id=? AND status IN ('failed','cancelled')").all(jobId);
       if (failedTasks.length) throw new Error(`cannot terminalize success with failed tasks: ${failedTasks.map(t => t.task_id).join(',')}`);
       const activeTask = job.active_task_id ? this.getTask(job.active_task_id) : null;
-      if (activeTask?.role === 'cto' && /production e2e/i.test(String(job.title || ''))) {
-        const requiredRoles = ['architect', 'qa'];
+      if (activeTask?.role === 'cto' && isProductionWorkflow(job)) {
+        const requiredRoles = ProductionRoles;
         const children = this.db.prepare('SELECT task_id, role, status FROM tasks WHERE parent_task_id=?').all(activeTask.task_id);
         const missing = requiredRoles.filter(role => !children.some(t => String(t.role).toLowerCase() === role));
         if (missing.length) throw new Error(`cannot terminalize: missing required specialist children: ${missing.join(',')}`);
@@ -1496,7 +1497,7 @@ export class WorkflowStore {
       const ts = now();
       this.db.prepare("UPDATE attempts SET status = 'timeout', finished_at = ?, error = ? WHERE attempt_id = ? AND status = 'started'").run(ts, 'stale attempt recovered by reconciler', row.attempt_id);
       this.recordEvent(row.job_id, 'attempt.timeout', { attemptId: row.attempt_id, taskId: row.task_id }, row.attempt_id);
-      const isProductionE2E = /production e2e/i.test(String(job.title || ''));
+      const isProductionE2E = isProductionWorkflow(job);
       if (isProductionE2E && String(job.state || '').toUpperCase() === 'EXECUTING') {
         // Provider/runtime timeout is recoverable workflow state. RecoveryManager
         // owns WAIT/RESUME and must preserve the same durable task/session.

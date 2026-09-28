@@ -1,19 +1,7 @@
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
-
-export const WorkflowPhase = Object.freeze({
-  PROPOSED: 'PROPOSED',
-  APPROVED: 'APPROVED',
-  SPAWN_CTO: 'SPAWN_CTO',
-  ASSIGN_CHILDREN: 'ASSIGN_CHILDREN',
-  RUN_CHILDREN: 'RUN_CHILDREN',
-  WAIT: 'WAIT',
-  VALIDATE_EVIDENCE: 'VALIDATE_EVIDENCE',
-  SYNTHESIZE: 'SYNTHESIZE',
-  TERMINALIZE: 'TERMINALIZE',
-  PROJECT: 'PROJECT',
-  COMPLETED: 'COMPLETED',
-  FAILED: 'FAILED'
-});
+import { WorkflowPhase } from './workflow/phases.js';
+import { ProductionRoles } from './workflow/catalog/production.js';
+import { isProductionWorkflow } from './workflow/definitions/production.js';
 
 export const LangGraphActions = Object.freeze({
   NOOP: 'NOOP',
@@ -29,9 +17,9 @@ export const LangGraphActions = Object.freeze({
 });
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'timeout']);
-const REQUIRED_PRODUCTION_ROLES = ['architect', 'qa'];
+export { WorkflowPhase };
 
-function production(job) { return /production e2e/i.test(String(job?.title || '')); }
+function production(job) { return isProductionWorkflow(job); }
 function executionSpec(task) {
   try { return JSON.parse(task?.metadata_json || '{}'); } catch (_) { return {}; }
 }
@@ -65,7 +53,7 @@ function classify(state) {
   const tasks = Array.isArray(state.tasks) ? state.tasks : [];
   const cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
   const children = cto ? tasks.filter(t => t.parent_task_id === cto.task_id) : [];
-  const required = REQUIRED_PRODUCTION_ROLES.map(role => children.find(t => String(t.role).toLowerCase() === role));
+  const required = ProductionRoles.map(role => children.find(t => String(t.role).toLowerCase() === role));
   const results = new Map((state.results || []).map(r => [r.task_id, r]));
 
   switch (runtime.phase) {
@@ -78,7 +66,7 @@ function classify(state) {
         ? { action: LangGraphActions.ASSIGN_CHILDREN, reason: 'CTO runtime attached; assign required children' }
         : { action: LangGraphActions.SPAWN_CTO, reason: 'waiting for CTO native runtime attachment' };
     case WorkflowPhase.ASSIGN_CHILDREN: {
-      const missing = required.filter(Boolean).length < REQUIRED_PRODUCTION_ROLES.length;
+      const missing = required.filter(Boolean).length < ProductionRoles.length;
       return missing
         ? { action: LangGraphActions.ASSIGN_CHILDREN, reason: 'required child assignments incomplete' }
         : { action: LangGraphActions.RUN_CHILDREN, reason: 'required child assignments complete' };
@@ -197,7 +185,7 @@ export async function evaluateLangGraph({ job, tasks = [], results = [], runtime
     const children = cto ? tasks.filter(t => t.parent_task_id === cto.task_id) : [];
     const deterministic = children.filter(task => {
       const spec = executionSpec(task);
-      return ['architect', 'qa'].includes(String(task.role).toLowerCase())
+        return ProductionRoles.includes(String(task.role).toLowerCase())
         && spec.executor === 'ExecutionManager'
         && spec.command
         && spec.cwd

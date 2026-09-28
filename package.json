@@ -17,6 +17,7 @@
     "test:e2e:v27": "node scripts/run-v27-e2e.js",
     "test:execution-manager": "node tests/test-execution-manager.js",
     "test:production-guards": "node tests/test-production-guards.js",
+    "test:workflow-policy-m1": "node tests/test-workflow-policy-m1.js",
     "test:phase5-recovery": "node tests/test-phase5-recovery.js"
   },
   "dependencies": {

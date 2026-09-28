@@ -4,6 +4,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { deliverSessionMessage } from './session-transport.js';
+import { isProductionWorkflow } from './workflow/definitions/production.js';
+import { ProductionRoles } from './workflow/catalog/production.js';
 
 const execFileAsync = promisify(execFile);
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || 'openclaw';
@@ -224,8 +226,8 @@ export class RecoveryManager {
       : this.store.db.prepare("SELECT * FROM tasks WHERE status = 'running' AND openclaw_session_key IS NOT NULL").all())
       .filter(t => ['running', 'failed'].includes(String(t.status).toLowerCase())
         && t.openclaw_session_key
-        && ['architect', 'qa'].includes(String(t.role || '').toLowerCase())
-        && /production e2e/i.test(String(this.store.getJob(t.job_id)?.title || '')));
+        && ProductionRoles.includes(String(t.role || '').toLowerCase())
+        && isProductionWorkflow(this.store.getJob(t.job_id)));
     for (const task of reconcilableTasks) {
       const runtime = runtimeMap?.get(task.openclaw_session_key);
       const runtimeStatus = String(runtime?.status || '').toLowerCase();
@@ -243,7 +245,7 @@ export class RecoveryManager {
             outcome
           });
         } else if (task.status === 'failed' && outcome === 'success'
-          && ['architect', 'qa'].includes(String(task.role || '').toLowerCase())
+          && ProductionRoles.includes(String(task.role || '').toLowerCase())
           && /\[ACTUAL TOOL RESULT EVIDENCE\]/i.test(completion)
           && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/(?:server\.js|test-tool-turn\.js)/i.test(completion)
           && hasVerifiedSuccessfulRuntimeEvidence(task, completion)) {
@@ -276,9 +278,9 @@ export class RecoveryManager {
     if (this.executionManager) {
       const trace = jobId ? this.store.getJobTrace(jobId) : null;
       const terminalDeterministicTasks = (trace?.tasks || this.store.db.prepare("SELECT t.* FROM tasks t JOIN jobs j ON j.job_id=t.job_id WHERE t.status IN ('completed','failed') AND t.role IN ('architect','qa') AND j.state='EXECUTING'").all())
-        .filter(task => ['architect', 'qa'].includes(String(task.role || '').toLowerCase())
+        .filter(task => ProductionRoles.includes(String(task.role || '').toLowerCase())
           && ['completed', 'failed'].includes(String(task.status).toLowerCase())
-          && /production e2e/i.test(String(this.store.getJob(task.job_id)?.title || ''))
+          && isProductionWorkflow(this.store.getJob(task.job_id))
           && !task.execution_session_id
           && !task.execution_status);
       for (const task of terminalDeterministicTasks) {
@@ -333,7 +335,7 @@ export class RecoveryManager {
       const trace = this.store.getJobTrace(jobId);
       const job = trace?.job;
       const cto = trace?.tasks?.find(t => t.task_id === job?.active_task_id && String(t.role).toLowerCase() === 'cto');
-      if (job?.state === 'EXECUTING' && /production e2e/i.test(String(job.title || '')) && cto?.openclaw_session_key) {
+      if (job?.state === 'EXECUTING' && isProductionWorkflow(job) && cto?.openclaw_session_key) {
         const runtime = runtimeMap?.get(cto.openclaw_session_key);
         const runtimeStatus = String(runtime?.status || '').toLowerCase();
         // The completion event can win the race and mark the durable CTO task
@@ -363,7 +365,7 @@ export class RecoveryManager {
               this.store.clearProviderWaiting(jobId);
             }
             const children = (trace.tasks || []).filter(t => t.parent_task_id === cto.task_id);
-            const required = ['architect', 'qa'].map(role => children.find(t => String(t.role).toLowerCase() === role));
+            const required = ProductionRoles.map(role => children.find(t => String(t.role).toLowerCase() === role));
             const childEvidenceValid = required.every(child => {
               if (!child || child.status !== 'completed') return false;
               const result = this.store.db.prepare('SELECT outcome, content FROM results WHERE task_id = ? ORDER BY created_at DESC LIMIT 1').get(child.task_id);
