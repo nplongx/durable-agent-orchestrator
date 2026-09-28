@@ -1,0 +1,7 @@
+{
+  "id": "chatgpt-adapter-workflow-guard",
+  "name": "ChatGPT Adapter Workflow Guard",
+  "description": "Blocks duplicate CTO child spawns after durable workflow assignment.",
+  "activation": { "onStartup": true },
+  "configSchema": { "type": "object", "additionalProperties": false }
+}

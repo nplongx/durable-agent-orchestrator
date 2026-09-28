@@ -159,9 +159,8 @@ export class ExecutionManager {
       const started = Date.now();
       let exitCode = null;
       while (Date.now() - started < timeoutMs) {
-        const probe = await run('bash', ['-lc', `test -f ${shellQuote(`/tmp/${tmuxName}.exit`)} && cat ${shellQuote(`/tmp/${tmuxName}.exit`)} || true`], { timeoutMs: 5000 });
-        const value = probe.stdout.trim();
-        if (/^-?\d+$/.test(value)) { exitCode = Number(value); break; }
+        const value = await fs.readFile(`/tmp/${tmuxName}.exit`, 'utf8').catch(() => '');
+        if (/^-?\d+$/.test(value.trim())) { exitCode = Number(value.trim()); break; }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       if (exitCode === null) {
@@ -179,11 +178,13 @@ export class ExecutionManager {
 
   async collect(taskId, { executionSessionId, attempt, command, exitCode = null, timeout = false }) {
     const tmuxName = `cos-exec-${executionSessionId.replace(/[^A-Za-z0-9_-]/g, '_')}`;
-    const stdout = await run('bash', ['-lc', `cat ${shellQuote(`/tmp/${tmuxName}.stdout`)} 2>/dev/null || true`], { timeoutMs: 5000 });
-    const stderr = await run('bash', ['-lc', `cat ${shellQuote(`/tmp/${tmuxName}.stderr`)} 2>/dev/null || true`], { timeoutMs: 5000 });
+    const [stdoutText, stderrText] = await Promise.all([
+      fs.readFile(`/tmp/${tmuxName}.stdout`, 'utf8').catch(() => ''),
+      fs.readFile(`/tmp/${tmuxName}.stderr`, 'utf8').catch(() => '')
+    ]);
     const result = this.store.finishExecution(taskId, {
       executionSessionId, attempt, command, exitCode,
-      stdout: stdout.stdout, stderr: stderr.stdout,
+      stdout: stdoutText, stderr: stderrText,
       status: timeout ? 'timeout' : exitCode === 0 ? 'completed' : 'failed',
       error: timeout ? 'execution timeout' : null
     });
@@ -192,7 +193,7 @@ export class ExecutionManager {
       fs.rm(`/tmp/${tmuxName}.stderr`, { force: true }),
       fs.rm(`/tmp/${tmuxName}.exit`, { force: true })
     ]);
-    return { ...result, command, exitCode, stdout: stdout.stdout, stderr: stderr.stdout, timedOut: timeout };
+    return { ...result, command, exitCode, stdout: stdoutText, stderr: stderrText, timedOut: timeout };
   }
 }
 

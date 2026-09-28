@@ -66,7 +66,10 @@ export class ProviderAdmissionController {
     const ts = nowIso();
     const expired = this.store.db.prepare(`SELECT lease_id, provider_id FROM provider_admission_leases
       WHERE state='ACTIVE' AND expires_at <= ?`).all(ts);
-    if (!expired.length) return 0;
+    if (!expired.length) {
+      this.repairInFlightCounts();
+      return 0;
+    }
     const tx = this.store.db.exec.bind(this.store.db);
     this.store.db.exec('BEGIN IMMEDIATE');
     try {
@@ -76,7 +79,60 @@ export class ProviderAdmissionController {
       }
       this.store.db.exec('COMMIT');
     } catch (e) { try { tx('ROLLBACK'); } catch (_) {} throw e; }
+    this.repairInFlightCounts();
     return expired.length;
+  }
+
+  repairInFlightCounts() {
+    const rows = this.store.db.prepare("SELECT provider_id, COUNT(*) AS n FROM provider_admission_leases WHERE state='ACTIVE' GROUP BY provider_id").all();
+    const counts = new Map(rows.map(row => [row.provider_id, Number(row.n) || 0]));
+    const providers = this.store.db.prepare('SELECT provider_id FROM provider_admission').all();
+    const ts = nowIso();
+    for (const provider of providers) {
+      const inFlight = counts.get(provider.provider_id) || 0;
+      this.store.db.prepare(`UPDATE provider_admission SET in_flight=?, state=CASE
+        WHEN cooldown_until IS NOT NULL AND cooldown_until > ? THEN 'COOLDOWN'
+        WHEN ? > 0 THEN 'IN_USE'
+        ELSE CASE WHEN state='PROBE' THEN 'PROBE' ELSE 'READY' END END,
+        updated_at=? WHERE provider_id=?`).run(inFlight, ts, inFlight, ts, provider.provider_id);
+    }
+  }
+
+  reconcileOrphanLeases({ liveTaskIds = new Set(), graceMs = 60_000 } = {}) {
+    this.expireLeases();
+    const cutoff = Date.now() - Math.max(0, Number(graceMs) || 0);
+    const active = this.store.db.prepare("SELECT * FROM provider_admission_leases WHERE state='ACTIVE'").all();
+    let released = 0;
+    for (const lease of active) {
+      const task = lease.task_id ? this.store.getTask(lease.task_id) : null;
+      const childTask = lease.role && lease.job_id
+        ? this.store.db.prepare("SELECT * FROM tasks WHERE job_id = ? AND parent_task_id = ? AND lower(role) = lower(?) ORDER BY created_at DESC LIMIT 1")
+          .get(lease.job_id, lease.task_id || '', lease.role)
+        : null;
+      const effectiveTask = childTask || task;
+      const taskStatus = String(effectiveTask?.status || '').toLowerCase();
+      // Terminal child runtime is authoritative: release its provider lease
+      // immediately. Grace applies only to fresh non-terminal dispatches.
+      if (!effectiveTask || ['completed', 'failed', 'cancelled'].includes(taskStatus)) {
+        this.release(lease.lease_id, { success: taskStatus === 'completed', reason: 'terminal task lease reconciled' });
+        released++;
+        continue;
+      }
+      const createdAt = Date.parse(lease.created_at || 0);
+      if (!Number.isFinite(createdAt) || createdAt > cutoff) continue;
+      if (effectiveTask && liveTaskIds.has(effectiveTask.task_id)) continue;
+      const sessionKey = effectiveTask?.openclaw_session_key || null;
+      // A lease is orphaned when its durable task is terminal or its runtime
+      // session is no longer present in authoritative OpenClaw inventory.
+      // Keep fresh leases untouched to avoid racing a just-dispatched spawn.
+      if (effectiveTask && taskStatus === 'running' && sessionKey && liveTaskIds.has(effectiveTask.task_id)) continue;
+      if (effectiveTask && ['pending', 'running'].includes(taskStatus) && sessionKey && !liveTaskIds.has(effectiveTask.task_id)) {
+        this.release(lease.lease_id, { success: false, reason: 'orphaned runtime lease reconciled' });
+        released++;
+        continue;
+      }
+    }
+    return released;
   }
 
   _normalize(row) {

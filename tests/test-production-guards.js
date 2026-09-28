@@ -115,16 +115,7 @@ assert.match(repaired.content,/\[ACTUAL TOOL RESULT EVIDENCE\]/i);
 assert.match(repaired.content,/node --check \/home\/long\/work\/chatgpt-adapter\/server\.js/);
 assert.match(repaired.content,/exit status\/code: 0/);
 
-const retryJob = makeProductionJob('same-session-retry');
-store.db.prepare("UPDATE tasks SET status='failed', updated_at=? WHERE task_id=?").run(new Date().toISOString(),retryJob.childId);
-store.db.prepare("UPDATE attempts SET status='failed', finished_at=? WHERE task_id=? AND status='started'").run(new Date().toISOString(),retryJob.childId);
-const retryBefore = store.getJobTrace(retryJob.jobId);
-const retryResult = await recovery.retryAgentTask(retryJob.childId,{actorRole:'cto',timeoutSeconds:1,reason:'same-session retry test'});
-assert.equal(retryResult.attempt,2);
-assert.equal(retryResult.session.openclaw_session_key,retryJob.sessionKey);
-assert.equal(store.getTask(retryJob.childId).status,'running');
-assert.equal(store.getJobTrace(retryJob.jobId).tasks.length,retryBefore.tasks.length);
-assert.equal(store.getJobTrace(retryJob.jobId).sessions.length,retryBefore.sessions.length);
+assert.equal(typeof recovery.retryAgentTask, 'undefined', 'RecoveryManager must not own business retry/orchestration');
 
 const timeoutJob = makeProductionJob('trajectory-timeout');
 process.env.FAKE_OPENCLAW_SESSION = timeoutJob.sessionKey;

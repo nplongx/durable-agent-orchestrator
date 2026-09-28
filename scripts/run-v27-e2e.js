@@ -3,218 +3,143 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { workflowStore } from '../job-store.js';
-import { RecoveryManager } from '../recovery-manager.js';
 
 const execFileAsync = promisify(execFile);
-const ADAPTER_URL = 'http://127.0.0.1:8318/v1/chat/completions';
-const OPENCLAW = '/home/long/.config/nvm/versions/node/v24.21.0/bin/openclaw';
-const DIRECTIVE = `Production E2E v27 ${randomUUID()}. First turn MUST be proposal only. After approval CTO must native sessions_spawn exactly two independent children in parallel: Architect runs the exact command node --check /home/long/work/chatgpt-adapter/server.js; QA runs the exact command node --check /home/long/work/chatgpt-adapter/test-tool-turn.js. Command paths are byte-exact: NEVER abbreviate /home/long/work/chatgpt-adapter as ~/work/chatgpt-adapter or any relative path. Children return actual command, output, exit status. CTO waits for both, synthesizes actual results, then completes Job. No prose-only success.`;
-const TOOLS = [{ type: 'function', function: {
-  name: 'sessions_spawn',
-  description: 'Spawn a subagent for a task',
-  parameters: { type: 'object', properties: { agentId: { type: 'string' }, task: { type: 'string' } }, required: ['agentId', 'task'] }
-}}];
+const OPENCLAW = process.env.OPENCLAW_BIN || '/home/long/.config/nvm/versions/node/v24.21.0/bin/openclaw';
+const SESSION_KEY = `e2e-v27-${randomUUID()}`;
+const E2E_ID = randomUUID();
+const DIRECTIVE = `Production E2E v27 ${E2E_ID}. First turn MUST be proposal only. After approval CTO must native sessions_spawn exactly two independent children in parallel: Architect runs the exact command node --check /home/long/work/chatgpt-adapter/server.js; QA runs the exact command node --check /home/long/work/chatgpt-adapter/test-tool-turn.js. Command paths are byte-exact: NEVER abbreviate /home/long/work/chatgpt-adapter as ~/work/chatgpt-adapter or any relative path. Children return actual command, output, exit status. Runtime owns waiting and synthesis from durable evidence. No prose-only success.`;
+let nativeSessionCreated = false;
 
-async function chat(messages) {
-  const response = await fetch(ADAPTER_URL, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: 'chatgpt-coordinator', tools: TOOLS, stream: false, messages })
-  });
-  assert.equal(response.ok, true, `adapter HTTP ${response.status}`);
-  return response.json();
-}
-
-async function runOpenClaw(sessionKey, message, timeoutSeconds = 180) {
-  console.log(`[OpenClaw] session=${sessionKey} message=${message.slice(0, 180)}...`);
-  try {
-    const { stdout, stderr } = await execFileAsync(OPENCLAW, [
-      'agent', '--agent', 'cto', '--session-key', sessionKey,
-      '--message', message, '--json', '--timeout', String(timeoutSeconds)
-    ], { timeout: (timeoutSeconds + 20) * 1000, maxBuffer: 10 * 1024 * 1024 });
-    if (stderr.trim()) console.log('[OpenClaw stderr]', stderr.trim().slice(-4000));
-    console.log('[OpenClaw stdout]', stdout.trim().slice(-12000));
-    return stdout;
-  } catch (error) {
-    const stdout = String(error.stdout || '');
-    if (
-      stdout.includes('"status": "timeout"')
-      || stdout.includes('"status":"timeout"')
-      || error?.code === 143
-      || error?.signal === 'SIGTERM'
-    ) {
-      console.warn(`[OpenClaw] provider timeout; preserving same session for durable recovery session=${sessionKey}`);
-      return stdout;
-    }
-    throw error;
-  }
+async function openclaw(message, timeoutSeconds = 600) {
+  const method = nativeSessionCreated ? 'sessions.send' : 'sessions.create';
+  const params = method === 'sessions.create'
+    ? { key: SESSION_KEY, agentId: 'coordinator', message }
+    : { key: SESSION_KEY, agentId: 'coordinator', message, idempotencyKey: `${SESSION_KEY}:send:${Date.now()}` };
+  const { stdout, stderr } = await execFileAsync(OPENCLAW, [
+    'gateway', 'call', method, '--timeout', '10000', '--params', JSON.stringify(params)
+  ], { timeout: (timeoutSeconds + 20) * 1000, maxBuffer: 20 * 1024 * 1024 });
+  const start = stdout.indexOf('{');
+  if (start < 0) throw new Error(`invalid ${method} response: ${stderr || stdout}`);
+  const payload = JSON.parse(stdout.slice(start));
+  if (!payload?.ok && method === 'sessions.create') throw new Error(`sessions.create rejected: ${JSON.stringify(payload)}`);
+  nativeSessionCreated = true;
+  return payload;
 }
 
 function snapshot(jobId) {
   const job = workflowStore.getJob(jobId);
+  const runtime = workflowStore.getWorkflowRuntimeState(jobId);
   const trace = workflowStore.getJobTrace(jobId);
   return {
     job,
-    tasks: (trace?.tasks || []).map(t => ({ task_id: t.task_id, role: t.role, status: t.status, run: t.openclaw_run_id, session: t.openclaw_session_key })),
+    runtime,
+    tasks: (trace?.tasks || []).map(t => ({
+      task_id: t.task_id,
+      role: t.role,
+      status: t.status,
+      run: t.openclaw_run_id,
+      session: t.openclaw_session_key,
+      execution_status: t.execution_status,
+      execution_exit_code: t.execution_exit_code,
+      metadata: t.metadata_json
+    })),
     results: (trace?.results || []).map(r => ({ task_id: r.task_id, outcome: r.outcome, content: r.content })),
     slack: workflowStore.getSlackProjection(jobId)
   };
 }
 
-async function waitFor(jobId, predicate, label, timeoutMs = 240000) {
+async function waitFor(jobId, predicate, label, timeoutMs = 900000) {
   const started = Date.now();
   let last = '';
   while (Date.now() - started < timeoutMs) {
-    const s = snapshot(jobId);
-    const compact = JSON.stringify({ state: s.job?.state, status: s.job?.status, tasks: s.tasks.map(t => [t.role, t.status, t.session]) });
+    const state = snapshot(jobId);
+    const compact = JSON.stringify({
+      state: state.job?.state,
+      phase: state.runtime?.phase,
+      tasks: state.tasks.map(t => [t.role, t.status, t.execution_status, t.execution_exit_code])
+    });
     if (compact !== last) { console.log(`[E2E:${label}] ${compact}`); last = compact; }
-    if (predicate(s)) return s;
-    await new Promise(r => setTimeout(r, 2000));
+    if (predicate(state)) return state;
+    await new Promise(resolve => setTimeout(resolve, 2000));
   }
   throw new Error(`timeout waiting for ${label}: ${JSON.stringify(snapshot(jobId))}`);
 }
 
-const base = { role: 'system', content: 'Runtime: name=Chief of Staff | agent=coordinator' };
-const firstMessages = [base, { role: 'user', content: DIRECTIVE }];
-const first = await chat(firstMessages);
-const proposal = first.choices?.[0]?.message;
-assert.ok(proposal, 'missing proposal');
-assert.equal(Boolean(proposal.tool_calls?.some(x => x.function?.name === 'sessions_spawn')), false, 'proposal spawned');
-console.log('[E2E] proposal-only PASS');
+const first = await openclaw(DIRECTIVE);
+assert.ok(first, 'missing OpenClaw proposal response');
 
-const secondMessages = [...firstMessages, proposal, { role: 'user', content: 'Duyệt proposal. Bắt đầu execution ngay.' }];
-let second = await chat(secondMessages);
-let approvalMessage = second.choices?.[0]?.message;
-let spawn = approvalMessage?.tool_calls?.find(x => x.function?.name === 'sessions_spawn');
-for (let retry = 0; !spawn && retry < 2; retry++) {
-  console.warn('[E2E] approval turn returned no native spawn; retrying SAME approval turn once');
-  second = await chat(secondMessages);
-  approvalMessage = second.choices?.[0]?.message;
-  spawn = approvalMessage?.tool_calls?.find(x => x.function?.name === 'sessions_spawn');
+const startedAt = Date.now();
+let jobId = null;
+while (Date.now() - startedAt < 120000 && !jobId) {
+  jobId = workflowStore.db.prepare('SELECT job_id FROM jobs WHERE title LIKE ? ORDER BY created_at DESC LIMIT 1').get(`%${E2E_ID}%`)?.job_id || null;
+  if (!jobId) await new Promise(resolve => setTimeout(resolve, 1000));
 }
-if (!spawn) {
-  const approvalJobId = workflowStore.findJobIdFromMessages(secondMessages)
-    || workflowStore.db.prepare("SELECT job_id FROM jobs WHERE status='active' AND title LIKE ? ORDER BY created_at DESC LIMIT 1")
-      .get(`%${DIRECTIVE.slice(0, 45)}%`)?.job_id;
-  const waitingJob = approvalJobId ? workflowStore.getJob(approvalJobId) : null;
-  if (waitingJob?.provider_waiting && waitingJob.provider_retry_at) {
-    const waitMs = Math.max(0, new Date(waitingJob.provider_retry_at).getTime() - Date.now()) + 1000;
-    console.warn('[E2E] provider admission waiting; preserving SAME approval until cooldown expires');
-    await new Promise(r => setTimeout(r, waitMs));
-    second = await chat(secondMessages);
-    approvalMessage = second.choices?.[0]?.message;
-    spawn = approvalMessage?.tool_calls?.find(x => x.function?.name === 'sessions_spawn');
-  }
-}
-assert.ok(spawn, 'approval did not produce native CTO sessions_spawn');
-const spawnArgs = JSON.parse(spawn.function.arguments);
-assert.equal(spawnArgs.agentId, 'cto');
-const jobId = [...String(spawnArgs.task).matchAll(/Durable Job ID:\s*(job_[A-Za-z0-9-]+)/g)].at(-1)?.[1];
-assert.ok(jobId, 'missing durable Job ID in CTO task');
-console.log(`[E2E] approval/native CTO spawn PASS job=${jobId}`);
+assert.ok(jobId, `durable Job not created for E2E_ID=${E2E_ID}`);
+const proposed = await waitFor(
+  jobId,
+  s => s.runtime?.phase === 'PROPOSED' && s.job?.state === 'PROPOSED' && String(s.job?.title || '').includes(E2E_ID),
+  'proposal-durable',
+  120000
+);
+jobId = proposed.job.job_id;
+assert.equal(proposed.runtime.phase, 'PROPOSED');
+assert.equal(proposed.tasks.some(t => t.role === 'cto' && t.session), false, 'CTO runtime exists before approval');
+console.log(`[E2E] proposal-only PASS job=${jobId}`);
 
-const pre = snapshot(jobId);
-assert.equal(pre.job.state, 'EXECUTING');
-assert.equal(pre.tasks.filter(t => t.role === 'cto').length, 1);
-
-// This is the real OpenClaw execution boundary. The harness does NOT mutate
-// workflow.db or manufacture child runtime IDs. OpenClaw owns sessions_spawn.
-const ctoSessionKey = `agent:cto:subagent:${randomUUID()}`;
-workflowStore.attachOpenClawRun(jobId, { runId: null, sessionKey: ctoSessionKey });
-assert.equal(workflowStore.getTask(workflowStore.getJob(jobId).active_task_id).openclaw_session_key, ctoSessionKey);
-await runOpenClaw(ctoSessionKey, spawnArgs.task, 180);
-
-// Provider admission can move the SAME approved Job into provider_waiting
-// during CTO/child execution. Preserve the same CTO session and wait for the
-// durable retry point; never create a replacement Job or bypass cooldown.
-let postSpawnState = snapshot(jobId);
-if (postSpawnState.job?.provider_waiting && postSpawnState.job.provider_retry_at) {
-  const waitMs = Math.max(0, new Date(postSpawnState.job.provider_retry_at).getTime() - Date.now()) + 1000;
-  console.warn(`[E2E] provider admission waiting during execution; preserving SAME CTO session until retry_at=${postSpawnState.job.provider_retry_at}`);
-  await new Promise(r => setTimeout(r, waitMs));
-  await runOpenClaw(ctoSessionKey, spawnArgs.task, 180);
-}
+await openclaw(`Duyệt Job ${jobId}. Bắt đầu execution ngay.`);
 
 let state = await waitFor(jobId,
-  s => s.tasks.some(t => t.role === 'architect') || s.tasks.some(t => t.role === 'qa') || ['completed','failed'].includes(s.job?.state),
-  'children-created', 180000);
+  s => s.job?.state === 'EXECUTING' && s.tasks.find(t => t.role === 'cto')?.session,
+  'approval-native-cto',
+  600000);
+assert.equal(state.job.state, 'EXECUTING');
+assert.ok(['SPAWN_CTO', 'ASSIGN_CHILDREN', 'RUN_CHILDREN', 'WAIT', 'VALIDATE_EVIDENCE', 'SYNTHESIZE', 'TERMINALIZE', 'PROJECT', 'COMPLETED'].includes(state.runtime.phase));
+assert.equal(state.tasks.filter(t => t.role === 'cto').length, 1);
+assert.ok(state.tasks.find(t => t.role === 'cto')?.session, 'native CTO runtime missing');
+console.log('[E2E] approval/native CTO spawn PASS');
 
-if (!state.tasks.some(t => String(t.role).toLowerCase() === 'qa')) {
-  await runOpenClaw(ctoSessionKey,
-    `Continue the SAME CTO session for Job ${jobId}. Architect has already been spawned. Do NOT wait for Architect and do NOT replace it. Immediately native sessions_spawn the independent QA child with this exact scope: run node --check /home/long/work/chatgpt-adapter/test-tool-turn.js and return exact command, stdout/stderr, and exit status. Both Architect and QA must run independently in parallel.`,
-    180);
-}
+state = await waitFor(jobId, s => {
+  const children = s.tasks.filter(t => ['architect', 'qa'].includes(String(t.role).toLowerCase()));
+  return children.length === 2 && children.every(t => t.session || t.run);
+}, 'native-children', 600000);
+const children = state.tasks.filter(t => ['architect', 'qa'].includes(String(t.role).toLowerCase()));
+assert.equal(new Set(children.map(t => t.role.toLowerCase())).size, 2);
+assert.ok(children.every(t => t.session || t.run), 'child native runtime identity missing');
+assert.ok(children.every(t => {
+  const metadata = JSON.parse(t.metadata || '{}');
+  return metadata.executor === 'ExecutionManager'
+    && metadata.cwd === '/home/long/work/chatgpt-adapter'
+    && ((t.role === 'architect' && metadata.command === 'node --check /home/long/work/chatgpt-adapter/server.js')
+      || (t.role === 'qa' && metadata.command === 'node --check /home/long/work/chatgpt-adapter/test-tool-turn.js'));
+}), 'typed child execution spec missing');
+console.log('[E2E] Architect + QA native independent spawns PASS');
 
-state = await waitFor(jobId,
-  s => {
-    const children = s.tasks.filter(t => ['architect','qa'].includes(String(t.role).toLowerCase()));
-    return children.length >= 2 && children.every(t => ['completed','failed','cancelled'].includes(String(t.status).toLowerCase()));
-  },
-  'children-terminal', 300000);
+state = await waitFor(jobId, s => {
+  const childRows = s.tasks.filter(t => ['architect', 'qa'].includes(String(t.role).toLowerCase()));
+  return childRows.length === 2 && childRows.every(t =>
+    ['completed', 'failed', 'cancelled'].includes(String(t.status).toLowerCase())
+  );
+}, 'children-terminal', 600000);
 
-const failedChildren = state.tasks.filter(t => ['architect','qa'].includes(String(t.role).toLowerCase()) && String(t.status).toLowerCase() === 'failed');
-if (failedChildren.length) {
-  const recovery = new RecoveryManager(workflowStore, { trajectoryTimeoutMs: 60_000 });
-  for (const child of failedChildren) {
-    console.log(`[E2E] same-task recovery retry role=${child.role} task=${child.task_id}`);
-    const session = workflowStore.getSessionByTask(child.task_id);
-    if (session && session.state !== 'ACTIVE') {
-      workflowStore.grantSessionAccess(session.session_id, {
-        accessorRole: 'cto',
-        permission: 'TAKEOVER',
-        grantedBy: 'recovery-policy',
-        expiresAt: new Date(Date.now() + 10 * 60_000).toISOString()
-      });
-    }
-    await recovery.retryAgentTask(child.task_id, {
-      actorRole: 'cto',
-      timeoutSeconds: 180,
-      reason: 'Production E2E provider/runtime failure; retry SAME durable task/session'
-    });
-  }
-  state = await waitFor(jobId,
-    s => {
-      const children = s.tasks.filter(t => ['architect','qa'].includes(String(t.role).toLowerCase()));
-      return children.length >= 2 && children.every(t => ['completed','failed','cancelled'].includes(String(t.status).toLowerCase()));
-    },
-    'children-terminal-after-recovery', 300000);
-}
-
-const children = state.tasks.filter(t => ['architect','qa'].includes(String(t.role).toLowerCase()));
-assert.equal(children.length, 2, `expected 2 required children, got ${JSON.stringify(children)}`);
 for (const child of children) {
-  assert.ok(child.session || child.run, `${child.role} missing OpenClaw runtime identity`);
-  const durableTask = workflowStore.getTask(child.task_id);
-  assert.equal(durableTask.execution_status, 'completed', `${child.role} missing ExecutionManager terminal status`);
-  assert.equal(durableTask.execution_exit_code, 0, `${child.role} durable execution exit != 0`);
+  const durable = workflowStore.getTask(child.task_id);
+  assert.equal(durable.execution_status, 'completed', `${child.role} missing ExecutionManager terminal status`);
+  assert.equal(Number(durable.execution_exit_code), 0, `${child.role} durable execution exit != 0`);
   const result = state.results.find(r => r.task_id === child.task_id);
   assert.ok(result, `${child.role} missing durable result`);
-  assert.match(result.content, /\[ACTUAL TOOL RESULT EVIDENCE\]/i, `${child.role} missing actual evidence`);
+  assert.match(result.content, /\[ACTUAL (?:TOOL RESULT|EXECUTION BATCH) EVIDENCE\]/i, `${child.role} missing actual evidence`);
 }
 console.log('[E2E] Architect + QA terminal with durable actual evidence PASS');
 
-// Resume the SAME CTO session. No new CTO task/session is created.
-await runOpenClaw(ctoSessionKey,
-  `Continue the same Durable Job ${jobId}. Do not spawn replacement children. Read the current durable child state and actual results. Both required children have now reached terminal state. Synthesize their actual command/output/exit status and complete the Job only if the durable DoD allows it. Return the factual final result.`,
-  180);
-
-// Provider timeout is not itself a child failure. Reconcile the same CTO
-// session against OpenClaw trajectory/runtime evidence before declaring E2E
-// failure or success.
-await new RecoveryManager(workflowStore, { trajectoryTimeoutMs: 60_000 }).reconcile({ jobId });
-
 state = await waitFor(jobId,
-  s => ['COMPLETED','FAILED','CANCELLED'].includes(String(s.job?.state).toUpperCase()) || ['success','failed'].includes(String(s.job?.status).toLowerCase()),
-  'job-terminal', 180000);
-
-console.log(JSON.stringify({
-  jobId,
-  job: state.job,
-  tasks: state.tasks,
-  results: state.results.map(r => ({ task_id: r.task_id, outcome: r.outcome, content: r.content })),
-  slack: state.slack
-}, null, 2));
-
-assert.equal(String(state.job.state).toUpperCase(), 'COMPLETED', `Job not completed: ${state.job.state}/${state.job.status}`);
+  s => String(s.job?.state).toUpperCase() === 'COMPLETED'
+    && String(s.runtime?.phase).toUpperCase() === 'COMPLETED',
+  'job-terminal',
+  900000);
+assert.equal(state.runtime.phase, 'COMPLETED');
+assert.ok(workflowStore.db.prepare('SELECT 1 FROM reports WHERE job_id=? LIMIT 1').get(jobId));
 state = await waitFor(jobId, s => s.slack.pendingEvents === 0, 'slack-projection', 240000);
 assert.equal(state.slack.pendingEvents, 0, `UNPROJECTED != 0: ${JSON.stringify(state.slack)}`);
+console.log(JSON.stringify({ jobId, runtime: state.runtime, job: state.job, tasks: state.tasks, slack: state.slack }, null, 2));
 console.log('run-v27-e2e: PASS');

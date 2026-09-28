@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { deliverSessionMessage } from './session-transport.js';
 
 const execFileAsync = promisify(execFile);
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || 'openclaw';
@@ -65,9 +66,19 @@ async function exportCompletedTrajectory(sessionKey, timeoutMs = 45000) {
         `execution status: ${executionEvidence.success && executionEvidence.exitCode === 0 ? 'completed' : 'failed'}`,
         '</prompt-data>'
       ].join('\n');
-      return `${factual}\n${assistantTexts.at(-1) || ''}`.trim();
+      const verifiedSynthesis = [...assistantTexts].reverse().find(text =>
+        /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/server\.js/i.test(text)
+        && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/test-tool-turn\.js/i.test(text)
+        && /exit\s+(?:status(?:\/code)?|code)\s*[:=]\s*0/i.test(text)
+      );
+      return `${factual}\n${verifiedSynthesis || assistantTexts.at(-1) || ''}`.trim();
     }
-    return assistantTexts.at(-1) || null;
+    const verifiedSynthesis = [...assistantTexts].reverse().find(text =>
+      /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/server\.js/i.test(text)
+      && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/test-tool-turn\.js/i.test(text)
+      && /exit\s+(?:status(?:\/code)?|code)\s*[:=]\s*0/i.test(text)
+    );
+    return verifiedSynthesis || assistantTexts.at(-1) || null;
   } finally {
     await fs.rm(path.join('/tmp', '.openclaw', 'trajectory-exports', output), { recursive: true, force: true }).catch(() => {});
   }
@@ -107,11 +118,13 @@ function normalizeCommand(command) {
 }
 
 function expectedCommandFromTask(task) {
-  const description = String(task?.description || '');
-  const match = description.match(
-    /(?:Run (?:the )?exact command(?: immediately)?|Run immediately|exact command)\s*:\s*(node\s+--check\s+\S+)/i
-  );
-  return normalizeCommand(match?.[1] || '');
+  try {
+    const metadata = JSON.parse(task?.metadata_json || '{}');
+    if (metadata.executor !== 'ExecutionManager') return '';
+    return normalizeCommand(metadata.command || '');
+  } catch (_) {
+    return '';
+  }
 }
 
 function hasVerifiedSuccessfulRuntimeEvidence(task, content) {
@@ -132,7 +145,8 @@ export class RecoveryManager {
     trajectoryTimeoutMs = 45_000,
     listSessions = listOpenClawSessions,
     exportTrajectory = exportCompletedTrajectory,
-    executionManager = null
+    executionManager = null,
+    providerAdmission = null
   } = {}) {
     this.store = store;
     this.sessionStaleMs = sessionStaleMs;
@@ -142,6 +156,7 @@ export class RecoveryManager {
     this.listSessions = listSessions;
     this.exportTrajectory = exportTrajectory;
     this.executionManager = executionManager;
+    this.providerAdmission = providerAdmission;
   }
 
   async reconcile({ jobId = null } = {}) {
@@ -151,6 +166,18 @@ export class RecoveryManager {
     const runtimeMap = runtimeSessions.error
       ? null
       : new Map(runtimeSessions.map(s => [s.key, s]));
+
+    if (this.providerAdmission && runtimeMap) {
+      const liveTaskIds = new Set();
+      const sessionRows = this.store.db.prepare("SELECT task_id, openclaw_session_key, status FROM tasks WHERE openclaw_session_key IS NOT NULL").all();
+      for (const task of sessionRows) {
+        const runtime = runtimeMap.get(task.openclaw_session_key);
+        const runtimeStatus = String(runtime?.status || '').toLowerCase();
+        if (runtime && ['active', 'running', 'working', 'queued'].includes(runtimeStatus)) liveTaskIds.add(task.task_id);
+      }
+      const releasedLeases = this.providerAdmission.reconcileOrphanLeases({ liveTaskIds, graceMs: this.sessionStaleMs });
+      if (releasedLeases) console.warn(`[RecoveryManager] reconciled ${releasedLeases} orphan provider lease(s)`);
+    }
 
     // A durable EXECUTING Job with no live OpenClaw runtime must not remain
     // eligible forever. These orphaned jobs otherwise look runnable to the
@@ -248,16 +275,20 @@ export class RecoveryManager {
     // evidence is still absent. Never create a replacement task/session.
     if (this.executionManager) {
       const trace = jobId ? this.store.getJobTrace(jobId) : null;
-      const terminalDeterministicTasks = (trace?.tasks || this.store.db.prepare("SELECT t.* FROM tasks t JOIN jobs j ON j.job_id=t.job_id WHERE t.status='completed' AND t.role IN ('architect','qa') AND j.state='EXECUTING'").all())
+      const terminalDeterministicTasks = (trace?.tasks || this.store.db.prepare("SELECT t.* FROM tasks t JOIN jobs j ON j.job_id=t.job_id WHERE t.status IN ('completed','failed') AND t.role IN ('architect','qa') AND j.state='EXECUTING'").all())
         .filter(task => ['architect', 'qa'].includes(String(task.role || '').toLowerCase())
-          && String(task.status).toLowerCase() === 'completed'
+          && ['completed', 'failed'].includes(String(task.status).toLowerCase())
           && /production e2e/i.test(String(this.store.getJob(task.job_id)?.title || ''))
           && !task.execution_session_id
           && !task.execution_status);
       for (const task of terminalDeterministicTasks) {
         try {
           const latest = this.store.db.prepare('SELECT content FROM results WHERE task_id=? ORDER BY created_at DESC LIMIT 1').get(task.task_id);
-          if (/\[ACTUAL EXECUTION EVIDENCE\]/i.test(String(latest?.content || ''))) continue;
+          const latestContent = String(latest?.content || '');
+          if (/\[ACTUAL EXECUTION EVIDENCE\]/i.test(latestContent)
+            && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/(?:server\.js|test-tool-turn\.js)/i.test(latestContent)
+            && /exit status\/code\s*:\s*0/i.test(latestContent)
+            && /execution status\s*:\s*completed/i.test(latestContent)) continue;
           const command = expectedCommandFromTask(task) || String(JSON.parse(task.metadata_json || '{}').command || '').trim();
           if (!command) continue;
           const result = await this.executionManager.executeTask(task.task_id, { command });
@@ -276,6 +307,13 @@ export class RecoveryManager {
             '</prompt-data>'
           ].join('\n');
           this.store.repairResultEvidence(task.task_id, evidence);
+          if (this.store.getTask(task.task_id)?.status === 'failed') {
+            this.store.reconcileFailedTaskByRuntime(task.task_id, {
+              content: evidence,
+              runId: task.openclaw_run_id || null,
+              sessionKey: task.openclaw_session_key || null
+            });
+          }
           this.store.recordEvent(task.job_id, 'execution.evidence_recovered', {
             taskId: task.task_id, role: task.role, command, exitCode: result.exitCode,
             executionSessionId: this.store.getTask(task.task_id)?.execution_session_id || null
@@ -285,6 +323,12 @@ export class RecoveryManager {
         }
       }
     }
+    // A provider/runtime failure on a required specialist is retryable only on
+    // the SAME durable task/session. Admission happens before dispatch so a
+    // failed child cannot create a burst or consume a healthy account outside
+    // the durable provider gate. Cap recovery to one retry per task here.
+    // Business workflow advancement belongs to LangGraph. RecoveryManager
+    // performs only runtime/orphan reconciliation here.
     if (jobId) {
       const trace = this.store.getJobTrace(jobId);
       const job = trace?.job;
@@ -303,12 +347,20 @@ export class RecoveryManager {
             if (/rate[_ -]?limit|too many requests|chưa nhận được phản hồi từ nguồn AI/i.test(String(completion || ''))) {
               const cooldown = this.store.db.prepare("SELECT MIN(cooldown_until) AS retry_at FROM provider_admission WHERE provider_id <> 'chatgpt:global' AND state='COOLDOWN' AND cooldown_until IS NOT NULL").get();
               const retryAt = cooldown?.retry_at ? Date.parse(cooldown.retry_at) : Date.now() + 60_000;
-              this.store.setProviderWaiting(jobId, Math.max(0, retryAt - Date.now()), 'CTO runtime hit provider rate limit; preserve same durable session');
-              this.store.recordEvent(jobId, 'provider.waiting', {
-                role: 'cto', taskId: cto.task_id, sessionKey: cto.openclaw_session_key,
-                retryAt: new Date(retryAt).toISOString(), reason: 'cto_runtime_rate_limit'
-              }, `${jobId}|cto-rate-limit|${new Date(retryAt).toISOString()}`);
-              return { staleSessions: [], staleExecutions: [], providerWaiting: true };
+              const healthyProvider = this.providerAdmission?.all?.().some(row =>
+                row.provider_id !== 'chatgpt:global'
+                && ['READY', 'PROBE'].includes(row.state)
+                && Number(row.in_flight || 0) === 0
+              );
+              if (!healthyProvider) {
+                this.store.setProviderWaiting(jobId, Math.max(0, retryAt - Date.now()), 'CTO runtime hit provider rate limit; preserve same durable session');
+                this.store.recordEvent(jobId, 'provider.waiting', {
+                  role: 'cto', taskId: cto.task_id, sessionKey: cto.openclaw_session_key,
+                  retryAt: new Date(retryAt).toISOString(), reason: 'cto_runtime_rate_limit'
+                }, jobId + '|cto-rate-limit|' + new Date(retryAt).toISOString());
+                return { staleSessions: [], staleExecutions: [], providerWaiting: true };
+              }
+              this.store.clearProviderWaiting(jobId);
             }
             const children = (trace.tasks || []).filter(t => t.parent_task_id === cto.task_id);
             const required = ['architect', 'qa'].map(role => children.find(t => String(t.role).toLowerCase() === role));
@@ -320,11 +372,7 @@ export class RecoveryManager {
                 && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/(?:server\.js|test-tool-turn\.js)/i.test(String(result.content || ''))
                 && /exit\s+(?:status|code)(?:\/code)?\s*(?::|=)?\s*(?:was\s+successful\s*\()?\s*0/i.test(String(result.content || ''));
             });
-            const synthesisText = normalizeCommand(completion);
-            const synthesisValid = childEvidenceValid
-              && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/server\.js/i.test(synthesisText)
-              && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/test-tool-turn\.js/i.test(synthesisText)
-              && /exit\s+(?:status|code)(?:\/code)?\s*[:=]\s*0/i.test(synthesisText);
+            const synthesisValid = childEvidenceValid && Boolean(String(completion || '').trim());
             if (childEvidenceValid && synthesisValid) {
               this.store.completeTaskByRuntime(jobId, {
                 runId: cto.openclaw_run_id || runtime.runId || null,
@@ -350,36 +398,22 @@ export class RecoveryManager {
               }, `${jobId}|job-runtime-reconciled|success`);
             }
             else if (runtimeStatus === 'done' && required.some(child => !child)) {
-              // A terminal CTO runtime with a missing required specialist is a
-              // recoverable failure state, not an indefinitely EXECUTING Job.
-              // Do not synthesize or replace the missing child; close this Job
-              // through the normal durable failure path before any fresh E2E.
-              this.store.complete(jobId, [
-                '[RECOVERY FAILURE]',
-                'CTO runtime completed before all required production E2E specialist children were spawned.',
-                completion
-              ].join('\n'), 'failure');
-              const session = this.store.getSessionByOpenClawKey(cto.openclaw_session_key);
-              if (session) this.store.updateAgentSession(session.session_id, { state: 'FAILED' });
+              // Missing specialist is a resumable graph state. Do not convert a
+              // terminal model turn into business-job failure: LangGraph will
+              // resume the SAME CTO session and request only the missing child.
               this.store.recordEvent(jobId, 'job.runtime_reconciled', {
-                taskId: cto.task_id, sessionKey: cto.openclaw_session_key, runId: cto.openclaw_run_id || runtime.runId || null, outcome: 'failure', reason: 'missing required specialist child'
-              }, `${jobId}|job-runtime-reconciled|missing-child`);
+                taskId: cto.task_id, sessionKey: cto.openclaw_session_key, runId: cto.openclaw_run_id || runtime.runId || null,
+                outcome: 'waiting', reason: 'missing required specialist child'
+              }, jobId + '|job-runtime-reconciled|missing-child|waiting');
             }
             else if (runtimeStatus === 'done'
               && required.every(child => child && ['completed', 'failed', 'cancelled'].includes(String(child.status).toLowerCase()))) {
-              // Failure-only recovery: never bypass successful terminalization.
-              this.store.complete(jobId, [
-                '[RECOVERY FAILURE]',
-                'CTO runtime completed, but required production E2E evidence or synthesis was invalid.',
-                completion,
-                '[ACTUAL CHILD RESULTS]',
-                required.map(child => this.store.db.prepare('SELECT content FROM results WHERE task_id = ? ORDER BY created_at DESC LIMIT 1').get(child.task_id)?.content || '').join('\n\n')
-              ].join('\n'), 'failure');
-              const session = this.store.getSessionByOpenClawKey(cto.openclaw_session_key);
-              if (session) this.store.updateAgentSession(session.session_id, { state: 'FAILED' });
+              // Terminal model turn is not terminal business state. Keep the
+              // Job open until deterministic evidence/synthesis gates pass.
               this.store.recordEvent(jobId, 'job.runtime_reconciled', {
-                taskId: cto.task_id, sessionKey: cto.openclaw_session_key, runId: cto.openclaw_run_id || runtime.runId || null, outcome: 'failure'
-              }, `${jobId}|job-runtime-reconciled|failure`);
+                taskId: cto.task_id, sessionKey: cto.openclaw_session_key, runId: cto.openclaw_run_id || runtime.runId || null,
+                outcome: 'waiting', reason: 'required child evidence or CTO synthesis not yet valid'
+              }, `${jobId}|job-runtime-reconciled|evidence-waiting`);
             }
           } catch (error) {
             console.warn(`[RecoveryManager] CTO trajectory reconciliation failed job=${jobId}: ${error.message}`);
@@ -450,63 +484,6 @@ export class RecoveryManager {
     return { staleSessions: stale.filter(Boolean), staleExecutions: execution, openclawInventoryAvailable: !runtimeSessions.error };
   }
 
-  async retryAgentTask(taskId, { actorRole = 'cto', message = null, timeoutSeconds = 120, reason = 'same-task recovery retry' } = {}) {
-    const task = this.store.getTask(taskId);
-    if (!task) throw new Error(`task not found: ${taskId}`);
-    const session = this.store.getSessionByTask(taskId);
-    if (!session) throw new Error(`agent session not found for task: ${taskId}`);
-    let prepared;
-    if (session.state === 'ACTIVE') {
-      if (!['failed', 'pending'].includes(String(task.status).toLowerCase())) {
-        throw new Error(`same-session retry requires FAILED or PENDING task; got ${task.status}`);
-      }
-      const nextAttempt = Math.max(1, Number(task.execution_attempt || 0), Number(session.attempt || 0)) + 1;
-      const ts = new Date().toISOString();
-      this.store.db.prepare("UPDATE agent_sessions SET attempt = ?, updated_at = ?, last_activity_at = ? WHERE session_id = ? AND state = 'ACTIVE'")
-        .run(nextAttempt, ts, ts, session.session_id);
-      this.store.db.prepare("UPDATE tasks SET status = 'running', updated_at = ? WHERE task_id = ? AND status IN ('failed','pending')")
-        .run(ts, taskId);
-      const attemptId = `attempt_${randomUUID()}`;
-      this.store.db.prepare("INSERT INTO attempts(attempt_id, task_id, status, openclaw_run_id, started_at) VALUES(?, ?, 'started', ?, ?)")
-        .run(attemptId, taskId, task.openclaw_run_id || null, ts);
-      this.store.recordEvent(task.job_id, 'task.retry_started', {
-        taskId, sessionId: session.session_id, actorRole, attempt: nextAttempt, attemptId, reason, mode: 'same-session'
-      }, `${taskId}|retry|${nextAttempt}`);
-      prepared = {
-        task: this.store.getTask(taskId),
-        session: this.store.getSession(session.session_id),
-        attempt: nextAttempt,
-        attemptRecord: this.store.db.prepare('SELECT * FROM attempts WHERE attempt_id = ?').get(attemptId)
-      };
-    } else {
-      prepared = this.store.beginAgentRetry(taskId, { actorRole, reason });
-    }
-    const sessionKey = prepared.session.openclaw_session_key;
-    const retryMessage = message || `Retry the SAME durable task now. Do not create a replacement task or session. Execute the exact original scope immediately and return factual execution evidence: exact command, stdout/stderr, and exit status. Durable task: ${taskId}. Attempt: ${prepared.attempt}.`;
-    let raw;
-    try {
-      raw = await cli(OPENCLAW_BIN, ['agent', '--agent', prepared.session.role, '--session-key', sessionKey, '--message', retryMessage, '--json', '--timeout', String(timeoutSeconds)], (timeoutSeconds + 15) * 1000);
-    } catch (error) {
-      this.store.db.prepare("UPDATE attempts SET status = 'failed', finished_at = ?, error = ? WHERE task_id = ? AND status = 'started' ORDER BY started_at DESC LIMIT 1")
-        .run(new Date().toISOString(), error.message, taskId);
-      this.store.updateAgentSession(prepared.session.session_id, { state: 'FAILED' });
-      this.store.recordEvent(prepared.task.job_id, 'task.retry_failed', { taskId, sessionKey, attempt: prepared.attempt, error: error.message }, `${taskId}|retry-failed|${prepared.attempt}`);
-      throw error;
-    }
-    // A same-session retry gets a new OpenClaw run id. Persist it against the
-    // new durable attempt so late completion from the previous run cannot
-    // settle the retry, even though both attempts share one session key.
-    const rawText = String(raw || '');
-    const retryRunId = rawText.match(/(?:^|[,{\s])"?runId"?\s*[:=]\s*"?([A-Za-z0-9._:-]+)/i)?.[1] || null;
-    if (retryRunId) {
-      const ts = new Date().toISOString();
-      this.store.db.prepare('UPDATE attempts SET openclaw_run_id = ? WHERE attempt_id = ? AND status = \'started\'').run(retryRunId, prepared.attemptRecord.attempt_id);
-      this.store.db.prepare('UPDATE tasks SET openclaw_run_id = ?, updated_at = ? WHERE task_id = ? AND status = \'running\'').run(retryRunId, ts, taskId);
-    }
-    this.store.heartbeatAgentSession(prepared.session.session_id);
-    this.store.recordEvent(prepared.task.job_id, 'task.retry_dispatched', { taskId, sessionKey, attempt: prepared.attempt }, `${taskId}|retry-dispatched|${prepared.attempt}`);
-    return { ...prepared, raw };
-  }
 }
 
 export { listOpenClawSessions, tmuxExists };

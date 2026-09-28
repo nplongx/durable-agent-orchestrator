@@ -21,15 +21,16 @@ const SESSION_TRANSPORT_RETRY_MAX_MS = Math.max(SESSION_TRANSPORT_RETRY_BASE_MS,
 const SESSION_TRANSPORT_LEASE_MS = Math.max(5_000, Number(process.env.SESSION_TRANSPORT_LEASE_MS) || 120_000);
 let sessionTransportBusy = false;
 const executionManager = new ExecutionManager(workflowStore);
+const providerAdmission = new ProviderAdmissionController(workflowStore);
 executionManager.cleanupOrphanedArtifacts().then(count => {
   if (count) console.log(`[Adapter:Execution] cleaned ${count} orphaned batch/execution artifact(s)`);
 }).catch(error => console.warn(`[Adapter:Execution] artifact cleanup skipped: ${error.message}`));
 const recoveryManager = new RecoveryManager(workflowStore, {
   sessionStaleMs: Math.max(30_000, Number(process.env.RECOVERY_SESSION_STALE_MS) || 5 * 60 * 1000),
   executionStaleMs: Math.max(10_000, Number(process.env.RECOVERY_EXECUTION_STALE_MS) || 2 * 60 * 1000),
-  executionManager
+  executionManager,
+  providerAdmission
 });
-const providerAdmission = new ProviderAdmissionController(workflowStore);
 
 function providerIdsFromBridge() {
   return ['chatgpt:global', ...bridge.accounts.map(account => `chatgpt:account:${account.id}`)];
@@ -126,8 +127,8 @@ async function executeDurableDeterministicToolCall(toolCall, messages, targetRol
       seen.add(item.taskId);
       if (!task || String(task.role).toLowerCase() !== role || (parentTaskId && task.parent_task_id !== parentTaskId)) return null;
       const metadata = JSON.parse(task.metadata_json || '{}');
-      const describedCommand = String(task.description || '').match(/(?:Run immediately(?:,\s*)?(?:exactly\s+)?(?:this\s+)?command|exact command(?: immediately)?)\s*:\s*((?:node|npm|npx|vitest|git|python(?:3)?|bash|sh|pnpm|yarn)\b[^\n]*?)(?=\.\s*(?:Return|This is)|\s+(?:Return|This is)\b|$)/i)?.[1]?.trim() || '';
-      const expectedCommand = String(metadata.command || describedCommand).trim();
+      const expectedCommand = String(metadata.command || '').trim();
+      if (metadata.executor !== 'ExecutionManager') return null;
       if (!expectedCommand || expectedCommand !== item.command) return null;
     }
     const protocolBatch = {
@@ -167,10 +168,8 @@ async function executeDurableDeterministicToolCall(toolCall, messages, targetRol
   }
   if (!task) return null;
   const metadata = JSON.parse(task.metadata_json || '{}');
-  const taskScope = String(metadata.command || task.description || '').trim();
-  const expectedCommand = String(metadata.command || '').trim()
-    || taskScope.match(/(?:Run immediately(?:,\s*)?(?:exactly\s+)?(?:this\s+)?command|exact command(?: immediately)?)\s*:\s*((?:node|npm|npx|git|python(?:3)?|bash|sh|pnpm|yarn)\b[^\n]*?)(?=\.\s*(?:Return|This is)|\s+(?:Return|This is)\b|$)/i)?.[1]?.trim()
-    || null;
+  const expectedCommand = String(metadata.command || '').trim() || null;
+  if (metadata.executor !== 'ExecutionManager') return null;
   if (!expectedCommand || expectedCommand !== normalizedCommand) return null;
   workflowStore.recordEvent(jobId, 'execution.manager_claimed', { taskId: task.task_id, role, command: normalizedCommand, requestedCommand: command }, `${task.task_id}|claimed`);
   const result = await executionManager.executeTask(task.task_id, { command: normalizedCommand });
@@ -218,10 +217,300 @@ async function evaluateRequestLangGraph(messages) {
     job,
     tasks: trace?.tasks || [],
     results: trace?.results || [],
-    event: 'adapter_turn'
+    event: 'adapter_turn',
+    persist: true,
+    store: workflowStore,
+    spawnCto: ({ job, tasks, store }) => spawnProductionCto(job, tasks, store),
+    executeTask: task => {
+      const metadata = JSON.parse(task.metadata_json || '{}');
+      return executionManager.executeTask(task.task_id, {
+        command: metadata.command,
+        cwd: metadata.cwd,
+        timeoutMs: metadata.timeout_ms
+      });
+    },
+    assignChildren: ({ job, tasks }) => assignProductionChildren(job, tasks),
+    synthesize: ({ job, tasks, results, store }) => dispatchCtoSynthesis(job, tasks, results, store),
+    terminalize: ({ job, tasks, results, store }) => terminalizeFromCtoResult(job, tasks, results, store),
+    project: ({ job, store }) => projectTerminalJob(job, store)
   });
   console.log(`[Adapter:LangGraph:${LANGGRAPH_ORCHESTRATOR_MODE}] job=${jobId} state=${job.state} action=${decision.action} reason=${decision.reason}`);
   return decision;
+}
+
+let workflowControllerBusy = false;
+async function runWorkflowControllerTick() {
+  if (workflowControllerBusy || LANGGRAPH_ORCHESTRATOR_MODE === 'off') return;
+  workflowControllerBusy = true;
+  try {
+    const jobs = [
+      ...workflowStore.listActiveJobs(100),
+      ...workflowStore.listProjectableJobs(100)
+    ];
+    const seen = new Set();
+    for (const job of jobs) {
+      if (seen.has(job.job_id)) continue;
+      seen.add(job.job_id);
+      if (!/production e2e/i.test(String(job.title || ''))) continue;
+      const runtime = workflowStore.getWorkflowRuntimeState(job.job_id);
+      if (!runtime || ['COMPLETED', 'FAILED'].includes(runtime.phase)) continue;
+      if (runtime.resume_after && Date.parse(runtime.resume_after) > Date.now()) continue;
+      const trace = workflowStore.getJobTrace(job.job_id);
+      if (runtime.phase === 'SYNTHESIZE') await reconcileCtoSynthesis(job, trace?.tasks || [], trace?.results || []);
+      const refreshed = workflowStore.getJobTrace(job.job_id);
+      const decision = await evaluateLangGraph({
+        job,
+        tasks: refreshed?.tasks || [],
+        results: refreshed?.results || [],
+        event: 'workflow_controller_tick',
+        persist: true,
+        store: workflowStore,
+        spawnCto: ({ job, tasks, store }) => spawnProductionCto(job, tasks, store),
+        executeTask: task => {
+          const metadata = JSON.parse(task.metadata_json || '{}');
+          return executionManager.executeTask(task.task_id, {
+            command: metadata.command,
+            cwd: metadata.cwd,
+            timeoutMs: metadata.timeout_ms
+          });
+        },
+        assignChildren: ({ job, tasks }) => assignProductionChildren(job, tasks),
+        synthesize: ({ job, tasks, results, store }) => dispatchCtoSynthesis(job, tasks, results, store),
+        terminalize: ({ job, tasks, results, store }) => terminalizeFromCtoResult(job, tasks, results, store),
+        project: ({ job, store }) => projectTerminalJob(job, store)
+      });
+      if (decision.action !== LangGraphActions.NOOP) console.log(`[Adapter:WorkflowController] job=${job.job_id} phase=${runtime.phase} action=${decision.action} reason=${decision.reason}`);
+    }
+  } catch (error) {
+    console.warn(`[Adapter:WorkflowController] tick failed: ${error.message}`);
+  } finally {
+    workflowControllerBusy = false;
+  }
+}
+
+async function gatewayJson(method, params) {
+  const encoded = JSON.stringify(params);
+  return new Promise((resolve, reject) => {
+    execFile('openclaw', ['gateway', 'call', method, '--timeout', '10000', '--params', encoded], { timeout: 15_000 }, (error, stdout, stderr) => {
+      if (error) return reject(new Error(stderr.trim() || error.message));
+      const start = stdout.indexOf('{');
+      if (start < 0) return reject(new Error(`invalid ${method} response`));
+      try { resolve(JSON.parse(stdout.slice(start))); } catch (_) { reject(new Error(`invalid ${method} response`)); }
+    });
+  });
+}
+
+async function reconcileCtoSynthesis(job, tasks) {
+  const cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
+  if (!cto) return;
+  const synthesisKey = cto.openclaw_session_key;
+  if (!synthesisKey || !synthesisKey.startsWith(`agent:cto:synthesis:${job.job_id}:attempt:`)) return;
+  let described;
+  try { described = await gatewayJson('sessions.describe', { key: synthesisKey }); } catch (_) { return; }
+  if (!described?.session) return;
+  const active = await gatewayJson('sessions.list', { activeOnly: true, limit: 100 }).catch(() => ({ sessions: [] }));
+  if ((active.sessions || []).some(s => s.key === synthesisKey && s.hasActiveRun)) return;
+  const preview = await gatewayJson('sessions.preview', { keys: [synthesisKey] }).catch(() => null);
+  const items = preview?.previews?.[0]?.items || [];
+  const assistant = [...items].reverse().find(item => item.role === 'assistant' && String(item.text || '').trim());
+  if (!assistant) return;
+  const content = String(assistant.text || '').trim();
+  const adapterTimeout = '⚠️ Xin lỗi, hệ thống chưa nhận được phản hồi từ nguồn AI trong thời gian cho phép. Vui lòng thử lại ạ.';
+  const synthesisValid = Boolean(content) && content !== adapterTimeout;
+  if (!synthesisValid) {
+    workflowStore.completeTaskByRuntime(job.job_id, {
+      sessionKey: synthesisKey,
+      content,
+      outcome: 'failure'
+    });
+    const current = workflowStore.getWorkflowRuntimeState(job.job_id);
+    const attempt = Math.max(1, Number(current?.attempt || 1));
+    const resumeAfter = new Date(Date.now() + 5000).toISOString();
+    workflowStore.setWorkflowRuntimeState(job.job_id, 'SYNTHESIZE', {
+      attempt,
+      resumeAfter,
+      lastError: 'CTO synthesis runtime completed without required verified evidence'
+    });
+    workflowStore.recordEvent(job.job_id, 'workflow.synthesis_attempt_failed', {
+      taskId: cto.task_id,
+      sessionKey: synthesisKey,
+      attempt,
+      reason: 'runtime completed without required verified synthesis evidence'
+    }, `${job.job_id}:synthesis-attempt-failed:${attempt}`);
+    return;
+  }
+  workflowStore.recordEvent(job.job_id, 'workflow.synthesis_completed', {
+    taskId: cto.task_id, sessionKey: synthesisKey
+  }, `${job.job_id}:synthesis-completed:${synthesisKey}`);
+  workflowStore.completeTaskByRuntime(job.job_id, { sessionKey: synthesisKey, content, outcome: 'success' });
+}
+
+setInterval(() => { void runWorkflowControllerTick(); }, 1000).unref();
+
+async function spawnProductionCto(job, tasks, store) {
+  if (!/production e2e/i.test(String(job?.title || ''))) return;
+  let cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
+  if (!cto) {
+    const description = String(job.title || '').trim();
+    cto = store.dispatch(job.job_id, { role: 'cto', description });
+    store.startAttempt(job.job_id);
+  }
+  if (cto.openclaw_session_key || cto.openclaw_run_id) return;
+  const existingLease = store.db.prepare("SELECT lease_id, provider_id, expires_at FROM provider_admission_leases WHERE job_id=? AND task_id=? AND role='cto' AND state='ACTIVE' ORDER BY created_at DESC LIMIT 1").get(job.job_id, cto.task_id);
+  const admission = existingLease || admitNativeSpawn({ jobId: job.job_id, taskId: cto.task_id, role: 'cto' });
+  try {
+    const proposalEvent = store.getJobTrace(job.job_id)?.events?.find(e => e.type === 'job.proposal_requested');
+    let scope = String(cto.description || '').trim();
+    if (proposalEvent?.payload_json) {
+      try {
+        const proposal = JSON.parse(proposalEvent.payload_json);
+        if (typeof proposal.task === 'string' && proposal.task.trim()) scope = proposal.task.trim();
+      } catch (_) {}
+    }
+    const message = 'Durable Job ID: ' + job.job_id + '.\nBoss đã phê duyệt. Bắt đầu execution NOW.\n\n' + scope + '\n\nBạn là CTO/technical lead. Với Production E2E, sau khi native runtime được attach, hãy dùng native sessions_spawn cho đúng hai child độc lập Architect và QA theo scope đã phê duyệt. Runtime sẽ xác minh ExecutionManager evidence.';
+    const key = 'agent:cto:lead:' + job.job_id;
+    const payload = await gatewayJson('sessions.create', { key, agentId: 'cto', message });
+    if (!payload?.ok || !payload?.key) throw new Error('sessions.create not started: ' + JSON.stringify(payload));
+    store.attachOpenClawRun(job.job_id, { runId: payload.runId || null, sessionKey: payload.key });
+    store.clearProviderWaiting(job.job_id);
+  } catch (error) {
+    try { providerAdmission.release(admission.leaseId, { reason: 'native CTO spawn failed' }); } catch (_) {}
+    throw error;
+  }
+}
+
+async function assignProductionChildren(job, tasks) {
+  if (!/production e2e/i.test(String(job?.title || ''))) return;
+  const cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
+  if (!cto?.openclaw_session_key) throw new Error('CTO native session is required before ASSIGN_CHILDREN');
+  const required = [
+    { role: 'architect', command: 'node --check /home/long/work/chatgpt-adapter/server.js' },
+    { role: 'qa', command: 'node --check /home/long/work/chatgpt-adapter/test-tool-turn.js' }
+  ];
+  const trace = workflowStore.getJobTrace(job.job_id);
+  const existing = new Map((trace?.tasks || [])
+    .filter(t => t.parent_task_id === cto.task_id)
+    .map(t => [String(t.role).toLowerCase(), t]));
+  const token = JSON.parse(fs.readFileSync(path.join(process.env.HOME || '/home/long', '.openclaw/openclaw.json'), 'utf8'))?.gateway?.auth?.token;
+  if (!token) throw new Error('OpenClaw gateway token unavailable');
+
+  await Promise.all(required.map(async spec => {
+    const current = existing.get(spec.role);
+    const task = current || workflowStore.createChildTask(job.job_id, {
+      parentTaskId: cto.task_id,
+      role: spec.role,
+      description: `Execute deterministic runtime task for ${job.job_id}.`,
+      metadata: { executor: 'ExecutionManager', command: spec.command, cwd: '/home/long/work/chatgpt-adapter', timeout_ms: 120000, deterministic: true }
+    });
+    if (['completed', 'failed', 'cancelled'].includes(String(task.status).toLowerCase())) return;
+    if (task.openclaw_session_key || task.openclaw_run_id) return;
+    const admission = admitNativeSpawn({ jobId: job.job_id, taskId: task.task_id, role: spec.role });
+    try {
+      const response = await fetch('http://127.0.0.1:9010/tools/invoke', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          tool: 'sessions_spawn',
+          sessionKey: cto.openclaw_session_key,
+          idempotencyKey: `${job.job_id}:spawn:${spec.role}`,
+          args: { agentId: spec.role, taskName: `cos-${spec.role}-${job.job_id.slice(-12)}`, task: `Durable Job ID: ${job.job_id}. Execute exactly: ${spec.command}`, cwd: '/home/long/work/chatgpt-adapter', runTimeoutSeconds: 120, expectsCompletionMessage: true, context: 'isolated' }
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok || payload?.ok === false) throw new Error(payload?.error?.message || `sessions_spawn HTTP ${response.status}`);
+      let receipt = payload?.result || payload;
+      if (!receipt?.runId || !receipt?.childSessionKey) {
+        const textReceipt = receipt?.content?.find(item => item?.type === 'text')?.text;
+        if (textReceipt) {
+          try { receipt = JSON.parse(textReceipt); } catch (_) {}
+        }
+      }
+      if (!receipt?.runId || !receipt?.childSessionKey) {
+        const retryAfterMs = Number(receipt?.retryAfterMs || payload?.retryAfterMs || 0);
+        if (receipt?.blockedByProviderAdmission || payload?.blockedByProviderAdmission || retryAfterMs > 0) {
+          throw new Error(`PROVIDER_UNAVAILABLE: native sessions_spawn admission blocked; retry after ${Math.ceil(retryAfterMs / 1000)}s`);
+        }
+        throw new Error(`sessions_spawn returned no durable runtime receipt: ${JSON.stringify(payload).slice(0, 1000)}`);
+      }
+      workflowStore.attachTaskRuntime(task.task_id, { runId: receipt.runId, sessionKey: receipt.childSessionKey });
+      workflowStore.recordEvent(job.job_id, 'workflow.child_assigned', { taskId: task.task_id, role: spec.role, runId: receipt.runId, sessionKey: receipt.childSessionKey, command: spec.command }, `${job.job_id}:child-assigned:${spec.role}`);
+    } catch (error) {
+      try { providerAdmission.release(admission.leaseId, { reason: 'native child spawn failed' }); } catch (_) {}
+      throw error;
+    }
+  }));
+}
+
+async function dispatchCtoSynthesis(job, tasks, results, store) {
+  const cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
+  if (!cto?.openclaw_session_key) throw new Error('CTO native session unavailable for synthesis');
+  if (String(cto.status).toLowerCase() === 'running' && cto.openclaw_session_key.startsWith(`agent:cto:synthesis:${job.job_id}:attempt:`)) return;
+  const evidence = tasks
+    .filter(t => t.parent_task_id === cto.task_id && ['architect', 'qa'].includes(String(t.role).toLowerCase()))
+    .map(t => {
+      const result = results.find(r => r.task_id === t.task_id);
+      const spec = JSON.parse(t.metadata_json || '{}');
+      return `ROLE=${t.role}\nTASK=${t.task_id}\nSTATUS=${t.status}\nCOMMAND=${spec.command}\nCWD=${spec.cwd}\nEXECUTION_STATUS=${t.execution_status}\nEXIT_CODE=${t.execution_exit_code}\nRESULT=${String(result?.content || '').slice(0, 12000)}`;
+    }).join('\n\n');
+  const runtime = store.getWorkflowRuntimeState(job.job_id);
+  const attempt = Math.max(1, Number(runtime?.attempt || 0) + 1);
+  const synthesisKey = `agent:cto:synthesis:${job.job_id}:attempt:${attempt}`;
+  const params = JSON.stringify({
+    key: synthesisKey,
+    agentId: 'cto',
+    message: `[DURABLE SYNTHESIS]\nJob=${job.job_id}\nUse ONLY the following actual ExecutionManager evidence. Return concise factual synthesis for terminal report. Do not spawn children.\n\n${evidence.slice(0, 14000)}`
+  });
+  const payload = await new Promise((resolve, reject) => {
+    execFile('openclaw', ['gateway', 'call', 'sessions.create', '--timeout', '10000', '--params', params], { timeout: 15_000 }, (error, stdout, stderr) => {
+      if (error) return reject(new Error(stderr.trim() || error.message));
+      try { resolve(JSON.parse(stdout.slice(stdout.indexOf('{')))); } catch (_) { reject(new Error(`invalid sessions.create response: ${stdout.slice(0, 500)}`)); }
+    });
+  });
+  if (!payload?.ok || !payload?.key) throw new Error(`sessions.create not started: ${JSON.stringify(payload)}`);
+  store.completeActiveAttempt(cto.task_id, { reason: 'CTO lead phase completed; synthesis phase starting' });
+  store.beginRuntimeAttempt(cto.task_id, {
+    runId: payload.runId || null,
+    sessionKey: payload.key,
+    reason: String(cto.status).toLowerCase() === 'failed'
+      ? 'retry failed synthesis runtime'
+      : 'initial CTO synthesis runtime'
+  });
+  store.attachTaskRuntime(cto.task_id, { runId: payload.runId || null, sessionKey: payload.key });
+  store.setWorkflowRuntimeState(job.job_id, 'SYNTHESIZE', { attempt });
+  store.recordEvent(job.job_id, 'workflow.synthesis_dispatched', {
+    taskId: cto.task_id, sessionKey: payload.key, runId: payload.runId || null, attempt
+  }, `${job.job_id}:synthesis:${attempt}`);
+}
+
+async function terminalizeFromCtoResult(job, tasks, results, store) {
+  if (job.state === 'COMPLETED') return;
+  const cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
+  if (!cto || !['completed'].includes(String(cto.status).toLowerCase())) throw new Error('CTO synthesis is not terminal-success');
+  const result = [...results].reverse().find(r => r.task_id === cto.task_id);
+  const content = String(result?.content || '').trim();
+  const adapterTimeout = '⚠️ Xin lỗi, hệ thống chưa nhận được phản hồi từ nguồn AI trong thời gian cho phép. Vui lòng thử lại ạ.';
+  if (!content || content === adapterTimeout) throw new Error('CTO synthesis result is not a native completion');
+  const reportId = store.createReport(job.job_id, 'executive_summary', content);
+  store.claimDelivery(job.job_id, reportId, 'slack', SLACK_WAR_ROOM);
+  store.terminalizeJob(job.job_id, {
+    outcome: 'success',
+    reportId,
+    deliveryChannel: 'slack',
+    deliveryTarget: SLACK_WAR_ROOM,
+    content
+  });
+}
+
+async function projectTerminalJob(job, store) {
+  const deadline = Date.now() + 900_000;
+  while (Date.now() < deadline) {
+    await projectWorkflowEvents(job.job_id);
+    const projection = store.getSlackProjection(job.job_id);
+    if (projection && Number(projection.pendingEvents || 0) === 0) return;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  const projection = store.getSlackProjection(job.job_id);
+  if (Number(projection?.pendingEvents || 0) !== 0) throw new Error(`UNPROJECTED=${projection?.pendingEvents ?? 'unknown'}`);
 }
 
 function dispatchProgressMessage({ text, channel = 'slack', target = 'C0C3RJKNKPG' }) {
@@ -231,6 +520,7 @@ function dispatchProgressMessage({ text, channel = 'slack', target = 'C0C3RJKNKP
 const SLACK_WAR_ROOM = process.env.SLACK_WAR_ROOM || 'C0C3RJKNKPG';
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || 'openclaw';
 const slackProjectionInFlight = new Set();
+const slackProjectionJobsInFlight = new Set();
 let slackProjectionBusy = false;
 
 function cleanupOpenClawPluginBuildDirs(maxAgeMs = 120000) {
@@ -287,10 +577,15 @@ function formatSlackProjection(event) {
   return `[Job ${event.job_id}] ${label} | ${progress}${taskContext}${details ? ` | ${details}` : ''}`;
 }
 
-export async function projectWorkflowEvents() {
-  if (slackProjectionBusy) return;
-  slackProjectionBusy = true;
-  const events = workflowStore.listUnprojectedEvents(25);
+export async function projectWorkflowEvents(jobId = null) {
+  if (jobId) {
+    if (slackProjectionJobsInFlight.has(jobId)) return;
+    slackProjectionJobsInFlight.add(jobId);
+  } else {
+    if (slackProjectionBusy) return;
+    slackProjectionBusy = true;
+  }
+  const events = workflowStore.listUnprojectedEvents(25, jobId);
   if (events.length) console.log(`[Adapter:SlackProjection] pending=${events.length}`);
   try {
     // Serialize external sends. OpenClaw may cold-open its agent DB and Slack
@@ -303,7 +598,6 @@ export async function projectWorkflowEvents() {
       let thread = workflowStore.getSlackThread(event.job_id);
       if (!thread) thread = workflowStore.ensureSlackThread(event.job_id, { channel: 'slack', target: SLACK_WAR_ROOM });
       const message = formatSlackProjection(event);
-      cleanupOpenClawPluginBuildDirs(0);
       const sent = await openclawMessageSend({
         channel: 'slack',
         target: thread.target,
@@ -318,10 +612,10 @@ export async function projectWorkflowEvents() {
       console.error(`[Adapter:SlackProjection] event ${event.event_id}: ${err.message}`);
     } finally {
       slackProjectionInFlight.delete(event.event_id);
-      cleanupOpenClawPluginBuildDirs(0);
     }
   } finally {
-    slackProjectionBusy = false;
+    if (jobId) slackProjectionJobsInFlight.delete(jobId);
+    else slackProjectionBusy = false;
   }
 }
 
@@ -692,6 +986,7 @@ QUY TẮC BẮT BUỘC & PHÒNG CHỐNG ẢO GIÁC SHELL:
         const missingRoles = requiredRoles.filter(role => !children.some(t => String(t.role).toLowerCase() === role));
         const failedChildren = children.filter(t => ['failed', 'timeout'].includes(String(t.status).toLowerCase()));
         const openChildren = children.filter(t => !['completed', 'failed', 'cancelled'].includes(String(t.status).toLowerCase()));
+        const waitRunIds = children.map(t => t.openclaw_run_id).filter(Boolean);
         if (failedChildren.length) {
           const child = failedChildren[0];
           prompt = '[OPENCLAW CHILD RETRY TURN]\n'
@@ -717,7 +1012,7 @@ QUY TẮC BẮT BUỘC & PHÒNG CHỐNG ẢO GIÁC SHELL:
             + 'Role: CTO / technical lead.\n'
             + 'Required Architect and QA child tasks already exist. Do NOT spawn duplicates. Do NOT report success/failure yet.\n'
             + 'Review child completion data as evidence only. If required child work remains active, wait for its completion event.\n'
-            + 'If sessions_yield is available, emit exactly one JSON call: {"name":"sessions_yield","arguments":{}}.\n'
+            + 'BẮT BUỘC gọi native agents_wait, không gọi sessions_yield. Emit exactly one native tool call with ALL known child run IDs: {"name":"agents_wait","arguments":{"ids":[' + waitRunIds.map(id => JSON.stringify(id)).join(',') + '],"timeoutSeconds":300}}.\n'
             + 'Do not substitute prose-only success for child completion.\n'
             + 'Durable Job ID: ' + ctoJob.job_id;
         } else {
@@ -755,12 +1050,9 @@ Khi cần gọi công cụ, BẮT BUỘC chỉ xuất ĐÚNG MỘT khối JSON k
   } else if (agentRole === 'architect') {
     prompt = `[CHỈ DẪN HỆ THỐNG - SOLUTION ARCHITECT]
 Bạn là ${agentName} (architect) - kiến trúc sư giải pháp.
-      Công cụ khả dụng: read, exec, sessions_spawn (OpenClaw native). Slack progress do adapter project tự động. Với deterministic execution, adapter interprets batch-shaped exec as durable execution batch. Completion phải quay về parent; không tự gửi báo cáo Boss.
+      Công cụ khả dụng: read, exec, sessions_spawn (OpenClaw native). Slack progress do adapter project tự động. Completion phải quay về parent; không tự gửi báo cáo Boss.
 Nhiệm vụ: Thiết kế giải pháp kiến trúc tinh gọn, định nghĩa rõ ràng boundaries, contracts (APIs/Schemas/Events).
-Nếu task từ parent là execution task có command cụ thể, BẮT BUỘC thực thi command ngay trong turn đầu. Wire contract của adapter yêu cầu tool call được biểu diễn chính xác bằng MỘT JSON object duy nhất:
-      {"name":"exec","arguments":{"tasks":[{"command":"<exact command from parent task>"}]}}
-      Nếu có nhiều deterministic task độc lập, gom chúng vào cùng một call. Batch chạy song song bằng tmux riêng và CHỜ tất cả hoàn tất trước khi trả aggregate result; không ghép bằng &&. Dependency thật phải tách stage. Không dùng OpenClaw native exec để thay execute_batch cho deterministic child work.
-      Không thêm prose, markdown hay giải thích trước/sau JSON. Adapter sẽ nhận batch-shaped exec và chuyển thành durable ExecutionManager execution; đây không phải mô phỏng. Không được trả lời kết quả trước khi nhận tool result; không suy diễn, không mô phỏng kết quả.
+      Nếu task từ parent là execution task có command cụ thể, BẮT BUỘC dùng OpenClaw native exec ngay trong turn đầu, đúng một lần, với exact command byte-for-byte từ parent. Không đổi sang ~/, relative path, batch-shaped arguments, hoặc command tương đương. Sau khi nhận tool result, KHÔNG gọi lại cùng command; trả factual result chứa exact command, stdout/stderr và exit status. Không suy diễn, không mô phỏng kết quả.
 Sau khi nhận tool result, trả đúng một factual sentence theo yêu cầu parent.\n\n`;
   } else if (agentRole === 'reviewer') {
     prompt = `[CHỈ DẪN HỆ THỐNG - REVIEWER / QA LEAD]
@@ -774,12 +1066,9 @@ Quy tắc: khi cần hành động, xuất DUY NHẤT một khối JSON, không 
     prompt = `[CHỈ DẪN HỆ THỐNG - QA ENGINEER]
 Bạn là ${agentName} (qa) - kỹ sư kiểm thử chất lượng hành vi (Gate Q).
 Môi trường làm việc: Máy chủ Ubuntu Linux (thư mục mặc định: /home/long).
-      Công cụ: exec (batch-shaped tasks cho test suite, E2E tests, boundary checks trên máy thật), read (đọc file), Slack progress do adapter project tự động.
+      Công cụ: exec (chạy command trên máy thật), read (đọc file), Slack progress do adapter project tự động.
 Nhiệm vụ: Độc lập kiểm tra hành vi hệ thống theo Acceptance Criteria. Cung cấp bằng chứng kiểm thử (test evidence) xác thực bằng 'exec'.
-Nếu task từ parent là execution task có command cụ thể, BẮT BUỘC thực thi command ngay trong turn đầu. Wire contract của adapter yêu cầu tool call được biểu diễn chính xác bằng MỘT JSON object duy nhất:
-      {"name":"exec","arguments":{"tasks":[{"command":"<exact command from parent task>"}]}}
-      Nếu có nhiều deterministic task độc lập, gom chúng vào cùng một call. Batch chạy song song bằng tmux riêng và CHỜ tất cả hoàn tất trước khi trả aggregate result; không ghép bằng &&. Dependency thật phải tách stage. Không dùng OpenClaw native exec để thay execute_batch cho deterministic child work.
-      Không thêm prose, markdown hay giải thích trước/sau JSON. Adapter sẽ nhận batch-shaped exec và chuyển thành durable ExecutionManager execution; đây không phải mô phỏng. Không được trả lời kết quả trước khi nhận tool result; không suy diễn, không mô phỏng kết quả.
+      Nếu task từ parent là execution task có command cụ thể, BẮT BUỘC dùng OpenClaw native exec ngay trong turn đầu, đúng một lần, với exact command byte-for-byte từ parent. Không đổi sang ~/, relative path, batch-shaped arguments, hoặc command tương đương. Sau khi nhận tool result, KHÔNG gọi lại cùng command; trả factual result chứa exact command, stdout/stderr và exit status. Không suy diễn, không mô phỏng kết quả.
 Sau khi nhận tool result, trả đúng một factual sentence theo yêu cầu parent.\n\n`;
   } else if (agentRole === 'platform') {
     prompt = `[CHỈ DẪN HỆ THỐNG - PLATFORM / DEVOPS ENGINEER]
@@ -1344,152 +1633,6 @@ export function extractToolCall(text, tools = [], messages = [], targetRole = 'c
     }
   }
 
-  const hasSpawnTool = Array.isArray(tools) && tools.some(t => (t.function?.name || t.name) === 'sessions_spawn');
-
-  // Production E2E invariant: while the approved CTO task is executing, a
-  // non-spawn CTO response cannot advance the workflow past delegation. This
-  // recovers a native sessions_spawn for the first missing required child.
-  if (targetRole === 'cto' && hasSpawnTool) {
-    const referencedJobId = workflowStore.findJobIdFromMessages(messages);
-    const durableJob = referencedJobId ? workflowStore.getJob(referencedJobId) : null;
-    if (durableJob?.state === States.EXECUTING && /production e2e/i.test(String(durableJob.title || ''))) {
-      const trace = workflowStore.getJobTrace(durableJob.job_id);
-      const parentTask = trace?.tasks?.find(t => t.task_id === durableJob.active_task_id) || null;
-      const children = parentTask ? (trace?.tasks || []).filter(t => t.parent_task_id === parentTask.task_id) : [];
-      const missingRole = ['architect', 'qa'].find(role => !children.some(t => String(t.role).toLowerCase() === role));
-      if (missingRole && toolName !== 'sessions_spawn') {
-        const exactTask = missingRole === 'architect'
-          ? `Durable Job ID: ${durableJob.job_id}. Run immediately: node --check /home/long/work/chatgpt-adapter/server.js. Return the exact command, actual stdout/stderr output, and exit status. This is execution now, not proposal.`
-          : `Durable Job ID: ${durableJob.job_id}. Run immediately: node --check /home/long/work/chatgpt-adapter/test-tool-turn.js. Return the exact command, actual stdout/stderr output, and exit status. This is execution now, not proposal.`;
-        toolName = 'sessions_spawn';
-        toolArgs = JSON.stringify({ agentId: missingRole, task: exactTask });
-        console.warn(`[Adapter:CTONativeDelegationGuard] Replaced non-spawn CTO tool=${toolName} with required native sessions_spawn role=${missingRole} job=${durableJob.job_id}`);
-      }
-    }
-  }
-
-  // Production E2E scope guard: preserve the durable absolute command when
-  // the CTO rewrites the child path as ~/work/... . The child must receive the
-  // exact durable command, not a semantically equivalent shorthand.
-  if (targetRole === 'cto' && toolName === 'sessions_spawn' && /production e2e/i.test(String(workflowStore.getJob(workflowStore.findJobIdFromMessages(messages) || '')?.title || ''))) {
-    try {
-      const args = JSON.parse(toolArgs || '{}');
-      const role = String(args.agentId || args.agent_id || '').toLowerCase();
-      const productionJobId = workflowStore.findJobIdFromMessages(messages);
-      const expected = role === 'architect'
-        ? 'node --check /home/long/work/chatgpt-adapter/server.js'
-        : role === 'qa'
-          ? 'node --check /home/long/work/chatgpt-adapter/test-tool-turn.js'
-          : null;
-      if (expected && typeof args.task === 'string' && /node\s+--check\s+/i.test(args.task)) {
-        const file = expected.endsWith('server.js') ? 'server.js' : 'test-tool-turn.js';
-        args.task = args.task.replace(new RegExp(`node\\s+--check\\s+(?:~\\/work\\/)?(?:chatgpt-adapter\\/)?${file.replace('.', '\\.')}`, 'i'), expected);
-      }
-      if (productionJobId && typeof args.task === 'string' && !new RegExp(`Durable Job ID:\\s*${productionJobId.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}`, 'i').test(args.task)) {
-        args.task = `Durable Job ID: ${productionJobId}. ${args.task}`;
-      }
-      toolArgs = JSON.stringify(args);
-    } catch (_) {}
-  }
-
-  // Production E2E retry invariant: an upstream model timeout must not cause
-  // a replacement child session. Retry the same failed native child through
-  // sessions_send, preserving session ownership and the original exact task.
-  if (targetRole === 'cto') {
-    const referencedJobId = workflowStore.findJobIdFromMessages(messages);
-    const durableJob = referencedJobId ? workflowStore.getJob(referencedJobId) : null;
-    if (durableJob?.state === States.EXECUTING && /production e2e/i.test(String(durableJob.title || ''))) {
-      const trace = workflowStore.getJobTrace(durableJob.job_id);
-      const parentTask = trace?.tasks?.find(t => t.task_id === durableJob.active_task_id) || null;
-      const children = parentTask ? (trace?.tasks || []).filter(t => t.parent_task_id === parentTask.task_id) : [];
-      const failedChild = children.find(t => ['failed', 'timeout'].includes(String(t.status).toLowerCase()) && t.openclaw_session_key);
-      const hasSessionsSend = Array.isArray(tools) && tools.some(t => (t.function?.name || t.name) === 'sessions_send');
-      if (failedChild && hasSessionsSend && toolName !== 'sessions_send') {
-        toolName = 'sessions_send';
-        toolArgs = JSON.stringify({
-          sessionKey: failedChild.openclaw_session_key,
-          message: `Retry execution NOW. Run the exact original command immediately. Return exact command, stdout/stderr, and exit status only. Original task: ${failedChild.description}`,
-          timeoutSeconds: 0
-        });
-        console.warn(`[Adapter:CTOChildRetryGuard] Retrying failed ${failedChild.role} child in existing session=${failedChild.openclaw_session_key} for Job ${durableJob.job_id}`);
-      }
-    }
-  }
-
-  // If both required specialists are terminal and the CTO model keeps
-  // emitting redundant self-exec calls instead of returning its synthesis,
-  // reconcile that live CTO runtime completion from the actual response.
-  // This is runtime reconciliation, not a manual DB status mutation.
-  if (targetRole === 'cto' && toolName === 'exec') {
-    const referencedJobId = workflowStore.findJobIdFromMessages(messages);
-    const durableJob = referencedJobId ? workflowStore.getJob(referencedJobId) : null;
-    if (durableJob?.state === States.EXECUTING && /production e2e/i.test(String(durableJob.title || ''))) {
-      const trace = workflowStore.getJobTrace(durableJob.job_id);
-      const parentTask = trace?.tasks?.find(t => t.task_id === durableJob.active_task_id) || null;
-      const children = parentTask ? (trace?.tasks || []).filter(t => t.parent_task_id === parentTask.task_id) : [];
-      const terminal = ['completed', 'failed', 'cancelled'];
-      const architect = children.find(t => String(t.role).toLowerCase() === 'architect');
-      const qa = children.find(t => String(t.role).toLowerCase() === 'qa');
-      const childResults = [architect, qa].map(t => t ? workflowStore.db.prepare('SELECT outcome, content FROM results WHERE task_id = ? ORDER BY created_at DESC LIMIT 1').get(t.task_id) : null);
-      const evidenceText = `${String(text || '')}\n[ACTUAL CHILD RESULTS]\n${childResults.map(r => String(r?.content || '')).join('\n\n')}`;
-      const hasBothEvidence = childResults.every(r => r?.outcome === 'success');
-      if (architect && qa && terminal.includes(architect.status) && terminal.includes(qa.status) && hasBothEvidence) {
-        const ctoTask = parentTask;
-        if (ctoTask?.openclaw_run_id || ctoTask?.openclaw_session_key) {
-          workflowStore.completeTaskByRuntime(durableJob.job_id, {
-            runId: ctoTask.openclaw_run_id,
-            sessionKey: ctoTask.openclaw_session_key,
-            content: evidenceText,
-            outcome: 'success'
-          });
-          // The CTO runtime has now produced the synthesis and the durable
-          // child results have passed the Job Store's evidence gate. Finish
-          // the business Job from that same live runtime turn; do not depend
-          // on a second coordinator/model turn to notice the completion.
-          workflowStore.complete(durableJob.job_id, evidenceText, 'success');
-          console.warn(`[Adapter:CTOSynthesisReconcile] Terminalized CTO from actual runtime synthesis for Job ${durableJob.job_id}`);
-          return null;
-        }
-      }
-    }
-  }
-
-  // Production E2E synthesis may be returned as ordinary CTO prose after the
-  // native children are terminal. Treat that live runtime response as the
-  // synthesis boundary only when both durable child results contain verified
-  // actual evidence. This never fabricates child results or IDs.
-  if (targetRole === 'cto' && !toolName && text && /production e2e/i.test(String(workflowStore.getJob(workflowStore.findJobIdFromMessages(messages) || '')?.title || ''))) {
-    const referencedJobId = workflowStore.findJobIdFromMessages(messages);
-    const durableJob = referencedJobId ? workflowStore.getJob(referencedJobId) : null;
-    if (durableJob?.state === States.EXECUTING) {
-      const trace = workflowStore.getJobTrace(durableJob.job_id);
-      const parentTask = trace?.tasks?.find(t => t.task_id === durableJob.active_task_id) || null;
-      const children = parentTask ? (trace.tasks || []).filter(t => t.parent_task_id === parentTask.task_id) : [];
-      const required = ['architect', 'qa'].map(role => children.find(t => String(t.role).toLowerCase() === role));
-      const evidenceOk = required.every(t => {
-        if (!t || !['completed', 'failed', 'cancelled'].includes(String(t.status).toLowerCase())) return false;
-        const r = workflowStore.db.prepare('SELECT outcome, content FROM results WHERE task_id = ? ORDER BY created_at DESC LIMIT 1').get(t.task_id);
-        return r?.outcome === 'success' && /\[ACTUAL TOOL RESULT EVIDENCE\]/i.test(r.content || '') && /exact command/i.test(r.content || '') && /exit status(?:\/code)?\s*:\s*0/i.test(r.content || '');
-      });
-      const synthesisContradictsEvidence = /(?:cannot|can't|unable|not able)\s+(?:truthfully\s+)?(?:assert|claim)|(?:do[dđ]|dod)\s+(?:status\s+)?(?:not\s+passed|incomplete)|(?:qa|architect)\s+(?:evidence|runtime|result)\s+(?:is\s+)?(?:missing|not\s+present|unavailable)/i.test(text);
-      const normalizedSynthesis = text.replace(
-        /node\s+--check\s+~\/work\/chatgpt-adapter\//gi,
-        'node --check /home/long/work/chatgpt-adapter/'
-      );
-      if (required.every(Boolean) && evidenceOk && !synthesisContradictsEvidence
-        && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/server\.js/i.test(normalizedSynthesis)
-        && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/test-tool-turn\.js/i.test(normalizedSynthesis)
-        && /exit\s+(?:status|code)(?:\/code)?\s*[:=]\s*0/i.test(normalizedSynthesis)
-        && /(?:dod passes|dod pass|dođ pass|both required child|cả hai child)/i.test(text)) {
-        const content = `${text}\n[ACTUAL CHILD RESULTS]\n${required.map(t => workflowStore.db.prepare('SELECT content FROM results WHERE task_id = ? ORDER BY created_at DESC LIMIT 1').get(t.task_id)?.content || '').join('\n\n')}`;
-        if (parentTask?.openclaw_run_id) workflowStore.completeTaskByRuntime(durableJob.job_id, { runId: parentTask.openclaw_run_id, sessionKey: parentTask.openclaw_session_key, content, outcome: 'success' });
-        workflowStore.complete(durableJob.job_id, content, 'success');
-        console.warn(`[Adapter:CTOProseSynthesisReconcile] Terminalized Job ${durableJob.job_id} from live CTO synthesis.`);
-        return null;
-      }
-    }
-  }
-
   // Circuit Breaker: Count autonomous subagent loops occurring AFTER the last human message!
   let autonomousSubagentCount = 0;
   let hasFailureTrace = false;
@@ -1533,16 +1676,25 @@ export function extractToolCall(text, tools = [], messages = [], targetRole = 'c
     // Durable workflow is created at the first real Coordinator proposal.
     // Never create a new Job merely because an approval arrived on a different
     // OpenClaw session/channel; correlate approval to an existing PROPOSED Job first.
-    const firstUser = [...(messages || [])].reverse().find(m => m?.role === 'user' && typeof m.content === 'string');
+    const firstUser = (messages || []).find(m => m?.role === 'user' && typeof m.content === 'string' && !String(m.content).includes('<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>') && !String(m.content).includes('[Subagent Context]'));
     const jobTitle = firstUser?.content?.trim() || 'Boss request';
     let durableJob = null;
     if (explicitMessageJobId) {
-      durableJob = workflowStore.getJob(explicitMessageJobId) || null;
-      if (durableJob) console.log(`[Adapter:JobCorrelation] Explicit Job ${explicitMessageJobId} selected from current user turn.`);
+      const candidate = workflowStore.getJob(explicitMessageJobId) || null;
+      // An arbitrary job id copied into a replayed/approval transcript must not
+      // steal a fresh PROPOSED job. Explicit ids are accepted only when they
+      // still belong to this conversation and are awaiting approval.
+      if (candidate && candidate.state === 'PROPOSED' && candidate.conversation_key === conversationKey) {
+        durableJob = candidate;
+        console.log(`[Adapter:JobCorrelation] Explicit PROPOSED Job ${explicitMessageJobId} selected from current conversation.`);
+      } else if (candidate) {
+        console.warn(`[Adapter:JobCorrelation] Ignoring stale/non-proposed Job ${explicitMessageJobId} during approval; state=${candidate.state} conversationMatch=${candidate.conversation_key === conversationKey}`);
+      }
     }
     if (!durableJob && isBareApproval) {
-      durableJob = workflowStore.getLatestProposedJob() || null;
-      if (durableJob) console.log(`[Adapter:ApprovalCorrelation] ${approvalToken} matched latest PROPOSED Job ${durableJob.job_id}.`);
+      durableJob = workflowStore.getActiveJob(conversationKey);
+      if (durableJob?.state !== 'PROPOSED') durableJob = null;
+      if (durableJob) console.log(`[Adapter:ApprovalCorrelation] ${approvalToken} matched PROPOSED Job ${durableJob.job_id} in the same conversation.`);
     }
     if (!durableJob) {
       durableJob = workflowStore.getOrCreateJob({
@@ -1552,11 +1704,7 @@ export function extractToolCall(text, tools = [], messages = [], targetRole = 'c
     }
 
     if (isBareApproval) {
-      const latestProposed = workflowStore.getLatestProposedJob();
-      if (!explicitMessageJobId && latestProposed && latestProposed.job_id !== durableJob?.job_id && latestProposed.updated_at > (durableJob?.updated_at || '')) {
-        console.log(`[Adapter:ApprovalCorrelation] ${approvalToken} matched latest PROPOSED Job ${latestProposed.job_id} instead of conversation Job ${durableJob?.job_id || 'none'}`);
-        durableJob = latestProposed;
-      }
+      if (!durableJob) console.warn(`[Adapter:ApprovalCorrelation] No PROPOSED Job found in conversation ${conversationKey}; approval will not borrow an unrelated global Job.`);
     }
     if (durableJob) workflowStore.reconcileRuntimeRefs(durableJob.job_id, messages);
     const fsm = new CoordinatorSessionStateMachine();
@@ -1564,6 +1712,14 @@ export function extractToolCall(text, tools = [], messages = [], targetRole = 'c
       state: durableJob.state,
       activeTask: durableJob.title
     } : null);
+
+    // Approval is a durable business transition, not legacy dispatch. The
+    // authoritative Production E2E controller must observe APPROVED itself;
+    // otherwise the legacy DISPATCH_TASK guard would leave the Job PROPOSED.
+    if (turnStep.action === Actions.DISPATCH_TASK && durableJob?.state === States.PROPOSED) {
+      workflowStore.approve(durableJob.job_id, latestUserText || 'approved');
+      durableJob = workflowStore.getJob(durableJob.job_id);
+    }
 
     if (turnStep.action === Actions.GENERATE_PROPOSAL || turnStep.action === Actions.REFINE_PROPOSAL) {
       // In Proposal or Discussion phase: CANNOT SPAWN!
@@ -1683,7 +1839,7 @@ export function extractToolCall(text, tools = [], messages = [], targetRole = 'c
       }
     }
 
-    if (turnStep.action === Actions.DISPATCH_TASK && !isCircuitBreakerTripped) {
+    if (turnStep.action === Actions.DISPATCH_TASK && !isCircuitBreakerTripped && !/production e2e/i.test(String(durableJob?.title || ''))) {
       // Approved: CTO is the technical lead, not the universal worker.
       // CTO must build the smallest useful team and delegate independent work
       // through OpenClaw native sessions_spawn. The browser adapter provides
@@ -1732,10 +1888,10 @@ Boss đã phê duyệt. Bắt đầu execution NOW. Scope đã được tách kh
 - reviewer: independent DoD review
 - writer: documentation/communication khi cần
 
-Các task độc lập PHẢI được spawn qua OpenClaw native sessions_spawn mà không chờ nhau; để OpenClaw chạy chúng song song. Chỉ giữ các dependency thực sự cần thiết tuần tự.
-Không tự chạy specialist check bằng exec/read thay cho delegation. Với mỗi specialist task, turn đầu tiên phải gọi sessions_spawn native cho đúng role. Khi một child completion event quay về, tiếp tục orchestration và gọi sessions_spawn native cho specialist độc lập tiếp theo nếu còn task chưa spawn.
+      Các task độc lập PHẢI được spawn qua OpenClaw native sessions_spawn mà không chờ nhau; để OpenClaw chạy chúng song song. Chỉ giữ các dependency thực sự cần thiết tuần tự.
+      Với mỗi specialist task, BẮT BUỘC dùng sessions_spawn native. Không dùng collector mode; runtime Job Store sở hữu durable WAIT/RESUME và biết chính xác child run/session nào phải chờ. SAU KHI đã spawn đủ các task độc lập hiện có, không cần tự quản lý agents_wait; có thể kết thúc turn sau khi native spawn được accepted. Runtime sẽ chờ child terminal rồi resume SAME CTO session khi đủ evidence.
 Argument task của sessions_spawn PHẢI chứa scope kiểm tra cụ thể được Boss yêu cầu; không dùng mô tả role-only như “Specialist role: qa”. Nếu Boss request có command/path/acceptance criterion cụ thể, copy nguyên scope đó vào child task để child có đủ context thực thi và trả evidence.
-      Sau khi child agents hoàn tất, tổng hợp artifact/result của chúng, giải quyết conflict và báo cáo Coordinator.
+      Sau khi child agents hoàn tất, tổng hợp artifact/result của chúng, giải quyết conflict và báo cáo Coordinator. Không được tuyên bố hoàn tất dựa trên việc sessions_spawn trả về accepted; chỉ coi child hoàn tất khi có completion/terminal evidence thực tế từ OpenClaw và Job Store.
 Mọi progress/decision quan trọng có thể cập nhật vào Slack War Room, nhưng Job Store/OpenClaw mới là source of truth. Không tự giả lập việc đã gửi Slack.
 
       Bắt đầu bằng team decomposition và delegation phù hợp, không chỉ giao lại cho chính mình.`;
@@ -1788,7 +1944,7 @@ Báo cáo lại đầy đủ kết quả: Chủ đề, Trace luồng dữ liệu
     const durableJob = referencedJobId
       ? workflowStore.getJob(referencedJobId)
       : workflowStore.getActiveJob(conversationKeyFromMessages(messages));
-    if (durableJob && durableJob.state === States.EXECUTING) {
+    if (durableJob && durableJob.state === States.EXECUTING && !/production e2e/i.test(String(durableJob.title || ''))) {
       const trace = workflowStore.getJobTrace(durableJob.job_id);
       const existingRoles = new Set((trace?.tasks || []).filter(t => t.parent_task_id).map(t => t.role));
       const lower = text.toLowerCase();
@@ -1800,16 +1956,20 @@ Báo cáo lại đầy đủ kết quả: Chủ đề, Trace luồng dữ liệu
       if (hasSignal && !explicitRefusal && specialist) {
         const parentTaskId = durableJob.active_task_id || trace?.tasks?.find(t => !t.parent_task_id)?.task_id || null;
         const isProductionE2E = /production e2e/i.test(String(durableJob.title || ''));
-        const task = isProductionE2E && specialist === 'architect'
-          ? `Durable Job ID: ${durableJob.job_id}. Run immediately: node --check /home/long/work/chatgpt-adapter/server.js. Return the exact command, actual stdout/stderr output, and exit status. This is execution now, not proposal.`
+        const execution = isProductionE2E && specialist === 'architect'
+          ? { executor: 'ExecutionManager', command: 'node --check /home/long/work/chatgpt-adapter/server.js', cwd: '/home/long/work/chatgpt-adapter', timeout_ms: 120000 }
           : isProductionE2E && specialist === 'qa'
-            ? `Durable Job ID: ${durableJob.job_id}. Run immediately: node --check /home/long/work/chatgpt-adapter/test-tool-turn.js. Return the exact command, actual stdout/stderr output, and exit status. This is execution now, not proposal.`
-            : `Durable Job ID: ${durableJob.job_id}. Specialist role: ${specialist}. Execute independently and return concise evidence to CTO. Read-only verification; do not modify production code.`;
+            ? { executor: 'ExecutionManager', command: 'node --check /home/long/work/chatgpt-adapter/test-tool-turn.js', cwd: '/home/long/work/chatgpt-adapter', timeout_ms: 120000 }
+            : null;
+        const task = execution
+          ? `Durable Job ID: ${durableJob.job_id}. Execute the assigned deterministic task and return findings from runtime evidence. Execution spec is authoritative.`
+          : `Durable Job ID: ${durableJob.job_id}. Specialist role: ${specialist}. Execute independently and return concise findings to CTO. Read-only verification; do not modify production code.`;
         if (parentTaskId) {
           workflowStore.createChildTask(durableJob.job_id, {
             parentTaskId,
             role: specialist,
-            description: task
+            description: task,
+            ...(execution ? { metadata: { deterministic: true, ...execution } } : {})
           });
         }
         toolName = 'sessions_spawn';
@@ -1852,7 +2012,7 @@ Báo cáo lại đầy đủ kết quả: Chủ đề, Trace luồng dữ liệu
       const trace = workflowStore.getJobTrace(durableJob.job_id);
       const duplicate = trace?.tasks?.find(t => t.parent_task_id && String(t.role).toLowerCase() === role &&
         !['failed', 'cancelled'].includes(String(t.status).toLowerCase()) &&
-        /EXECUTION NOW|Durable Job ID|exactly this command|exact command/i.test(t.description || ''));
+        (/production e2e/i.test(String(durableJob.title || '')) || /EXECUTION NOW|Durable Job ID|exactly this command|exact command/i.test(t.description || '')));
       if (duplicate) {
         console.warn(`[Adapter:LifecycleGuard] Blocked duplicate ${role} sessions_spawn for Job ${durableJob.job_id}; existing task=${duplicate.task_id} status=${duplicate.status}`);
         return null;
@@ -2098,6 +2258,18 @@ const server = http.createServer(async (req, res) => {
     const exists = workflowStore.getJob(jobId);
     res.writeHead(exists ? 200 : 404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(exists ? projection : { error: 'job_not_found', jobId }, null, 2));
+    return;
+  }
+  if (url.pathname.startsWith('/v1/workflow/jobs/') && req.method === 'GET') {
+    const jobId = decodeURIComponent(url.pathname.slice('/v1/workflow/jobs/'.length));
+    const trace = workflowStore.getJobTrace(jobId);
+    if (!trace?.job) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'job not found' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ job: trace.job, tasks: trace.tasks || [] }));
     return;
   }
 
@@ -2413,12 +2585,17 @@ function isImmediateSilentRequest(messages) {
           const langGraphMetadata = langGraphDecision
             ? { ...(body.metadata || {}), langGraphDecision }
             : (body.metadata || {});
-          const toolCall = normalizeSpecialistExecToolCall(
+          let toolCall = normalizeSpecialistExecToolCall(
             extractToolCall(replyText, tools, body.messages, targetRole, langGraphMetadata) ||
               recoverSpecialistExecToolCall(replyText, tools, body.messages, targetRole),
             body.messages,
             targetRole
           );
+          if (langGraphDecision && /production e2e/i.test(String(workflowStore.getJob(workflowStore.findJobIdFromMessages(body.messages || []) || '')?.title || '')) &&
+              ['sessions_spawn', 'agents_wait'].includes(String(toolCall?.name || ''))) {
+            console.warn(`[Adapter:LangGraphGuard] Suppressed coordinator ${toolCall.name} for Production E2E; LangGraph owns workflow orchestration.`);
+            toolCall = null;
+          }
           let durableExecutionResult = null;
           if (['exec', 'execute_batch'].includes(toolCall?.name)) {
             try { durableExecutionResult = await executeDurableDeterministicToolCall(toolCall, body.messages, targetRole); }
@@ -2737,12 +2914,17 @@ function isImmediateSilentRequest(messages) {
           const langGraphMetadata = langGraphDecision
             ? { ...(body.metadata || {}), langGraphDecision }
             : (body.metadata || {});
-          const toolCall = normalizeSpecialistExecToolCall(
+          let toolCall = normalizeSpecialistExecToolCall(
             extractToolCall(replyText, tools, body.messages, targetRole, langGraphMetadata) ||
               recoverSpecialistExecToolCall(replyText, tools, body.messages, targetRole),
             body.messages,
             targetRole
           );
+          if (langGraphDecision && /production e2e/i.test(String(workflowStore.getJob(workflowStore.findJobIdFromMessages(body.messages || []) || '')?.title || '')) &&
+              ['sessions_spawn', 'agents_wait'].includes(String(toolCall?.name || ''))) {
+            console.warn(`[Adapter:LangGraphGuard] Suppressed coordinator ${toolCall.name} for Production E2E; LangGraph owns workflow orchestration.`);
+            toolCall = null;
+          }
           let durableExecutionResult = null;
           if (['exec', 'execute_batch'].includes(toolCall?.name)) {
             try { durableExecutionResult = await executeDurableDeterministicToolCall(toolCall, body.messages, targetRole); }
