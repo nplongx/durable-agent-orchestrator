@@ -2871,7 +2871,7 @@ function isImmediateSilentRequest(messages) {
             providerAdmission.markRateLimited(`chatgpt:account:${err.accountId}`, err.message);
           }
           if (isProviderRateLimitError(err)) {
-            const referencedJobId = workflowStore.findJobIdFromMessages(messages);
+            const referencedJobId = workflowStore.findJobIdFromMessages(body.messages || []);
             reconcileBridgeRateLimitForJob(referencedJobId, err);
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
