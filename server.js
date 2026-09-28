@@ -1131,6 +1131,12 @@ YÊU CẦU BẮT BUỘC CHO CHIEF OF STAFF:
   };
 }
 
+export function toolsForSpecialistPrompt(tools = [], agentRole = '') {
+  if (!Array.isArray(tools)) return [];
+  if (!['architect', 'qa'].includes(String(agentRole || '').toLowerCase())) return tools;
+  return tools.filter(t => (t.function?.name || t.name) !== 'exec');
+}
+
 export function extractToolCall(text, tools = [], messages = [], targetRole = 'coordinator', deliveryMetadata = {}) {
   if (!text || typeof text !== 'string') return null;
 
@@ -2281,7 +2287,16 @@ function isImmediateSilentRequest(messages) {
         }
       }
 
-      let { prompt, agentRole, agentName } = formatMessagesToPrompt(body.messages, tools, model, body.metadata || {});
+      let formatted = formatMessagesToPrompt(body.messages, tools, model, body.metadata || {});
+      // Deterministic specialist execution belongs to ExecutionManager. Do not
+      // advertise native `exec` to Architect/QA: the web model may otherwise
+      // execute the command itself and loop on a transport-only `(no output)`
+      // result before the adapter can persist durable evidence.
+      if (['architect', 'qa'].includes(String(formatted.agentRole || '').toLowerCase())) {
+        const specialistTools = toolsForSpecialistPrompt(tools, formatted.agentRole);
+        formatted = formatMessagesToPrompt(body.messages, specialistTools, model, body.metadata || {});
+      }
+      let { prompt, agentRole, agentName } = formatted;
       try {
         fs.appendFileSync('/home/long/work/chatgpt-adapter/adapter.log', 
           `\n========================================\n` +

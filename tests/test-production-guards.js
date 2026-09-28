@@ -42,7 +42,20 @@ await fsPromises.chmod(fakeOpenClaw, 0o755);
 
 const { WorkflowStore } = await import('../job-store.js');
 const { RecoveryManager } = await import('../recovery-manager.js');
+const { formatMessagesToPrompt, toolsForSpecialistPrompt } = await import('../server.js');
 const store = new WorkflowStore();
+
+const specialistTools = toolsForSpecialistPrompt([
+  {type:'function',function:{name:'exec',parameters:{}}},
+  {type:'function',function:{name:'read',parameters:{}}}
+], 'qa');
+assert.deepEqual(specialistTools.map(t => t.function?.name || t.name), ['read']);
+const specialistPrompt = formatMessagesToPrompt([
+  {role:'system',content:'Runtime: name=QA Engineer | agent=qa'},
+  {role:'user',content:'Run immediately: node --check /home/long/work/chatgpt-adapter/test-tool-turn.js'}
+], specialistTools, 'chatgpt-free');
+assert.equal(specialistPrompt.agentRole,'qa');
+assert.match(specialistPrompt.prompt,/Run immediately: node --check \/home\/long\/work\/chatgpt-adapter\/test-tool-turn\.js/);
 
 function makeProductionJob(suffix) {
   const sessionKey = `agent:architect:subagent:test-${crypto.randomUUID()}`;
