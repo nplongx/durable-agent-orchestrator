@@ -128,3 +128,4 @@ jobs:
           name: p1-runner-smoke-${{ github.run_id }}
           path: .p1-smoke/
           if-no-files-found: error
+          include-hidden-files: true
