@@ -548,6 +548,35 @@ export class WorkflowStore {
         ${jobId ? 'AND t.job_id=?' : ''}
       ORDER BY t.created_at ASC LIMIT ?`).all(...(jobId ? [jobId, limit] : [limit]));
   }
+
+  applyVerifiedExecutionResult(result) {
+    const lease = this.getTaskLease(result.lease_id);
+    if (!lease) return { status: 'REJECTED', reason: 'lease_not_found' };
+    if (lease.state !== 'ACTIVE') return { status: 'REJECTED', reason: 'lease_not_active' };
+    if (lease.task_id !== result.task_id || lease.job_id !== result.job_id || lease.attempt !== result.attempt) {
+      return { status: 'REJECTED', reason: 'stale_attempt_or_correlation_mismatch' };
+    }
+    const task = this.getTask(result.task_id);
+    if (!task || Number(task.execution_attempt) !== Number(result.attempt)) return { status: 'REJECTED', reason: 'task_attempt_mismatch' };
+    const ts = now();
+    const success = result.status === 'SUCCEEDED' && Number(result.exit_code) === 0;
+    this.db.prepare(`INSERT INTO results(result_id, task_id, outcome, content, created_at) VALUES(?, ?, ?, ?, ?)`)
+      .run(id('result'), result.task_id, success ? 'success' : 'failure', JSON.stringify({
+        provider_run_id: result.provider_run_id, output_commit: result.output_commit,
+        evidence_artifact: result.evidence_artifact, evidence_refs: result.evidence_refs,
+        evidence_verification: result.evidence_verification || null, error: result.error || null
+      }), ts);
+    this.db.prepare(`UPDATE tasks SET status=?, execution_status=?, execution_exit_code=?, execution_finished_at=?, updated_at=?
+      WHERE task_id=? AND status='running' AND execution_attempt=?`)
+      .run(success ? 'completed' : 'failed', success ? 'completed' : 'failed', result.exit_code ?? null, result.finished_at || ts, ts, result.task_id, result.attempt);
+    this.completeTaskLease(result.lease_id, { workerId: lease.worker_id, success, error: result.error || null });
+    this.recordEvent(result.job_id, success ? 'task.execution.verified' : 'task.execution.rejected', {
+      taskId: result.task_id, leaseId: result.lease_id, attempt: result.attempt,
+      providerRunId: result.provider_run_id, outputCommit: result.output_commit,
+      evidenceHash: result.evidence_verification?.evidence_hash || null
+    }, `${result.lease_id}|verified|${result.attempt}`);
+    return { status: success ? 'VERIFIED' : 'REJECTED', task: this.getTask(result.task_id) };
+  }
   getExecutionBatch(batchId) { return this.db.prepare('SELECT * FROM execution_batches WHERE batch_id = ?').get(batchId) || null; }
   listExecutionBatchItems(batchId) { return this.db.prepare('SELECT * FROM execution_batch_items WHERE batch_id = ? ORDER BY rowid ASC').all(batchId); }
   createExecutionBatch(jobId, { parentTaskId = null, role = 'executor', items = [], attempt = 1 } = {}) {
