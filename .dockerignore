@@ -1,0 +1,14 @@
+.git
+.gitignore
+node_modules
+adapter.log
+data/*.db-shm
+data/*.db-wal
+data/test-*.db
+.openclaw
+.config
+archive
+Dockerfile*
+docker-compose*.yml
+*.log
+

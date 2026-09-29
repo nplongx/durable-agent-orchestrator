@@ -1,0 +1,130 @@
+name: P1 GitHub Runner Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "Smoke task identifier"
+        required: true
+        default: "p1-runner-smoke"
+      input_commit:
+        description: "Commit to validate"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p1-runner-smoke-${{ inputs.task_id }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TASK_ID: ${{ inputs.task_id }}
+      INPUT_COMMIT: ${{ inputs.input_commit }}
+    steps:
+      - name: Checkout requested revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.input_commit }}
+          fetch-depth: 0
+
+      - name: Validate host
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "runner=$(uname -a)"
+          echo "arch=$(uname -m)"
+          echo "docker=$(docker --version)"
+          git rev-parse HEAD
+          test "$(git rev-parse HEAD)" = "$INPUT_COMMIT"
+
+      - name: Build execution image
+        run: docker build --pull -t chatgpt-adapter:p1-smoke .
+
+      - name: Smoke runtime dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --entrypoint bash chatgpt-adapter:p1-smoke -lc '
+            set -Eeuo pipefail
+            node --version
+            git --version
+            tmux -V
+            google-chrome --version
+            openclaw --version
+            Xvfb -help >/dev/null 2>&1 || true
+            node tests/test-execution-manager.js
+            node tests/test-execution-contract.js
+          '
+
+      - name: Smoke Xvfb + Chrome
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --entrypoint bash chatgpt-adapter:p1-smoke -lc '
+            set -Eeuo pipefail
+            export DISPLAY=:99
+            Xvfb "$DISPLAY" -screen 0 1280x720x24 -ac >/tmp/xvfb.log 2>&1 &
+            xvfb_pid=$!
+            trap "kill $xvfb_pid 2>/dev/null || true" EXIT
+            for i in $(seq 1 30); do
+              xdpyinfo >/dev/null 2>&1 && break
+              sleep 0.2
+            done
+            xdpyinfo >/dev/null 2>&1
+            google-chrome \
+              --headless=new \
+              --no-sandbox \
+              --disable-gpu \
+              --disable-dev-shm-usage \
+              --dump-dom about:blank >/tmp/chrome-dom.txt
+            test -s /tmp/chrome-dom.txt
+          '
+
+      - name: Produce machine-readable evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .p1-smoke
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const evidence = {
+            schema_version: 1,
+            task_id: process.env.TASK_ID,
+            input_commit: process.env.INPUT_COMMIT,
+            provider: 'github-actions',
+            runner: process.env.RUNNER_NAME,
+            workflow_run_id: process.env.GITHUB_RUN_ID,
+            workflow_attempt: process.env.GITHUB_RUN_ATTEMPT,
+            repository: process.env.GITHUB_REPOSITORY,
+            status: 'SUCCEEDED'
+          };
+          fs.writeFileSync('.p1-smoke/result.json', JSON.stringify(evidence, null, 2) + '\n');
+          NODE
+          cat .p1-smoke/result.json
+
+      - name: Commit and push smoke marker
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="p1-smoke/${TASK_ID//[^A-Za-z0-9._-]/-}/${GITHUB_RUN_ID}"
+          git switch -c "$branch"
+          printf '%s\n' "P1 smoke task=${TASK_ID} run=${GITHUB_RUN_ID} input=${INPUT_COMMIT}" > .p1-smoke/commit-marker.txt
+          git add .p1-smoke/result.json .p1-smoke/commit-marker.txt
+          git commit -m "chore(p1): runner smoke ${TASK_ID}"
+          git push --set-upstream origin "$branch"
+          echo "output_commit=$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p1-runner-smoke-${{ github.run_id }}
+          path: .p1-smoke/
+          if-no-files-found: error
