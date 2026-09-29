@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { tempDir } from './test-temp-dir.js';
 
-const dbPath = `/tmp/cos-m2-${process.pid}.db`;
+const tempRoot = tempDir('execution-batch-m2-');
+const dbPath = `${tempRoot}/workflow.db`;
 try { fs.rmSync(dbPath, { force: true }); fs.rmSync(`${dbPath}-wal`, { force: true }); fs.rmSync(`${dbPath}-shm`, { force: true }); } catch (_) {}
 process.env.WORKFLOW_DB = dbPath;
-process.env.WORKFLOW_DATA_DIR = path.dirname(dbPath);
+process.env.WORKFLOW_DATA_DIR = tempRoot;
 process.env.EXECUTION_TIMEOUT_MS = '10000';
 
 const { WorkflowStore } = await import('../job-store.js');

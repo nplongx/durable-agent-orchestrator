@@ -17,7 +17,8 @@ const fakeScript = [
   "    const key = args[args.indexOf('--session-key') + 1];",
   "    if (key.includes('timeout')) { await new Promise(resolve => setTimeout(resolve, 2000)); process.exit(0); }",
   "    const output = args[args.indexOf('--output') + 1];",
-  "    const root = path.join('/tmp', '.openclaw', 'trajectory-exports', output);",
+  "    const workspace = args[args.indexOf('--workspace') + 1];",
+  "    const root = path.join(workspace, '.openclaw', 'trajectory-exports', output);",
   "    fs.mkdirSync(root, { recursive: true });",
   "    const content = '[ACTUAL TOOL RESULT EVIDENCE]\\nexact command: node --check /home/long/work/chatgpt-adapter/server.js\\nexit status/code: 0\\nexecution status: completed\\n[/ACTUAL TOOL RESULT EVIDENCE]';",
   "    fs.writeFileSync(path.join(root, 'events.jsonl'), JSON.stringify({ type: 'assistant.message', data: { message: { content } } }) + '\\n');",
@@ -44,6 +45,7 @@ const store = new WorkflowStore();
 
 function makeFailedChild({ sessionKey, runId, title }) {
   const job = store.createJob({ conversationKey: 'phase5e:' + title, title });
+  store.approve(job.job_id, 'approved', 'phase5e-test');
   store.dispatch(job.job_id, { role: 'cto', description: 'Delegate specialist work via sessions_spawn' });
   const ctoTask = store.getTask(store.getJob(job.job_id).active_task_id);
   const child = store.createChildTask(job.job_id, {
@@ -66,7 +68,7 @@ const repair = makeFailedChild({
 });
 const beforeTaskCount = store.db.prepare('SELECT COUNT(*) n FROM tasks WHERE job_id = ?').get(repair.job.job_id).n;
 const beforeSessionCount = store.db.prepare('SELECT COUNT(*) n FROM agent_sessions WHERE job_id = ?').get(repair.job.job_id).n;
-const recovery = new RecoveryManager(store, { sessionStaleMs: 1, trajectoryTimeoutMs: 1000 });
+const recovery = new RecoveryManager(store, { sessionStaleMs: 1, trajectoryTimeoutMs: 1500 });
 await recovery.reconcile({ jobId: repair.job.job_id });
 assert.equal(store.getTask(repair.child.task_id).status, 'completed');
 assert.equal(store.getSession(repair.session.session_id).state, 'TERMINATED');

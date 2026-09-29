@@ -11,6 +11,21 @@ export class DistributedScheduler {
     this.maxParallel = Math.max(1, Number(maxParallel) || 4);
     this.leaseTtlMs = Math.max(5000, Number(leaseTtlMs) || 120000);
     this.workerId = workerId;
+    if (!store.db.__p6Fake && typeof store.db.exec === 'function') {
+      store.db.exec(`CREATE TABLE IF NOT EXISTS provider_dispatch_intents (
+        dispatch_key TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        provider TEXT NOT NULL,
+        input_commit TEXT NOT NULL,
+        state TEXT NOT NULL,
+        provider_run_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ); CREATE INDEX IF NOT EXISTS idx_provider_dispatch_intents_state ON provider_dispatch_intents(state, created_at);`);
+    }
   }
 
   _activeCount() {
@@ -56,8 +71,26 @@ export class DistributedScheduler {
       workspace: 'ephemeral',
       required_evidence: requiredEvidence
     });
+    const dispatchKey = crypto.createHash('sha256').update(`${request.job_id}|${request.task_id}|${request.lease_id}|${request.attempt}|${request.input_commit}`).digest('hex');
+    if (!this.store.db.__p6Fake) {
+      const existingIntent = this.store.db.prepare('SELECT * FROM provider_dispatch_intents WHERE dispatch_key=?').get(dispatchKey);
+      if (existingIntent?.provider_run_id) {
+        return { task, lease, request, run: this.store.db.prepare('SELECT * FROM provider_runs WHERE provider_run_id=?').get(existingIntent.provider_run_id), idempotent: true };
+      }
+      if (existingIntent?.state === 'DISPATCHING') {
+        throw new Error(`provider dispatch intent pending reconciliation: ${dispatchKey}`);
+      }
+      this.store.db.prepare(`INSERT OR IGNORE INTO provider_dispatch_intents
+        (dispatch_key,job_id,task_id,lease_id,attempt,provider,input_commit,state,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,'DISPATCHING',?,?)`)
+        .run(dispatchKey, request.job_id, request.task_id, request.lease_id, request.attempt, 'github-actions', request.input_commit, new Date().toISOString(), new Date().toISOString());
+    }
     try {
-      const run = await this.provider.dispatch(request);
+      const run = await this.provider.dispatch({ ...request, dispatch_key: dispatchKey });
+      if (!this.store.db.__p6Fake) {
+        this.store.db.prepare('UPDATE provider_dispatch_intents SET state=?, provider_run_id=?, updated_at=? WHERE dispatch_key=?')
+          .run('DISPATCHED', run.provider_run_id, new Date().toISOString(), dispatchKey);
+      }
       this.store.db.prepare(`UPDATE task_leases SET last_error=NULL WHERE lease_id=?`).run(lease.lease_id);
       this.store.recordEvent(task.job_id, 'task.provider.dispatched', {
         taskId: task.task_id, leaseId: lease.lease_id, attempt: lease.attempt,
@@ -68,6 +101,21 @@ export class DistributedScheduler {
       this.store.expireTaskLease(lease.lease_id, { reason: `dispatch_failed: ${error.message}` });
       throw error;
     }
+  }
+
+  async reconcileProviderDispatches({ maxAgeMs = 15 * 60 * 1000 } = {}) {
+    if (this.store.db.__p6Fake || typeof this.provider.reconcileDispatchIntent !== 'function') return [];
+    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+    const intents = this.store.db.prepare("SELECT * FROM provider_dispatch_intents WHERE state='DISPATCHING' AND created_at >= ? ORDER BY created_at ASC").all(cutoff);
+    const results = [];
+    for (const intent of intents) {
+      const run = await this.provider.reconcileDispatchIntent(intent);
+      if (!run) { results.push({ dispatchKey: intent.dispatch_key, status: 'NOT_FOUND' }); continue; }
+      this.store.db.prepare('UPDATE provider_dispatch_intents SET state=?, provider_run_id=?, updated_at=? WHERE dispatch_key=?')
+        .run('DISPATCHED', run.provider_run_id, new Date().toISOString(), intent.dispatch_key);
+      results.push({ dispatchKey: intent.dispatch_key, status: 'RECONCILED', run });
+    }
+    return results;
   }
 
   async dispatchPending({ inputCommit, limit = this.maxParallel } = {}) {

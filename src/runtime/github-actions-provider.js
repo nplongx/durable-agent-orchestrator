@@ -151,6 +151,7 @@ export class GitHubActionsProvider {
         input_commit: inputCommit
       }
     };
+    if (request.dispatch_key) body.inputs.dispatch_key = request.dispatch_key;
     const data = await this.request('POST', `/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/actions/workflows/${encodeURIComponent(this.workflow)}/dispatches`, body);
     if (!data?.workflow_run_id) {
       throw new Error('GitHub dispatch succeeded but response did not include workflow_run_id');
@@ -163,6 +164,26 @@ export class GitHubActionsProvider {
     };
     this._persist(run);
     return run;
+  }
+
+  async reconcileDispatchIntent(intent) {
+    const created = new Date(intent.created_at || Date.now());
+    const since = new Date(created.getTime() - 30_000).toISOString();
+    const until = new Date(Math.max(this.now(), created.getTime() + 10 * 60_000)).toISOString();
+    const params = new URLSearchParams({ event: 'workflow_dispatch', head_sha: intent.input_commit, created: `${since}..${until}`, per_page: '100' });
+    const data = await this.request('GET', `/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/actions/workflows/${encodeURIComponent(this.workflow)}/runs?${params}`);
+    const marker = String(intent.dispatch_key);
+    const matches = (data?.workflow_runs || []).filter(run => String(run.display_title || '').includes(marker) || String(run.name || '').includes(marker));
+    if (matches.length !== 1) return null;
+    const run = matches[0];
+    const normalized = {
+      provider_run_id: String(run.id), job_id: intent.job_id, task_id: intent.task_id,
+      lease_id: intent.lease_id, attempt: intent.attempt, input_commit: intent.input_commit,
+      workflow: this.workflow, ref: this.ref, state: run.status === 'completed' ? 'COMPLETED' : 'RUNNING',
+      conclusion: run.conclusion || null, html_url: run.html_url || null, created_at: run.created_at || new Date(this.now()).toISOString()
+    };
+    this._persist(normalized);
+    return normalized;
   }
 
   async getStatus(providerRunId) {

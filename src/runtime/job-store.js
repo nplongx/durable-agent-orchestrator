@@ -91,7 +91,8 @@ CREATE INDEX IF NOT EXISTS idx_session_messages_correlation
   ON session_messages(session_id, correlation_id, created_at);
 CREATE TABLE IF NOT EXISTS approvals (
   approval_id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(job_id),
-  decision TEXT NOT NULL CHECK (decision IN ('approved','rejected')), actor TEXT NOT NULL, raw_text TEXT NOT NULL, created_at TEXT NOT NULL
+  decision TEXT NOT NULL CHECK (decision IN ('approved','rejected')), actor TEXT NOT NULL, raw_text TEXT NOT NULL,
+  proposal_hash TEXT, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS attempts (
   attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id),
@@ -230,6 +231,9 @@ CREATE TABLE IF NOT EXISTS workflow_plans (
   approved_at TEXT
 );
 `);
+
+try { db.exec('ALTER TABLE approvals ADD COLUMN proposal_hash TEXT'); } catch (_) {}
+db.exec('CREATE INDEX IF NOT EXISTS idx_approvals_job_created ON approvals(job_id, created_at DESC);');
 
 const WORKFLOW_PHASES = Object.freeze([
   'PROPOSED', 'APPROVED', 'SPAWN_CTO', 'ASSIGN_CHILDREN', 'RUN_CHILDREN',
@@ -432,6 +436,32 @@ export class WorkflowStore {
     const eid = eventId(jobId, type, dedupeKey); const ts = now();
     this.db.prepare('INSERT OR IGNORE INTO events(event_id, job_id, type, payload_json, created_at) VALUES(?, ?, ?, ?, ?)').run(eid, jobId, type, JSON.stringify(payload), ts);
     return eid;
+  }
+
+  getCurrentProposal(jobId) {
+    const events = this.listEvents(jobId, { limit: 1000 });
+    const proposals = events.filter(event => event.type === 'job.proposal_requested' || event.type === 'job.proposal_refined');
+    const event = proposals.at(-1);
+    if (!event) return null;
+    let payload = {};
+    try { payload = JSON.parse(event.payload_json || '{}'); } catch (_) {}
+    return { event, payload, proposalHash: hash(canonicalJson(payload)) };
+  }
+
+  getLatestApproval(jobId) {
+    return this.db.prepare('SELECT * FROM approvals WHERE job_id=? ORDER BY created_at DESC LIMIT 1').get(jobId) || null;
+  }
+
+  isApprovalCurrent(jobId) {
+    const approval = this.getLatestApproval(jobId);
+    if (!approval || approval.decision !== 'approved') return false;
+    const proposal = this.getCurrentProposal(jobId);
+    return !proposal || approval.proposal_hash === proposal.proposalHash;
+  }
+
+  assertApprovalCurrent(jobId) {
+    if (!this.isApprovalCurrent(jobId)) throw new Error(`approval is not current for immutable proposal: ${jobId}`);
+    return true;
   }
 
   listEvents(jobId, { limit = 200, type = null } = {}) {
@@ -1142,7 +1172,9 @@ export class WorkflowStore {
     }
     const productionTask = plannedTask || null;
     const productionExecution = productionTask?.execution || null;
-    const durableMetadata = productionExecution ? { ...productionExecution, ...metadata } : metadata;
+    const durableMetadata = productionTask
+      ? { ...(productionExecution || {}), ...metadata, workflow_plan_task_id: productionTask.id }
+      : metadata;
     const taskId = id('task'); const ts = now();
     this.db.prepare("INSERT INTO tasks(task_id, job_id, role, description, status, parent_task_id, dependency_json, metadata_json, created_at, updated_at) VALUES(?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)").run(taskId, jobId, role, description, parentTaskId, JSON.stringify(dependencies), JSON.stringify(durableMetadata), ts, ts);
     this.recordEvent(jobId, 'task.created', { taskId, parentTaskId, role, description, dependencies }, taskId);
@@ -1390,14 +1422,19 @@ export class WorkflowStore {
   approve(jobId, rawText, actor = 'boss') {
     const job = this.getJob(jobId);
     if (!job) throw new Error('job not found: ' + jobId);
+    let proposal = this.getCurrentProposal(jobId);
+    if (!proposal) {
+      this.recordEvent(jobId, 'job.proposal_requested', { task: job.title }, hash(job.title));
+      proposal = this.getCurrentProposal(jobId);
+    }
     const approvalId = id('approval'); const ts = now();
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      this.db.prepare("INSERT INTO approvals(approval_id, job_id, decision, actor, raw_text, created_at) VALUES(?, ?, 'approved', ?, ?, ?)").run(approvalId, jobId, actor, rawText, ts);
+      this.db.prepare("INSERT INTO approvals(approval_id, job_id, decision, actor, raw_text, proposal_hash, created_at) VALUES(?, ?, 'approved', ?, ?, ?, ?)").run(approvalId, jobId, actor, rawText, proposal.proposalHash, ts);
       this.db.prepare('UPDATE jobs SET state = ?, approved_at = ?, updated_at = ? WHERE job_id = ?').run('APPROVED', ts, ts, jobId);
       const runtime = this.getWorkflowRuntimeState(jobId);
       if (runtime?.phase === 'PROPOSED') this.transitionWorkflowPhase(jobId, 'APPROVED', { event: 'workflow.approved', payload: { actor } });
-      this.recordEvent(jobId, 'approval.approved', { actor, rawText }, hash(rawText));
+      this.recordEvent(jobId, 'approval.approved', { actor, rawText, proposalHash: proposal.proposalHash }, hash(`${rawText}|${proposal.proposalHash}`));
       if (isSupportedWorkflow(this.getJob(jobId))) this.compileExecutionPlan(jobId);
       this.db.exec('COMMIT');
     } catch (error) {
@@ -1407,7 +1444,16 @@ export class WorkflowStore {
     return this.getJob(jobId);
   }
   dispatch(jobId, { role = 'cto', description }) {
+    const jobBeforeDispatch = this.getJob(jobId);
+    if (isSupportedWorkflow(jobBeforeDispatch)) this.assertApprovalCurrent(jobId);
     const task = this.ensureTask(jobId, { role, description }); const ts = now();
+    const plan = this.getExecutionPlan(jobId);
+    if (plan?.synthesis && String(role).toLowerCase() === 'cto') {
+      let metadata = {};
+      try { metadata = JSON.parse(task.metadata_json || '{}'); } catch (_) {}
+      metadata.workflow_plan_task_id = plan.synthesis.id;
+      this.db.prepare('UPDATE tasks SET metadata_json=?, updated_at=? WHERE task_id=?').run(JSON.stringify(metadata), ts, task.task_id);
+    }
     this.db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE task_id = ?').run('running', ts, task.task_id);
     this.db.prepare('UPDATE jobs SET state = ?, updated_at = ? WHERE job_id = ?').run('EXECUTING', ts, jobId);
     const runtime = this.getWorkflowRuntimeState(jobId);

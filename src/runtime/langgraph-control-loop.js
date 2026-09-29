@@ -40,6 +40,9 @@ export class LangGraphControlLoop {
     const job = this.store.getJob(jobId);
     if (!job) throw new Error(`job not found: ${jobId}`);
     this.store.reapExpiredTaskLeases({ jobId });
+    const dispatchReconciliation = typeof this.scheduler.reconcileProviderDispatches === 'function'
+      ? await this.scheduler.reconcileProviderDispatches()
+      : [];
     const reconciled = await this.reconcile(jobId);
     const refreshedJob = this.store.getJob(jobId);
     const tasks = this.store.db.prepare('SELECT * FROM tasks WHERE job_id=? ORDER BY created_at ASC').all(jobId);
@@ -54,9 +57,9 @@ export class LangGraphControlLoop {
     });
     if (decision.action === LangGraphActions.RUN_CHILDREN) {
       const dispatched = await this.scheduler.dispatchPending({ inputCommit });
-      return { job: this.store.getJob(jobId), decision, reconciled, dispatched };
+      return { job: this.store.getJob(jobId), decision, reconciled, dispatched, dispatchReconciliation };
     }
-    return { job: this.store.getJob(jobId), decision, reconciled, dispatched: [] };
+    return { job: this.store.getJob(jobId), decision, reconciled, dispatched: [], dispatchReconciliation };
   }
 }
 

@@ -1,4 +1,5 @@
 name: P3 Distributed Worker
+run-name: P3 worker ${{ inputs.dispatch_key }}
 
 on:
   workflow_dispatch:
@@ -18,6 +19,8 @@ on:
       role:
         required: true
         default: executor
+      dispatch_key:
+        required: false
 
 permissions:
   contents: write

@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { tempDir } from './test-temp-dir.js';
 
 const root = '/home/long/work/chatgpt-adapter';
+const tempRoot = tempDir('production-guards-');
 const testDb = path.join(root, 'data', `test-production-guards-${crypto.randomUUID()}.db`);
-const fakeOpenClaw = path.join('/tmp', `fake-openclaw-${crypto.randomUUID()}.mjs`);
+const fakeOpenClaw = path.join(tempRoot, `fake-openclaw-${crypto.randomUUID()}.mjs`);
 process.env.WORKFLOW_DB = testDb;
 process.env.WORKFLOW_DATA_DIR = path.dirname(testDb);
 process.env.OPENCLAW_BIN = fakeOpenClaw;
@@ -21,7 +23,7 @@ if (args[0] === 'sessions' && args[1] === '--all-agents') {
 if (args[0] === 'sessions' && args[1] === 'export-trajectory') {
   if (process.env.FAKE_OPENCLAW_MODE === 'timeout') await new Promise(() => {});
   const output = args[args.indexOf('--output') + 1];
-  const dir = path.join('/tmp','.openclaw','trajectory-exports',output);
+  const dir = path.join(process.env.WORKFLOW_DATA_DIR, '.openclaw','trajectory-exports',output);
   await fs.mkdir(dir,{recursive:true});
   const command = process.env.FAKE_OPENCLAW_COMMAND || 'node --check /home/long/work/chatgpt-adapter/server.js';
   const events = [

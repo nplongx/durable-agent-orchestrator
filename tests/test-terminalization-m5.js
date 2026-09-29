@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { tempDir } from './test-temp-dir.js';
 
-const dbPath = `/tmp/cos-m5-${process.pid}.db`;
+const tempRoot = tempDir('m5-');
+const dbPath = `${tempRoot}/workflow.db`;
 for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) fs.rmSync(p, { force: true });
 process.env.WORKFLOW_DB = dbPath;
-process.env.WORKFLOW_DATA_DIR = '/tmp';
+process.env.WORKFLOW_DATA_DIR = tempRoot;
 
 const { WorkflowStore } = await import('../job-store.js');
 const store = new WorkflowStore();

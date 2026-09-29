@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { tempDir } from './test-temp-dir.js';
 
-const dbPath = path.join('/tmp', 'workflow-plan-m2-' + crypto.randomUUID() + '.db');
+const tempRoot = tempDir('workflow-plan-m2-');
+const workspace = path.join(tempRoot, 'workspace');
+const dbPath = path.join(tempRoot, 'workflow.db');
 process.env.WORKFLOW_DB = dbPath;
 process.env.WORKFLOW_DATA_DIR = path.dirname(dbPath);
-process.env.WORKFLOW_WORKSPACE = '/tmp/m2-workspace';
+process.env.WORKFLOW_WORKSPACE = workspace;
 
 const { WorkflowStore, conversationKeyFromMessages } = await import('../src/runtime/job-store.js');
 const { compileWorkflowPlan } = await import('../src/runtime/workflow/compiler.js');
@@ -29,21 +32,22 @@ assert.equal(plan.children.length, 2);
 assert.deepEqual(plan.children.map(t => t.role), ['architect', 'qa']);
 assert.deepEqual(plan.children.map(t => t.execution.executable), ['node', 'node']);
 assert.deepEqual(plan.children.map(t => t.execution.args), [
-  ['--check', '/tmp/m2-workspace/server.js'],
-  ['--check', '/tmp/m2-workspace/test-tool-turn.js']
+  ['--check', path.join(workspace, 'server.js')],
+  ['--check', path.join(workspace, 'test-tool-turn.js')]
 ]);
 assert.match(plan.plan_hash, /^[a-f0-9]{64}$/);
 const rowBefore = store.db.prepare('SELECT plan_hash, plan_json, compiled_at, approved_at FROM workflow_plans WHERE job_id=?').get(job.job_id);
 assert.equal(rowBefore.plan_hash, plan.plan_hash);
 assert.equal(plan.plan_hash, crypto.createHash('sha256').update(rowBefore.plan_json).digest('hex'));
 
-const again = store.compileExecutionPlan(job.job_id, { workspace: '/tmp/m2-workspace' });
+const again = store.compileExecutionPlan(job.job_id, { workspace });
 assert.equal(again.plan_hash, plan.plan_hash);
 assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM workflow_plans WHERE job_id=?').get(job.job_id).n, 1);
 
-const different = compileWorkflowPlan(job, { workspace: '/tmp/other-workspace' });
+const otherWorkspace = path.join(tempRoot, 'other-workspace');
+const different = compileWorkflowPlan(job, { workspace: otherWorkspace });
 assert.notEqual(different.plan_hash, plan.plan_hash);
-assert.throws(() => store.compileExecutionPlan(job.job_id, { workspace: '/tmp/other-workspace' }), /immutable execution plan mismatch/);
+assert.throws(() => store.compileExecutionPlan(job.job_id, { workspace: otherWorkspace }), /immutable execution plan mismatch/);
 
 const task = store.createChildTask(job.job_id, {
   parentTaskId: null,
@@ -52,8 +56,8 @@ const task = store.createChildTask(job.job_id, {
 });
 const metadata = JSON.parse(task.metadata_json);
 assert.equal(metadata.executable, 'node');
-assert.deepEqual(metadata.args, ['--check', '/tmp/m2-workspace/server.js']);
-assert.equal(metadata.command, 'node --check /tmp/m2-workspace/server.js');
+assert.deepEqual(metadata.args, ['--check', path.join(workspace, 'server.js')]);
+assert.equal(metadata.command, `node --check ${path.join(workspace, 'server.js')}`);
 
 fs.rmSync(dbPath, { force: true });
 console.log('test-workflow-plan-m2: PASS');

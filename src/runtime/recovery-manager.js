@@ -10,6 +10,8 @@ import { ProductionRoles } from './workflow/catalog/production.js';
 const execFileAsync = promisify(execFile);
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || 'openclaw';
 const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
+const WORKFLOW_DATA_DIR = process.env.WORKFLOW_DATA_DIR || '/tmp';
+const TRAJECTORY_ROOT = path.join(WORKFLOW_DATA_DIR, '.openclaw', 'trajectory-exports');
 
 async function cli(command, args, timeout = 30000) {
   const { stdout } = await execFileAsync(command, args, { timeout, maxBuffer: 2 * 1024 * 1024 });
@@ -38,11 +40,11 @@ async function exportCompletedTrajectory(sessionKey, timeoutMs = 45000) {
     await cli(OPENCLAW_BIN, [
       'sessions', 'export-trajectory',
       '--session-key', sessionKey,
-      '--workspace', '/tmp',
+      '--workspace', WORKFLOW_DATA_DIR,
       '--output', output,
       '--json'
     ], timeoutMs);
-    const eventsPath = path.join('/tmp', '.openclaw', 'trajectory-exports', output, 'events.jsonl');
+    const eventsPath = path.join(TRAJECTORY_ROOT, output, 'events.jsonl');
     const raw = await fs.readFile(eventsPath, 'utf8');
     const events = raw.split('\n').filter(Boolean).map(line => JSON.parse(line));
     const executionEvidence = extractTrajectoryExecutionEvidence(raw);
@@ -82,7 +84,7 @@ async function exportCompletedTrajectory(sessionKey, timeoutMs = 45000) {
     );
     return verifiedSynthesis || assistantTexts.at(-1) || null;
   } finally {
-    await fs.rm(path.join('/tmp', '.openclaw', 'trajectory-exports', output), { recursive: true, force: true }).catch(() => {});
+    await fs.rm(path.join(TRAJECTORY_ROOT, output), { recursive: true, force: true }).catch(() => {});
   }
 }
 

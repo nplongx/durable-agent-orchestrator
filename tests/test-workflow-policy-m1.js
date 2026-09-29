@@ -4,6 +4,7 @@ import { ProductionWorkflow, isProductionWorkflow } from '../src/runtime/workflo
 import { ProductionRoles, ProductionTaskId, productionChildTaskSpecs, productionTaskSpec } from '../src/runtime/workflow/catalog/production.js';
 import { validateProductionWorkflow } from '../src/runtime/workflow/schema.js';
 import { WorkflowPhase } from '../src/runtime/workflow/phases.js';
+import { tempDir } from './test-temp-dir.js';
 
 assert.equal(ProductionWorkflow.id, 'production');
 assert.equal(ProductionWorkflow.version, 1);
@@ -16,7 +17,7 @@ assert.equal(isProductionWorkflow({ title: 'Production E2E acceptance' }), true)
 assert.equal(isProductionWorkflow({ title: 'ordinary job' }), false);
 assert.equal(validateProductionWorkflow(), true);
 
-const workspace = '/tmp/workflow-policy-m1';
+const workspace = tempDir('workflow-policy-m1-');
 const specs = productionChildTaskSpecs(workspace);
 assert.deepEqual(specs.map(spec => spec.role), ProductionRoles);
 assert.deepEqual(specs.map(spec => spec.id), [ProductionTaskId.ARCHITECT_CHECK, ProductionTaskId.QA_CHECK]);

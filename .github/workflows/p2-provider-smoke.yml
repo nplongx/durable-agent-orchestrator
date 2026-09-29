@@ -1,4 +1,5 @@
 name: P2 GitHub Actions Provider Smoke
+run-name: P2 provider ${{ inputs.dispatch_key }}
 
 on:
   workflow_dispatch:
@@ -13,6 +14,8 @@ on:
         required: true
       input_commit:
         required: true
+      dispatch_key:
+        required: false
 
 permissions:
   contents: read
