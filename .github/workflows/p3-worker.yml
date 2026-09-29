@@ -1,0 +1,86 @@
+name: P3 Distributed Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        required: true
+      task_id:
+        required: true
+      lease_id:
+        required: true
+      attempt:
+        required: true
+      input_commit:
+        required: true
+      task_payload_ref:
+        required: true
+      role:
+        required: true
+        default: executor
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      JOB_ID: ${{ inputs.job_id }}
+      TASK_ID: ${{ inputs.task_id }}
+      LEASE_ID: ${{ inputs.lease_id }}
+      ATTEMPT: ${{ inputs.attempt }}
+      INPUT_COMMIT: ${{ inputs.input_commit }}
+      TASK_PAYLOAD_REF: ${{ inputs.task_payload_ref }}
+      ROLE: ${{ inputs.role }}
+      PROVIDER_RUN_ID: ${{ github.run_id }}
+      EVIDENCE_DIR: .p3-worker
+    steps:
+      - name: Checkout immutable input revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.input_commit }}
+          fetch-depth: 0
+
+      - name: Validate worker correlation
+        run: |
+          set -Eeuo pipefail
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "$INPUT_COMMIT"
+          test "$JOB_ID" != ""
+          test "$TASK_ID" != ""
+          test "$LEASE_ID" != ""
+          test "$ATTEMPT" -ge 1
+          test "$TASK_PAYLOAD_REF" != ""
+          test "$ROLE" != ""
+          test -f "$TASK_PAYLOAD_REF"
+
+      - name: Validate runtime dependencies
+        run: |
+          set -Eeuo pipefail
+          node --version
+          git --version
+          tmux -V
+          test -x "$(command -v node)"
+
+      - name: Execute through ExecutionManager
+        run: |
+          set -Eeuo pipefail
+          node scripts/run-worker-task.js
+
+      - name: Validate result envelope
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          test -f .p3-worker/result.json
+          node -e "import('./src/runtime/execution-contract.js').then(({validateExecutionResult}) => validateExecutionResult(JSON.parse(require('node:fs').readFileSync('.p3-worker/result.json', 'utf8'))))"
+
+      - name: Upload worker evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p3-worker-${{ github.run_id }}
+          path: .p3-worker/**
+          include-hidden-files: true
+          if-no-files-found: error

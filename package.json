@@ -17,6 +17,7 @@
     "test:e2e:v27": "node scripts/run-v27-e2e.js",
     "test:execution-manager": "node tests/test-execution-manager.js",
     "test:execution-contract": "node tests/test-execution-contract.js",
+    "test:worker-protocol": "node tests/test-worker-protocol.js",
     "test:production-guards": "node tests/test-production-guards.js",
     "test:workflow-policy-m1": "node tests/test-workflow-policy-m1.js",
     "test:workflow-plan-m2": "node tests/test-workflow-plan-m2.js",
