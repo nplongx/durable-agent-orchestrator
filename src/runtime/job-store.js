@@ -540,6 +540,14 @@ export class WorkflowStore {
     if (state) { clauses.push('state=?'); args.push(state); }
     return this.db.prepare(`SELECT * FROM task_leases${clauses.length ? ' WHERE ' + clauses.join(' AND ') : ''} ORDER BY issued_at DESC LIMIT ?`).all(...args, limit);
   }
+
+  listRunnableTasks({ jobId = null, limit = 100 } = {}) {
+    return this.db.prepare(`SELECT t.* FROM tasks t
+      WHERE t.status='pending'
+        AND NOT EXISTS (SELECT 1 FROM task_leases l WHERE l.task_id=t.task_id AND l.state='ACTIVE')
+        ${jobId ? 'AND t.job_id=?' : ''}
+      ORDER BY t.created_at ASC LIMIT ?`).all(...(jobId ? [jobId, limit] : [limit]));
+  }
   getExecutionBatch(batchId) { return this.db.prepare('SELECT * FROM execution_batches WHERE batch_id = ?').get(batchId) || null; }
   listExecutionBatchItems(batchId) { return this.db.prepare('SELECT * FROM execution_batch_items WHERE batch_id = ? ORDER BY rowid ASC').all(batchId); }
   createExecutionBatch(jobId, { parentTaskId = null, role = 'executor', items = [], attempt = 1 } = {}) {
