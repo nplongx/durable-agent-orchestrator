@@ -26,6 +26,8 @@
     "test:p9-resume": "node tests/test-p9-resume.js",
     "test:p11-security": "node tests/test-p11-security.js",
     "test:observability": "node tests/test-observability.js",
+    "test:p13-failure-injection": "node scripts/run-p13-failure-injection.js",
+    "test:p13-verifier-injection": "node tests/test-p13-verifier-injection.js",
     "test:p10-capacity": "node tests/test-p10-capacity.js",
     "benchmark:p10": "node scripts/benchmark-p10-capacity.js",
     "test:production-guards": "node tests/test-production-guards.js",
