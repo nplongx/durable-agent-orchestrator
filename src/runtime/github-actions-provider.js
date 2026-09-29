@@ -129,8 +129,17 @@ export class GitHubActionsProvider {
     return this.store?.db?.prepare('SELECT * FROM provider_runs WHERE provider_run_id=?').get(String(providerRunId)) || null;
   }
 
+  async resolveCommit(commit) {
+    required(commit, 'input_commit');
+    if (/^[0-9a-f]{40}$/i.test(commit)) return commit.toLowerCase();
+    const data = await this.request('GET', `/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/commits/${encodeURIComponent(commit)}`);
+    if (!/^[0-9a-f]{40}$/i.test(String(data?.sha || ''))) throw new Error(`GitHub commit lookup returned invalid SHA for ${commit}`);
+    return String(data.sha).toLowerCase();
+  }
+
   async dispatch(request) {
     validateExecutionRequest(request);
+    const inputCommit = await this.resolveCommit(request.input_commit);
     const body = {
       ref: this.ref,
       inputs: {
@@ -138,7 +147,7 @@ export class GitHubActionsProvider {
         task_id: request.task_id,
         lease_id: request.lease_id,
         attempt: String(request.attempt),
-        input_commit: request.input_commit
+        input_commit: inputCommit
       }
     };
     const data = await this.request('POST', `/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/actions/workflows/${encodeURIComponent(this.workflow)}/dispatches`, body);
@@ -147,7 +156,7 @@ export class GitHubActionsProvider {
     }
     const run = {
       provider_run_id: String(data.workflow_run_id), job_id: request.job_id, task_id: request.task_id,
-      lease_id: request.lease_id, attempt: request.attempt, input_commit: request.input_commit,
+      lease_id: request.lease_id, attempt: request.attempt, input_commit: inputCommit,
       workflow: this.workflow, ref: this.ref, state: 'QUEUED', conclusion: null,
       html_url: data.html_url || data.run_url || null, created_at: new Date(this.now()).toISOString()
     };
