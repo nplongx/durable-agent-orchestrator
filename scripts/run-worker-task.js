@@ -25,6 +25,28 @@ function isoNow() { return new Date().toISOString(); }
 
 function safeJson(value) { return JSON.stringify(value, null, 2) + '\n'; }
 
+async function publishCheckpoint() {
+  const candidate = path.join(process.cwd(), '.worker', 'checkpoint.json');
+  const evidencePath = path.join(evidenceDir, 'checkpoint.json');
+  try {
+    const checkpoint = JSON.parse(await fs.readFile(candidate, 'utf8'));
+    execFileSync('git', ['config', 'user.name', 'durable-agent-orchestrator']);
+    execFileSync('git', ['config', 'user.email', 'actions@users.noreply.github.com']);
+    execFileSync('git', ['add', '--', '.worker/checkpoint.json']);
+    if (!git(['diff', '--cached', '--name-only']).split('\n').includes('.worker/checkpoint.json')) throw new Error('checkpoint file was not staged');
+    execFileSync('git', ['commit', '-m', `checkpoint: ${process.env.TASK_ID} attempt ${process.env.ATTEMPT}`], { stdio: 'ignore' });
+    const branch = `p9-checkpoint/${process.env.TASK_ID}/${process.env.PROVIDER_RUN_ID}`;
+    execFileSync('git', ['push', 'origin', `HEAD:${branch}`], { stdio: 'pipe' });
+    checkpoint.checkpoint_commit = git(['rev-parse', 'HEAD']);
+    checkpoint.checkpoint_ref = branch;
+    await fs.writeFile(evidencePath, safeJson(checkpoint));
+    return checkpoint;
+  } catch (error) {
+    await fs.writeFile(path.join(evidenceDir, 'checkpoint-error.txt'), `${error.message}\n`).catch(() => {});
+    return null;
+  }
+}
+
 await fs.mkdir(evidenceDir, { recursive: true });
 
 const resultBase = {
@@ -119,6 +141,14 @@ try {
   resultBase.evidence_refs = ['task-payload.json', 'execution.json', 'stdout.txt', 'stderr.txt', 'git-status.txt'];
   resultBase.finished_at = isoNow();
   if (status !== 'SUCCEEDED') resultBase.error = execution.timedOut ? 'execution timeout' : `exit status ${execution.exitCode}`;
+  if (execution.timedOut) {
+    const checkpoint = await publishCheckpoint();
+    if (checkpoint?.checkpoint_commit) {
+      resultBase.checkpoint_commit = checkpoint.checkpoint_commit;
+      resultBase.checkpoint_ref = checkpoint.checkpoint_ref;
+      resultBase.evidence_refs.push('checkpoint.json');
+    }
+  }
 } catch (error) {
   resultBase.status = 'FAILED';
   resultBase.output_commit = null;

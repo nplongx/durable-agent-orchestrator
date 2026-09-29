@@ -83,7 +83,8 @@ export function validateExecutionResult(result) {
   exactKeys(result, [
     'schema_version', 'job_id', 'task_id', 'lease_id', 'attempt', 'status',
     'input_commit', 'output_commit', 'exit_code', 'provider_run_id',
-    'evidence_artifact', 'evidence_refs', 'started_at', 'finished_at', 'error'
+    'evidence_artifact', 'evidence_refs', 'started_at', 'finished_at', 'error',
+    'checkpoint_commit', 'checkpoint_ref'
   ], 'execution result');
 
   if (result.schema_version !== EXECUTION_CONTRACT_VERSION) fail(`schema_version must be ${EXECUTION_CONTRACT_VERSION}`);
@@ -106,6 +107,9 @@ export function validateExecutionResult(result) {
   isoDate(result.started_at, 'started_at');
   isoDate(result.finished_at, 'finished_at');
   optionalString(result.error, 'error');
+  optionalString(result.checkpoint_commit, 'checkpoint_commit');
+  optionalString(result.checkpoint_ref, 'checkpoint_ref');
+  if (result.checkpoint_commit && !/^[0-9a-f]{7,64}$/i.test(result.checkpoint_commit)) fail('checkpoint_commit must be a Git commit SHA');
 
   if (result.status === 'SUCCEEDED') {
     if (result.exit_code !== 0) fail('SUCCEEDED requires exit_code 0');

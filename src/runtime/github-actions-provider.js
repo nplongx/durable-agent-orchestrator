@@ -216,6 +216,7 @@ export class GitHubActionsProvider {
           }
           if (evidence['task-payload.json']) evidence['task-payload.json'] = JSON.parse(evidence['task-payload.json']);
           if (evidence['execution.json']) evidence['execution.json'] = JSON.parse(evidence['execution.json']);
+          if (evidence['checkpoint.json']) evidence['checkpoint.json'] = JSON.parse(evidence['checkpoint.json']);
           return { result, evidence };
         } catch {}
       }
@@ -247,6 +248,10 @@ export class GitHubActionsProvider {
       evidence_artifact: raw.evidence_artifact || artifact.name,
       evidence_refs: Array.isArray(raw.evidence_refs) ? raw.evidence_refs : [artifact.archive_download_url]
     };
+    if (!result.checkpoint_commit && bundle.evidence?.['checkpoint.json']?.checkpoint_commit) {
+      result.checkpoint_commit = bundle.evidence['checkpoint.json'].checkpoint_commit;
+      result.checkpoint_ref = bundle.evidence['checkpoint.json'].checkpoint_ref || null;
+    }
     validateExecutionResult(result);
     const verification = /^p3-worker-/.test(artifact.name)
       ? verifyExecutionEvidence({ result, evidence: bundle.evidence })

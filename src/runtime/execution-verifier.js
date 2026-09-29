@@ -50,6 +50,13 @@ export function verifyExecutionEvidence({ result, evidence = {} } = {}) {
     if (status.includes('\0')) errors.push('git status evidence contains NUL');
   }
 
+  if (result.status === 'TIMED_OUT' && result.checkpoint_commit) {
+    if (!/^[0-9a-f]{7,64}$/i.test(result.checkpoint_commit)) errors.push('invalid checkpoint commit');
+    const checkpoint = evidence['checkpoint.json'];
+    if (!checkpoint) errors.push('checkpoint evidence missing');
+    else if (checkpoint.checkpoint_commit !== result.checkpoint_commit) errors.push('checkpoint commit mismatch');
+  }
+
   return Object.freeze({
     valid: errors.length === 0,
     errors,

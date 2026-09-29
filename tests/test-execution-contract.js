@@ -61,6 +61,19 @@ const failed = createExecutionResult({
 });
 assert.equal(failed.status, 'FAILED');
 
+const checkpointed = createExecutionResult({
+  ...result,
+  status: 'TIMED_OUT',
+  output_commit: null,
+  exit_code: null,
+  error: 'execution timeout',
+  checkpoint_commit: 'abcdef1234567890abcdef1234567890abcdef12',
+  checkpoint_ref: 'p9-checkpoint/task/provider'
+});
+assert.equal(checkpointed.checkpoint_commit, 'abcdef1234567890abcdef1234567890abcdef12');
+assert.equal(validateExecutionResult(checkpointed), checkpointed);
+assert.throws(() => validateExecutionResult({ ...checkpointed, checkpoint_commit: 'nope' }), /checkpoint_commit/);
+
 assert.throws(() => createExecutionResult({
   ...result,
   status: 'TIMED_OUT',

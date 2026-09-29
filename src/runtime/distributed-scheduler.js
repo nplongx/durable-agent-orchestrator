@@ -22,6 +22,13 @@ export class DistributedScheduler {
     return payload;
   }
 
+  _resumeCommit(task, fallback) {
+    try {
+      const metadata = JSON.parse(task.metadata_json || '{}');
+      return metadata.resume_input_commit || metadata.checkpoint_commit || fallback;
+    } catch { return fallback; }
+  }
+
   async dispatchTask(task, { inputCommit, role = task.role || 'executor', requiredEvidence = ['task-payload.json', 'execution.json', 'stdout.txt', 'stderr.txt', 'git-status.txt'] } = {}) {
     const leaseId = uuid();
     const lease = this.store.acquireTaskLease(task.task_id, {
@@ -33,7 +40,7 @@ export class DistributedScheduler {
       lease_id: lease.lease_id,
       attempt: lease.attempt,
       role,
-      input_commit: inputCommit,
+      input_commit: this._resumeCommit(task, inputCommit),
       task_payload_ref: this._taskPayloadRef(task),
       workspace: 'ephemeral',
       required_evidence: requiredEvidence

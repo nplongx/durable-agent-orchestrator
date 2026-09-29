@@ -206,6 +206,19 @@ CREATE TABLE IF NOT EXISTS task_leases (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_leases_active_task ON task_leases(task_id) WHERE state='ACTIVE';
 CREATE INDEX IF NOT EXISTS idx_task_leases_expiry ON task_leases(state, expires_at);
 CREATE INDEX IF NOT EXISTS idx_task_leases_worker ON task_leases(worker_id, state);
+CREATE TABLE IF NOT EXISTS task_checkpoints (
+  checkpoint_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(task_id),
+  job_id TEXT NOT NULL REFERENCES jobs(job_id),
+  attempt INTEGER NOT NULL,
+  checkpoint_commit TEXT NOT NULL,
+  checkpoint_ref TEXT,
+  provider_run_id TEXT,
+  evidence_artifact TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_checkpoints_attempt ON task_checkpoints(task_id, attempt);
+CREATE INDEX IF NOT EXISTS idx_task_checkpoints_latest ON task_checkpoints(task_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS workflow_plans (
   job_id TEXT PRIMARY KEY REFERENCES jobs(job_id),
   workflow_id TEXT NOT NULL,
@@ -560,22 +573,43 @@ export class WorkflowStore {
     if (!task || Number(task.execution_attempt) !== Number(result.attempt)) return { status: 'REJECTED', reason: 'task_attempt_mismatch' };
     const ts = now();
     const success = result.status === 'SUCCEEDED' && Number(result.exit_code) === 0;
+    const checkpointed = result.status === 'TIMED_OUT' && Boolean(result.checkpoint_commit);
+    if (checkpointed) {
+      this.db.prepare(`INSERT OR REPLACE INTO task_checkpoints(
+        checkpoint_id, task_id, job_id, attempt, checkpoint_commit, checkpoint_ref,
+        provider_run_id, evidence_artifact, created_at
+      ) VALUES(?,?,?,?,?,?,?,?,?)`).run(
+        id('checkpoint'), result.task_id, result.job_id, result.attempt,
+        result.checkpoint_commit, result.checkpoint_ref || null,
+        result.provider_run_id, result.evidence_artifact || null, ts
+      );
+      const metadata = (() => { try { return JSON.parse(task.metadata_json || '{}'); } catch { return {}; } })();
+      metadata.checkpoint_commit = result.checkpoint_commit;
+      metadata.resume_input_commit = result.checkpoint_commit;
+      metadata.checkpoint_ref = result.checkpoint_ref || null;
+      this.db.prepare('UPDATE tasks SET metadata_json=? WHERE task_id=?').run(JSON.stringify(metadata), result.task_id);
+    }
     this.db.prepare(`INSERT INTO results(result_id, task_id, outcome, content, created_at) VALUES(?, ?, ?, ?, ?)`)
-      .run(id('result'), result.task_id, success ? 'success' : 'failure', JSON.stringify({
+      .run(id('result'), result.task_id, success ? 'success' : checkpointed ? 'partial' : 'failure', JSON.stringify({
         provider_run_id: result.provider_run_id, output_commit: result.output_commit,
         evidence_artifact: result.evidence_artifact, evidence_refs: result.evidence_refs,
-        evidence_verification: result.evidence_verification || null, error: result.error || null
+        evidence_verification: result.evidence_verification || null, error: result.error || null,
+        checkpoint_commit: result.checkpoint_commit || null, checkpoint_ref: result.checkpoint_ref || null
       }), ts);
     this.db.prepare(`UPDATE tasks SET status=?, execution_status=?, execution_exit_code=?, execution_finished_at=?, updated_at=?
       WHERE task_id=? AND status='running' AND execution_attempt=?`)
-      .run(success ? 'completed' : 'failed', success ? 'completed' : 'failed', result.exit_code ?? null, result.finished_at || ts, ts, result.task_id, result.attempt);
+      .run(success ? 'completed' : checkpointed ? 'pending' : 'failed', success ? 'completed' : checkpointed ? 'timeout' : 'failed', result.exit_code ?? null, result.finished_at || ts, ts, result.task_id, result.attempt);
     this.completeTaskLease(result.lease_id, { workerId: lease.worker_id, success, error: result.error || null });
-    this.recordEvent(result.job_id, success ? 'task.execution.verified' : 'task.execution.rejected', {
+    this.recordEvent(result.job_id, success ? 'task.execution.verified' : checkpointed ? 'task.execution.checkpointed' : 'task.execution.rejected', {
       taskId: result.task_id, leaseId: result.lease_id, attempt: result.attempt,
       providerRunId: result.provider_run_id, outputCommit: result.output_commit,
       evidenceHash: result.evidence_verification?.evidence_hash || null
     }, `${result.lease_id}|verified|${result.attempt}`);
-    return { status: success ? 'VERIFIED' : 'REJECTED', task: this.getTask(result.task_id) };
+    return { status: success ? 'VERIFIED' : checkpointed ? 'CHECKPOINTED' : 'REJECTED', task: this.getTask(result.task_id), checkpoint_commit: result.checkpoint_commit || null };
+  }
+
+  getLatestTaskCheckpoint(taskId) {
+    return this.db.prepare('SELECT * FROM task_checkpoints WHERE task_id=? ORDER BY created_at DESC LIMIT 1').get(taskId) || null;
   }
   getExecutionBatch(batchId) { return this.db.prepare('SELECT * FROM execution_batches WHERE batch_id = ?').get(batchId) || null; }
   listExecutionBatchItems(batchId) { return this.db.prepare('SELECT * FROM execution_batch_items WHERE batch_id = ? ORDER BY rowid ASC').all(batchId); }
