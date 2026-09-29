@@ -139,7 +139,8 @@ export class GitHubActionsProvider {
   }
 
   async dispatch(request) {
-    validateExecutionRequest(request);
+    const { dispatch_key: dispatchKey, ...executionRequest } = request;
+    validateExecutionRequest(executionRequest);
     const inputCommit = await this.resolveCommit(request.input_commit);
     const body = {
       ref: this.ref,
@@ -151,7 +152,7 @@ export class GitHubActionsProvider {
         input_commit: inputCommit
       }
     };
-    if (request.dispatch_key) body.inputs.dispatch_key = request.dispatch_key;
+    if (dispatchKey) body.inputs.dispatch_key = dispatchKey;
     const data = await this.request('POST', `/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/actions/workflows/${encodeURIComponent(this.workflow)}/dispatches`, body);
     if (!data?.workflow_run_id) {
       throw new Error('GitHub dispatch succeeded but response did not include workflow_run_id');
