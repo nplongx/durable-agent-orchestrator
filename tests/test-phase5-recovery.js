@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { tempDir } from './test-temp-dir.js';
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-phase5-'));
+const dir = tempDir('cos-phase5-');
 process.env.WORKFLOW_DB = path.join(dir, 'workflow.db');
 process.env.WORKFLOW_DATA_DIR = dir;
 

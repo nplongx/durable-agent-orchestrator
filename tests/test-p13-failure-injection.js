@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { verifyExecutionEvidence } from '../src/runtime/execution-verifier.js';
 import { DistributedScheduler } from '../src/runtime/distributed-scheduler.js';
+import { summarizeObservability } from '../src/runtime/observability.js';
+import { tempDir } from './test-temp-dir.js';
 
 const requested = process.argv.slice(2);
 if (!process.env.P13_CHILD) {
@@ -14,7 +15,7 @@ if (!process.env.P13_CHILD) {
   process.stdout.write(out); process.exit(code);
 }
 
-const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p13-failure-'));
+const dataDir = tempDir('p13-failure-');
 process.env.WORKFLOW_DATA_DIR = dataDir;
 process.env.WORKFLOW_DB = path.join(dataDir, 'workflow.db');
 const { WorkflowStore } = await import('../src/runtime/job-store.js');
@@ -70,7 +71,8 @@ if (requested.includes('provider-failure')) await run('provider-failure', async 
 });
 
 if (requested.includes('corrupt-evidence')) await run('corrupt-evidence', () => {
-  const result = { schema_version: 1, job_id: 'j', task_id: 't', lease_id: 'l', attempt: 1, status: 'SUCCEEDED', input_commit: 'a'.repeat(40), output_commit: 'b'.repeat(40), exit_code: 0, provider_run_id: 'r', evidence_refs: ['task-payload.json', 'execution.json', 'stdout.txt', 'git-status.txt'] };
+  const ts = new Date().toISOString();
+  const result = { schema_version: 1, job_id: 'j', task_id: 't', lease_id: 'l', attempt: 1, status: 'SUCCEEDED', input_commit: 'a'.repeat(40), output_commit: 'b'.repeat(40), exit_code: 0, provider_run_id: 'r', evidence_artifact: 'artifact.zip', evidence_refs: ['task-payload.json', 'execution.json', 'stdout.txt', 'git-status.txt'], started_at: ts, finished_at: ts };
   const evidence = { 'task-payload.json': { schema_version: 1, job_id: 'j', task_id: 't', lease_id: 'WRONG', attempt: 1 }, 'execution.json': { task_id: 't', exit_code: 0, timed_out: false }, 'stdout.txt': 'ok', 'git-status.txt': '' };
   const verification = verifyExecutionEvidence({ result, evidence });
   assert.equal(verification.valid, false);
@@ -78,7 +80,8 @@ if (requested.includes('corrupt-evidence')) await run('corrupt-evidence', () => 
 });
 
 if (requested.includes('checkpoint-timeout')) await run('checkpoint-timeout', () => {
-  const result = { schema_version: 1, job_id: 'j', task_id: 't', lease_id: 'l', attempt: 2, status: 'TIMED_OUT', input_commit: 'a'.repeat(40), exit_code: 124, provider_run_id: 'r', checkpoint_commit: 'c'.repeat(40), checkpoint_ref: 'p9-checkpoint/t/r', evidence_refs: ['task-payload.json', 'execution.json', 'checkpoint.json'] };
+  const ts = new Date().toISOString();
+  const result = { schema_version: 1, job_id: 'j', task_id: 't', lease_id: 'l', attempt: 2, status: 'TIMED_OUT', input_commit: 'a'.repeat(40), exit_code: 124, provider_run_id: 'r', evidence_artifact: 'artifact.zip', checkpoint_commit: 'c'.repeat(40), checkpoint_ref: 'p9-checkpoint/t/r', evidence_refs: ['task-payload.json', 'execution.json', 'checkpoint.json'], started_at: ts, finished_at: ts };
   const evidence = { 'task-payload.json': { schema_version: 1, job_id: 'j', task_id: 't', lease_id: 'l', attempt: 2 }, 'execution.json': { task_id: 't', exit_code: 124, timed_out: true }, 'checkpoint.json': { checkpoint_commit: 'c'.repeat(40) } };
   assert.equal(verifyExecutionEvidence({ result, evidence }).valid, true);
   evidence['checkpoint.json'].checkpoint_commit = 'd'.repeat(40);

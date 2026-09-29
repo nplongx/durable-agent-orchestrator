@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { tempDir } from './test-temp-dir.js';
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adapter-phase5e-recovery-'));
+const dir = tempDir('adapter-phase5e-recovery-');
 const fakeOpenClaw = path.join(dir, 'openclaw');
 const dbPath = path.join(dir, 'workflow.db');
 

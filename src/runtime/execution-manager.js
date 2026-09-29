@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { validateExecutionBatch, validateExecutionResult } from '../../protocol/cos-ap-v1/index.js';
 
 const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
@@ -25,10 +26,11 @@ function run(command, args, { timeoutMs = 30000 } = {}) {
 }
 
 export class ExecutionManager {
-  constructor(store, { tmuxBin = TMUX_BIN, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  constructor(store, { tmuxBin = TMUX_BIN, timeoutMs = DEFAULT_TIMEOUT_MS, executionTmpDir = process.env.EXECUTION_TMP_DIR || path.join(process.env.WORKFLOW_DATA_DIR || '/tmp', 'runtime') } = {}) {
     this.store = store;
     this.tmuxBin = tmuxBin;
     this.timeoutMs = timeoutMs;
+    this.executionTmpDir = path.resolve(executionTmpDir);
   }
 
   getTask(taskId) { return this.store.getTask(taskId); }
@@ -38,11 +40,12 @@ export class ExecutionManager {
       this.store.db.prepare("SELECT execution_session_id FROM tasks WHERE execution_status = 'running' AND execution_session_id IS NOT NULL")
         .all().map(row => `cos-exec-${String(row.execution_session_id).replace(/[^A-Za-z0-9_-]/g, '_')}`)
     );
-    const entries = await fs.readdir('/tmp').catch(() => []);
+    await fs.mkdir(this.executionTmpDir, { recursive: true, mode: 0o700 });
+    const entries = await fs.readdir(this.executionTmpDir).catch(() => []);
     const stale = entries.filter(name => /^cos-exec-exec_[A-Za-z0-9_-]+\.(stdout|stderr|exit)$/.test(name));
     await Promise.all(stale.map(name => {
       const tmuxName = name.replace(/\.(stdout|stderr|exit)$/, '');
-      return active.has(tmuxName) ? Promise.resolve() : fs.rm(`/tmp/${name}`, { force: true });
+      return active.has(tmuxName) ? Promise.resolve() : fs.rm(path.join(this.executionTmpDir, name), { force: true });
     }));
     return stale.filter(name => !active.has(name.replace(/\.(stdout|stderr|exit)$/, ''))).length;
   }
@@ -166,8 +169,12 @@ export class ExecutionManager {
     const executionSessionId = id('exec');
     const tmuxName = `cos-exec-${executionSessionId.replace(/[^A-Za-z0-9_-]/g, '_')}`;
     const startedAt = new Date().toISOString();
+    await fs.mkdir(this.executionTmpDir, { recursive: true, mode: 0o700 });
+    const stdoutPath = path.join(this.executionTmpDir, `${tmuxName}.stdout`);
+    const stderrPath = path.join(this.executionTmpDir, `${tmuxName}.stderr`);
+    const exitPath = path.join(this.executionTmpDir, `${tmuxName}.exit`);
     this.store.prepareExecution(taskId, { executionSessionId, attempt: nextAttempt, command, cwd, startedAt, tmuxName });
-    const script = `cd ${shellQuote(cwd)} && env ${Object.entries(env).map(([k,v]) => `${shellQuote(k)}=${shellQuote(v)}`).join(' ')} ${command} > ${shellQuote(`/tmp/${tmuxName}.stdout`)} 2> ${shellQuote(`/tmp/${tmuxName}.stderr`)}; printf '%s' $? > ${shellQuote(`/tmp/${tmuxName}.exit`)}`;
+    const script = `cd ${shellQuote(cwd)} && env ${Object.entries(env).map(([k,v]) => `${shellQuote(k)}=${shellQuote(v)}`).join(' ')} ${command} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}; printf '%s' $? > ${shellQuote(exitPath)}`;
     try {
       await run(this.tmuxBin, ['new-session', '-d', '-s', tmuxName, 'bash', '-lc', script], { timeoutMs: 10000 });
       const pid = await run(this.tmuxBin, ['display-message', '-p', '-t', `${tmuxName}:0`, '#{pane_pid}'], { timeoutMs: 5000 });
@@ -175,7 +182,7 @@ export class ExecutionManager {
       const started = Date.now();
       let exitCode = null;
       while (Date.now() - started < timeoutMs) {
-        const value = await fs.readFile(`/tmp/${tmuxName}.exit`, 'utf8').catch(() => '');
+        const value = await fs.readFile(exitPath, 'utf8').catch(() => '');
         if (/^-?\d+$/.test(value.trim())) { exitCode = Number(value.trim()); break; }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
@@ -204,8 +211,12 @@ export class ExecutionManager {
     const executionSessionId = id('exec');
     const tmuxName = `cos-exec-${executionSessionId.replace(/[^A-Za-z0-9_-]/g, '_')}`;
     const startedAt = new Date().toISOString();
+    await fs.mkdir(this.executionTmpDir, { recursive: true, mode: 0o700 });
+    const stdoutPath = path.join(this.executionTmpDir, `${tmuxName}.stdout`);
+    const stderrPath = path.join(this.executionTmpDir, `${tmuxName}.stderr`);
+    const exitPath = path.join(this.executionTmpDir, `${tmuxName}.exit`);
     this.store.prepareExecution(taskId, { executionSessionId, attempt: nextAttempt, command: exactCommand, cwd, startedAt, tmuxName });
-    const script = `cd ${shellQuote(cwd)} && env ${Object.entries(env).map(([k,v]) => `${shellQuote(k)}=${shellQuote(v)}`).join(' ')} ${exactCommand} > ${shellQuote(`/tmp/${tmuxName}.stdout`)} 2> ${shellQuote(`/tmp/${tmuxName}.stderr`)}; printf '%s' $? > ${shellQuote(`/tmp/${tmuxName}.exit`)}`;
+    const script = `cd ${shellQuote(cwd)} && env ${Object.entries(env).map(([k,v]) => `${shellQuote(k)}=${shellQuote(v)}`).join(' ')} ${exactCommand} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}; printf '%s' $? > ${shellQuote(exitPath)}`;
     try {
       await run(this.tmuxBin, ['new-session', '-d', '-s', tmuxName, 'bash', '-lc', script], { timeoutMs: 10000 });
       const pid = await run(this.tmuxBin, ['display-message', '-p', '-t', `${tmuxName}:0`, '#{pane_pid}'], { timeoutMs: 5000 });
@@ -213,7 +224,7 @@ export class ExecutionManager {
       const started = Date.now();
       let exitCode = null;
       while (Date.now() - started < timeoutMs) {
-        const value = await fs.readFile(`/tmp/${tmuxName}.exit`, 'utf8').catch(() => '');
+        const value = await fs.readFile(exitPath, 'utf8').catch(() => '');
         if (/^-?\d+$/.test(value.trim())) { exitCode = Number(value.trim()); break; }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
@@ -232,9 +243,12 @@ export class ExecutionManager {
 
   async collect(taskId, { executionSessionId, attempt, command, exitCode = null, timeout = false }) {
     const tmuxName = `cos-exec-${executionSessionId.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+    const stdoutPath = path.join(this.executionTmpDir, `${tmuxName}.stdout`);
+    const stderrPath = path.join(this.executionTmpDir, `${tmuxName}.stderr`);
+    const exitPath = path.join(this.executionTmpDir, `${tmuxName}.exit`);
     const [stdoutText, stderrText] = await Promise.all([
-      fs.readFile(`/tmp/${tmuxName}.stdout`, 'utf8').catch(() => ''),
-      fs.readFile(`/tmp/${tmuxName}.stderr`, 'utf8').catch(() => '')
+      fs.readFile(stdoutPath, 'utf8').catch(() => ''),
+      fs.readFile(stderrPath, 'utf8').catch(() => '')
     ]);
     const result = this.store.finishExecution(taskId, {
       executionSessionId, attempt, command, exitCode,
@@ -243,9 +257,9 @@ export class ExecutionManager {
       error: timeout ? 'execution timeout' : null
     });
     await Promise.all([
-      fs.rm(`/tmp/${tmuxName}.stdout`, { force: true }),
-      fs.rm(`/tmp/${tmuxName}.stderr`, { force: true }),
-      fs.rm(`/tmp/${tmuxName}.exit`, { force: true })
+      fs.rm(stdoutPath, { force: true }),
+      fs.rm(stderrPath, { force: true }),
+      fs.rm(exitPath, { force: true })
     ]);
     return { ...result, command, exitCode, stdout: stdoutText, stderr: stderrText, timedOut: timeout };
   }

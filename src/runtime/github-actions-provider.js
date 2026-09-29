@@ -230,8 +230,11 @@ export class GitHubActionsProvider {
     const status = await this.getStatus(providerRunId);
     if (status.state !== 'COMPLETED') throw new Error(`provider run ${providerRunId} is not completed: ${status.status}`);
     const artifacts = await this.request('GET', `/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/actions/runs/${encodeURIComponent(providerRunId)}/artifacts?per_page=100`);
-    const artifact = artifacts?.artifacts?.find(item => !item.expired && /^p2-provider-/.test(item.name))
-      || artifacts?.artifacts?.find(item => !item.expired && /result/.test(item.name));
+    const candidates = artifacts?.artifacts?.filter(item => !item.expired) || [];
+    const preferred = this.workflow.includes('p3-worker')
+      ? candidates.find(item => /^p3-worker-/.test(item.name))
+      : candidates.find(item => /^p2-provider-/.test(item.name));
+    const artifact = preferred || candidates.find(item => /result/.test(item.name));
     if (!artifact) throw new Error(`provider run ${providerRunId} has no result artifact`);
     const downloaded = await this._downloadArtifact(artifact);
     const bundle = downloaded?.result ? downloaded : { result: downloaded, evidence: {} };

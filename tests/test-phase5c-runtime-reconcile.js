@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { tempDir } from './test-temp-dir.js';
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adapter-phase5c-runtime-'));
+const dir = tempDir('adapter-phase5c-runtime-');
 process.env.WORKFLOW_DB = path.join(dir, 'workflow.db');
 const { workflowStore } = await import('../job-store.js');
 

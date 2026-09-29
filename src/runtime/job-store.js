@@ -498,7 +498,8 @@ export class WorkflowStore {
     if (!Number.isInteger(nextAttempt) || nextAttempt < 1) throw new Error('invalid lease attempt');
     const nowTs = new Date().toISOString();
     const expires = new Date(Date.now() + Math.max(1000, Number(ttlMs) || 60000)).toISOString();
-    const tx = this.db.transaction(() => {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
       const active = this.db.prepare("SELECT * FROM task_leases WHERE task_id=? AND state='ACTIVE'").get(taskId);
       if (active) throw new Error(`task already leased: ${taskId}`);
       const current = this.getTask(taskId);
@@ -508,8 +509,11 @@ export class WorkflowStore {
       this.db.prepare("UPDATE tasks SET status='running', execution_attempt=?, updated_at=? WHERE task_id=? AND status IN ('pending','failed','running')")
         .run(nextAttempt, nowTs, taskId);
       this.recordEvent(task.job_id, 'task.lease.acquired', { taskId, leaseId, workerId, attempt: nextAttempt, expiresAt: expires }, leaseId);
-    });
-    tx();
+      this.db.exec('COMMIT');
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch {}
+      throw error;
+    }
     return this.getTaskLease(leaseId);
   }
 

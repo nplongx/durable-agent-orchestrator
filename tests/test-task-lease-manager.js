@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { TaskLeaseManager } from '../src/runtime/task-lease-manager.js';
+import { tempDir } from './test-temp-dir.js';
 
-const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p5-lease-'));
+const dataDir = tempDir('p5-lease-');
 process.env.WORKFLOW_DATA_DIR = dataDir;
 process.env.WORKFLOW_DB = path.join(dataDir, 'workflow.db');
 const { WorkflowStore } = await import('../src/runtime/job-store.js');

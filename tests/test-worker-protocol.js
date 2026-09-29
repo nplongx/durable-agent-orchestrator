@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { tempDir } from './test-temp-dir.js';
 
 const root = process.cwd();
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-p3-worker-'));
+const dir = tempDir('cos-p3-worker-');
 const repo = root;
 const payloadRef = path.join('.p3-test-task.json');
 const payloadPath = path.join(repo, payloadRef);

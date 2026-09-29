@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { tempDirAsync } from './test-temp-dir.js';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const script = path.join(root, 'scripts', 'run-worker-task.js');
 
 async function run(payload, { cwd = root, inputCommit = 'a'.repeat(40) } = {}) {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'p11-worker-'));
+  const dir = await tempDirAsync('p11-worker-');
   const payloadFile = path.join(root, `.p11-security-payload-${process.pid}.json`);
   await fs.writeFile(payloadFile, JSON.stringify(payload));
   const env = {
