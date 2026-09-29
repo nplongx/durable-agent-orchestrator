@@ -25,7 +25,7 @@ const evidence = path.join(dir, 'evidence');
 const env = {
   ...process.env,
   JOB_ID: 'job-p3', TASK_ID: 'task-p3', LEASE_ID: 'lease-p3', ATTEMPT: '1',
-  INPUT_COMMIT: commit, TASK_PAYLOAD_REF: payloadRef, PROVIDER_RUN_ID: 'local-p3',
+  INPUT_COMMIT: commit, TASK_PAYLOAD_REF: payloadRef, ROLE: 'executor', PROVIDER_RUN_ID: 'local-p3',
   EVIDENCE_DIR: evidence, WORKFLOW_DATA_DIR: path.join(dir, 'state'), WORKFLOW_DB: path.join(dir, 'state', 'worker.db')
 };
 try {

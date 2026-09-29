@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-const required = ['JOB_ID', 'TASK_ID', 'LEASE_ID', 'ATTEMPT', 'INPUT_COMMIT', 'TASK_PAYLOAD_REF', 'PROVIDER_RUN_ID', 'EVIDENCE_DIR'];
+const required = ['JOB_ID', 'TASK_ID', 'LEASE_ID', 'ATTEMPT', 'INPUT_COMMIT', 'TASK_PAYLOAD_REF', 'ROLE', 'PROVIDER_RUN_ID', 'EVIDENCE_DIR'];
 for (const key of required) {
   if (!process.env[key]) throw new Error(`missing worker environment: ${key}`);
 }
@@ -15,6 +15,19 @@ const payloadPath = path.resolve(payloadRef);
 const payloadRelative = path.relative(process.cwd(), payloadPath);
 if (!payloadRelative || payloadRelative.startsWith('..') || path.isAbsolute(payloadRelative)) {
   throw new Error(`task payload must be inside the checked-out workspace: ${payloadRef}`);
+}
+
+function assertWorkspacePath(value, field) {
+  const resolved = path.resolve(process.cwd(), value || '.');
+  const relative = path.relative(process.cwd(), resolved);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`${field} must stay inside the checked-out workspace`);
+  return resolved;
+}
+
+function assertEvidenceRef(value) {
+  if (typeof value !== 'string' || !value || path.isAbsolute(value) || value.split('/').includes('..') || value.split('\\').includes('..')) {
+    throw new Error(`invalid evidence ref: ${value}`);
+  }
 }
 
 function git(args) {
@@ -72,7 +85,9 @@ try {
 
   const raw = await fs.readFile(payloadPath, 'utf8');
   const payload = JSON.parse(raw);
-  await fs.writeFile(path.join(evidenceDir, 'task-payload.json'), safeJson(payload));
+  const checkpointPath = path.join(process.cwd(), '.worker', 'checkpoint.json');
+  const checkpoint = await fs.readFile(checkpointPath, 'utf8').then(JSON.parse).catch(() => null);
+  const resuming = Boolean(checkpoint?.checkpoint_commit && checkpoint.checkpoint_commit.toLowerCase() === process.env.INPUT_COMMIT.toLowerCase());
 
   const expected = {
     job_id: process.env.JOB_ID,
@@ -80,17 +95,27 @@ try {
     lease_id: process.env.LEASE_ID,
     attempt: Number(process.env.ATTEMPT)
   };
-  for (const [key, value] of Object.entries(expected)) {
-    if (payload[key] !== value) throw new Error(`payload correlation mismatch: ${key}`);
-  }
+  if (payload.job_id !== expected.job_id) throw new Error('payload correlation mismatch: job_id');
+  if (payload.task_id !== expected.task_id) throw new Error('payload correlation mismatch: task_id');
+  if (!resuming && payload.lease_id !== expected.lease_id) throw new Error('payload correlation mismatch: lease_id');
+  if (!resuming && payload.attempt !== expected.attempt) throw new Error('payload correlation mismatch: attempt');
+  if (resuming && checkpoint.task_id && checkpoint.task_id !== expected.task_id) throw new Error('checkpoint correlation mismatch: task_id');
+  if (resuming && checkpoint.job_id && checkpoint.job_id !== expected.job_id) throw new Error('checkpoint correlation mismatch: job_id');
   if (payload.role && payload.role !== process.env.ROLE) throw new Error('payload correlation mismatch: role');
   if (payload.schema_version !== 1) throw new Error(`unsupported task payload schema: ${payload.schema_version}`);
   if (!Array.isArray(payload.required_evidence) || payload.required_evidence.length === 0) {
     throw new Error('task payload required_evidence must be non-empty');
   }
+  for (const ref of payload.required_evidence) assertEvidenceRef(ref);
   if (!payload.command && !(payload.executable && Array.isArray(payload.args))) {
     throw new Error('task payload must define command or structured executable/args');
   }
+  if (payload.command && typeof payload.command !== 'string') throw new Error('task payload command must be a string');
+  if (payload.executable && (typeof payload.executable !== 'string' || payload.args.some(arg => typeof arg !== 'string'))) {
+    throw new Error('task payload executable/args must be strings');
+  }
+  const taskPayloadEvidence = { ...payload, lease_id: expected.lease_id, attempt: expected.attempt };
+  await fs.writeFile(path.join(evidenceDir, 'task-payload.json'), safeJson(taskPayloadEvidence));
 
   // Import after the worker DB environment is fixed. ExecutionManager remains
   // the only component allowed to invoke the task command.
@@ -112,13 +137,15 @@ try {
     ...(payload.executable ? { executable: payload.executable, args: payload.args } : {}),
     ...(payload.cwd ? { cwd: payload.cwd } : {})
   };
+  if (payload.cwd) metadata.cwd = assertWorkspacePath(payload.cwd, 'task cwd');
   store.db.prepare('UPDATE tasks SET task_id = task_id, metadata_json = ? WHERE task_id = ?').run(JSON.stringify(metadata), task.task_id);
 
   const manager = new ExecutionManager(store, {
     timeoutMs: Math.max(1000, Number(payload.timeout_ms) || Number(process.env.EXECUTION_TIMEOUT_MS) || 120000)
   });
+  const executionCwd = payload.cwd ? assertWorkspacePath(payload.cwd, 'task cwd') : process.cwd();
   const execution = await manager.executeAuthorizedTask(task.task_id, {
-    cwd: payload.cwd ? path.resolve(payload.cwd) : process.cwd()
+    cwd: executionCwd
   });
 
   await fs.writeFile(path.join(evidenceDir, 'stdout.txt'), execution.stdout || '');

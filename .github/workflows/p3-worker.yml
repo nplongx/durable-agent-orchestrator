@@ -38,7 +38,7 @@ jobs:
       EVIDENCE_DIR: .p3-worker
     steps:
       - name: Checkout immutable input revision
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: ${{ inputs.input_commit }}
           fetch-depth: 0
@@ -78,7 +78,7 @@ jobs:
 
       - name: Upload worker evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: p3-worker-${{ github.run_id }}
           path: .p3-worker/**
