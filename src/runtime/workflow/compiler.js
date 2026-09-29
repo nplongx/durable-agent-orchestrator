@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
-import { isProductionWorkflow, ProductionWorkflow } from './definitions/production.js';
+import { getWorkflowDefinition } from './definitions/index.js';
 import { ProductionTaskId, productionTaskSpec, productionChildTaskSpecs } from './catalog/production.js';
+import { engineeringTaskSpec, engineeringTaskSpecs } from './catalog/engineering.js';
 import { validateWorkflowDefinition } from './schema.js';
 import { canonicalJson, validateExecutionPlan } from './plan.js';
 
@@ -10,19 +11,31 @@ function hash(value) {
 
 export function compileWorkflowPlan(job, { workspace = process.env.WORKFLOW_WORKSPACE } = {}) {
   if (!job?.job_id) throw new Error('job is required to compile execution plan');
-  if (!isProductionWorkflow(job)) throw new Error('unsupported workflow for execution plan: ' + (job.title || job.job_id));
-  validateWorkflowDefinition(ProductionWorkflow);
-  const children = productionChildTaskSpecs(workspace).map(spec => ({ id: spec.id, role: spec.role, execution: spec.execution }));
-  const synthesis = productionTaskSpec(ProductionTaskId.CTO_SYNTHESIS, { workspace });
+  const definition = getWorkflowDefinition(job);
+  if (!definition) throw new Error('unsupported workflow for execution plan: ' + (job.title || job.job_id));
+  validateWorkflowDefinition(definition);
+  const isProduction = definition.id === 'production';
+  const children = isProduction
+    ? productionChildTaskSpecs(workspace).map(spec => ({ id: spec.id, role: spec.role, execution: spec.execution, capability: null, dependencies: [] }))
+    : engineeringTaskSpecs(workspace);
+  const synthesis = isProduction
+    ? productionTaskSpec(ProductionTaskId.CTO_SYNTHESIS, { workspace })
+    : engineeringTaskSpec(definition.synthesisTask, { workspace });
   const plan = {
     schema_version: 1,
-    workflow_id: ProductionWorkflow.id,
-    workflow_version: ProductionWorkflow.version,
+    workflow_id: definition.id,
+    workflow_version: definition.version,
     job_id: job.job_id,
-    phases: [...ProductionWorkflow.phases],
-    required_children: [...ProductionWorkflow.requiredChildren],
+    phases: [...definition.phases],
+    required_children: [...definition.requiredChildren],
     children,
-    synthesis: { id: synthesis.id, role: synthesis.role, execution: synthesis.execution }
+    synthesis: {
+      id: synthesis.id,
+      role: synthesis.role,
+      capability: synthesis.capability || null,
+      dependencies: synthesis.dependencies || [],
+      execution: synthesis.execution
+    }
   };
   validateExecutionPlan(plan);
   const planJson = canonicalJson(plan);

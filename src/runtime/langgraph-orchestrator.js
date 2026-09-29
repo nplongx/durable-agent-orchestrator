@@ -1,7 +1,7 @@
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import { WorkflowPhase } from './workflow/phases.js';
 import { ProductionRoles } from './workflow/catalog/production.js';
-import { isProductionWorkflow } from './workflow/definitions/production.js';
+import { getWorkflowDefinition } from './workflow/definitions/index.js';
 import { validateEvidenceContract } from './workflow/evidence.js';
 
 export const LangGraphActions = Object.freeze({
@@ -20,7 +20,8 @@ export const LangGraphActions = Object.freeze({
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'timeout']);
 export { WorkflowPhase };
 
-function production(job) { return isProductionWorkflow(job); }
+function workflowDefinition(job) { return getWorkflowDefinition(job); }
+function production(job) { return workflowDefinition(job)?.id === 'production'; }
 function executionSpec(task) {
   try { return JSON.parse(task?.metadata_json || '{}'); } catch (_) { return {}; }
 }
@@ -33,6 +34,7 @@ const GraphState = Annotation.Root({
   job: Annotation({ default: () => null }),
   tasks: Annotation({ default: () => [] }),
   results: Annotation({ default: () => [] }),
+  plan: Annotation({ default: () => null }),
   runtime: Annotation({ default: () => null }),
   synthesisDispatched: Annotation({ default: () => false }),
   event: Annotation({ default: () => 'turn' }),
@@ -48,12 +50,21 @@ function classify(state) {
   const tasks = Array.isArray(state.tasks) ? state.tasks : [];
   const cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
   const children = cto ? tasks.filter(t => t.parent_task_id === cto.task_id) : [];
-  const required = ProductionRoles.map(role => children.find(t => String(t.role).toLowerCase() === role));
+  const definition = workflowDefinition(job);
+  const plan = state.plan || null;
+  if (runtime.phase === WorkflowPhase.PROPOSED) {
+    return { action: LangGraphActions.NOOP, reason: 'awaiting approval' };
+  }
+  if (definition && definition.id !== 'production' && !plan) return { action: LangGraphActions.BLOCK, reason: 'immutable execution plan missing' };
+  const requiredSpecs = plan?.children?.length
+    ? plan.children
+    : production(job)
+      ? ProductionRoles.map(role => ({ role, dependencies: [] }))
+      : [];
+  const required = requiredSpecs.map(spec => children.find(t => String(t.role).toLowerCase() === String(spec.role).toLowerCase()));
   const results = new Map((state.results || []).map(r => [r.task_id, r]));
 
   switch (runtime.phase) {
-    case WorkflowPhase.PROPOSED:
-      return { action: LangGraphActions.NOOP, reason: 'awaiting approval' };
     case WorkflowPhase.APPROVED:
       return { action: LangGraphActions.SPAWN_CTO, reason: 'approved job requires CTO native spawn' };
     case WorkflowPhase.SPAWN_CTO:
@@ -61,14 +72,57 @@ function classify(state) {
         ? { action: LangGraphActions.ASSIGN_CHILDREN, reason: 'CTO runtime attached; assign required children' }
         : { action: LangGraphActions.SPAWN_CTO, reason: 'waiting for CTO native runtime attachment' };
     case WorkflowPhase.ASSIGN_CHILDREN: {
-      const missing = required.filter(Boolean).length < ProductionRoles.length;
-      return missing
-        ? { action: LangGraphActions.ASSIGN_CHILDREN, reason: 'required child assignments incomplete' }
-        : { action: LangGraphActions.RUN_CHILDREN, reason: 'required child assignments complete' };
+      const taskBySpec = new Map(requiredSpecs.map((spec, index) => [spec.id || `${spec.role}:${index}`, required[index]]));
+      const completedIds = new Set(requiredSpecs.filter((spec, index) => String(required[index]?.status).toLowerCase() === 'completed').map((spec, index) => spec.id || `${spec.role}:${index}`));
+      const depsSatisfied = spec => (spec.dependencies || []).every(dep => completedIds.has(dep));
+      const readyMissing = requiredSpecs.filter((spec, index) => {
+        const task = required[index];
+        if (!depsSatisfied(spec)) return false;
+        if (!task) return true;
+        const metadata = executionSpec(task);
+        return String(task.status).toLowerCase() === 'pending'
+          && !task.openclaw_session_key
+          && !task.openclaw_run_id
+          && metadata.executor !== 'ExecutionManager';
+      });
+      const runnable = requiredSpecs.filter((spec, index) => {
+        const task = required[index];
+        if (!task || !depsSatisfied(spec)) return false;
+        const metadata = executionSpec(task);
+        return ['pending', 'running'].includes(String(task.status).toLowerCase()) && metadata.executor === 'ExecutionManager';
+      });
+      const missing = required.filter(Boolean).length < requiredSpecs.length;
+      if (readyMissing.length) return { action: LangGraphActions.ASSIGN_CHILDREN, reason: `ready child assignments: ${readyMissing.map(spec => spec.role).join(', ')}` };
+      if (runnable.length) return { action: LangGraphActions.RUN_CHILDREN, reason: `ready ExecutionManager tasks: ${runnable.map(task => task.role).join(', ')}` };
+      if (missing) return { action: LangGraphActions.WAIT, reason: 'waiting for assigned dependency tasks to complete' };
+      return { action: LangGraphActions.WAIT, reason: 'all required children assigned; awaiting terminal results' };
     }
     case WorkflowPhase.RUN_CHILDREN:
       return { action: LangGraphActions.WAIT, reason: 'children dispatched; runtime owns completion waiting' };
     case WorkflowPhase.WAIT: {
+      const taskBySpec = new Map(requiredSpecs.map((spec, index) => [spec.id || `${spec.role}:${index}`, required[index]]));
+      const completedIds = new Set(requiredSpecs.filter((spec, index) => String(required[index]?.status).toLowerCase() === 'completed').map((spec, index) => spec.id || `${spec.role}:${index}`));
+      const depsSatisfied = spec => (spec.dependencies || []).every(dep => completedIds.has(dep));
+      const missing = requiredSpecs.filter((spec, index) => !required[index]);
+      const readyMissing = requiredSpecs.filter((spec, index) => {
+        const task = required[index];
+        if (!(spec.dependencies || []).every(dep => completedIds.has(dep))) return false;
+        if (!task) return true;
+        const metadata = executionSpec(task);
+        return String(task.status).toLowerCase() === 'pending'
+          && !task.openclaw_session_key
+          && !task.openclaw_run_id
+          && metadata.executor !== 'ExecutionManager';
+      });
+      const runnable = requiredSpecs.filter((spec, index) => {
+        const task = required[index];
+        if (!task || !depsSatisfied(spec)) return false;
+        const metadata = executionSpec(task);
+        return ['pending', 'running'].includes(String(task.status).toLowerCase())
+          && metadata.executor === 'ExecutionManager';
+      });
+      if (readyMissing.length) return { action: LangGraphActions.ASSIGN_CHILDREN, reason: `ready child assignments: ${readyMissing.map(spec => spec.role).join(', ')}` };
+      if (runnable.length) return { action: LangGraphActions.RUN_CHILDREN, reason: `ready ExecutionManager tasks: ${runnable.map(task => task.role).join(', ')}` };
       const open = required.filter(t => !t || !TERMINAL.has(String(t.status).toLowerCase()));
       return open.length
         ? { action: LangGraphActions.WAIT, reason: `waiting for: ${open.map(t => t?.role || 'missing').join(', ')}` }
@@ -112,7 +166,7 @@ const graph = new StateGraph(GraphState)
   .addEdge('classify', END)
   .compile();
 
-export async function evaluateLangGraph({ job, tasks = [], results = [], runtime: suppliedRuntime = null, event = 'turn', persist = false, store = null, executeTask = null, spawnCto = null, assignChildren = null, synthesize = null, terminalize = null, project = null }) {
+export async function evaluateLangGraph({ job, tasks = [], results = [], plan = null, runtime: suppliedRuntime = null, event = 'turn', persist = false, store = null, executeTask = null, spawnCto = null, assignChildren = null, synthesize = null, terminalize = null, project = null }) {
   let runtime = store?.getWorkflowRuntimeState(job?.job_id) || suppliedRuntime;
   if (persist && store && runtime?.phase === WorkflowPhase.PROPOSED && job?.state === 'APPROVED') {
     store.transitionWorkflowPhase(job.job_id, WorkflowPhase.SPAWN_CTO, {
@@ -125,7 +179,7 @@ export async function evaluateLangGraph({ job, tasks = [], results = [], runtime
     store?.hasEvent?.(job?.job_id, 'workflow.synthesis_dispatched')
       && String(cto?.status || '').toLowerCase() === 'running'
   );
-  const decision = await graph.invoke({ job, tasks, results, runtime, synthesisDispatched, event });
+  const decision = await graph.invoke({ job, tasks, results, plan: plan || store?.getExecutionPlan?.(job?.job_id) || null, runtime, synthesisDispatched, event });
   if (!persist || !store || !runtime) return decision;
 
   const phase = runtime.phase;
@@ -163,7 +217,7 @@ export async function evaluateLangGraph({ job, tasks = [], results = [], runtime
   let next = {
     [LangGraphActions.SPAWN_CTO]: WorkflowPhase.ASSIGN_CHILDREN,
     [LangGraphActions.ASSIGN_CHILDREN]: WorkflowPhase.ASSIGN_CHILDREN,
-    [LangGraphActions.RUN_CHILDREN]: WorkflowPhase.RUN_CHILDREN,
+    [LangGraphActions.RUN_CHILDREN]: WorkflowPhase.ASSIGN_CHILDREN,
     [LangGraphActions.WAIT]: WorkflowPhase.WAIT,
     [LangGraphActions.VALIDATE_EVIDENCE]: WorkflowPhase.VALIDATE_EVIDENCE,
     [LangGraphActions.SYNTHESIZE]: WorkflowPhase.SYNTHESIZE,
@@ -180,11 +234,10 @@ export async function evaluateLangGraph({ job, tasks = [], results = [], runtime
   if (decision.action === LangGraphActions.RUN_CHILDREN && typeof executeTask === 'function') {
     const cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
     const children = cto ? tasks.filter(t => t.parent_task_id === cto.task_id) : [];
-    const deterministic = children.filter(task => {
-      const spec = executionSpec(task);
-        return ProductionRoles.includes(String(task.role).toLowerCase())
-        && spec.executor === 'ExecutionManager'
-        && spec.command
+      const deterministic = children.filter(task => {
+        const spec = executionSpec(task);
+        return spec.executor === 'ExecutionManager'
+        && (spec.command || (spec.executable && Array.isArray(spec.args)))
         && spec.cwd
         && !['completed'].includes(String(task.execution_status).toLowerCase());
     });

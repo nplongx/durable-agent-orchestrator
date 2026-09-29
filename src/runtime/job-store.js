@@ -1254,6 +1254,16 @@ export class WorkflowStore {
     return this.getTask(task.task_id);
   }
   completeTaskByRuntime(jobId, { runId = null, sessionKey = null, content = '', outcome = 'success' } = {}) {
+    if (Array.isArray(content)) {
+      content = content.map(item => {
+        if (typeof item === 'string') return item;
+        if (typeof item?.text === 'string') return item.text;
+        if (typeof item?.content === 'string') return item.content;
+        return JSON.stringify(item || '');
+      }).filter(Boolean).join('\n');
+    } else if (content && typeof content !== 'string') {
+      content = typeof content?.text === 'string' ? content.text : JSON.stringify(content);
+    }
     let task = runId ? this.db.prepare('SELECT * FROM tasks WHERE job_id = ? AND openclaw_run_id = ? ORDER BY updated_at DESC LIMIT 1').get(jobId, runId) : null;
     if (!task && sessionKey) task = this.db.prepare('SELECT * FROM tasks WHERE job_id = ? AND openclaw_session_key = ? ORDER BY updated_at DESC LIMIT 1').get(jobId, sessionKey);
     if (!task) return null;
@@ -1335,12 +1345,64 @@ export class WorkflowStore {
         outcome = 'failure';
         content = text + '\n[Workflow validation] Native task rejected: missing verified native result.';
       }
+      if (outcome === 'success' && ['architect', 'reviewer'].includes(String(task.role || '').toLowerCase())) {
+        const artifact = text.match(/<prompt-data>\s*([\s\S]*?)\s*<\/prompt-data>/i)?.[1]?.trim();
+        if (artifact) {
+          try {
+            JSON.parse(artifact);
+            content = artifact;
+          } catch (_) {
+            // Keep raw native content; verifier will reject a malformed artifact.
+          }
+        }
+        if (String(task.role || '').toLowerCase() === 'reviewer') {
+          const marker = text.lastIndexOf('{"review"');
+          if (marker >= 0) {
+            let depth = 0;
+            let inString = false;
+            let escaped = false;
+            for (let i = marker; i < text.length; i += 1) {
+              const ch = text[i];
+              if (inString) {
+                if (escaped) escaped = false;
+                else if (ch === '\\') escaped = true;
+                else if (ch === '"') inString = false;
+                continue;
+              }
+              if (ch === '"') { inString = true; continue; }
+              if (ch === '{') depth += 1;
+              else if (ch === '}') {
+                depth -= 1;
+                if (depth === 0) {
+                  const candidate = text.slice(marker, i + 1);
+                  try {
+                    JSON.parse(candidate);
+                    content = candidate;
+                  } catch (_) {}
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
     }
     const resultId = id('result'); const ts = now();
     this.db.prepare('INSERT INTO results(result_id, task_id, outcome, content, created_at) VALUES(?, ?, ?, ?, ?)').run(resultId, task.task_id, outcome, content || '', ts);
     this.db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE task_id = ?').run(outcome === 'success' ? 'completed' : 'failed', ts, task.task_id);
     this.db.prepare("UPDATE attempts SET status = ?, finished_at = ? WHERE task_id = ? AND status = 'started'").run(outcome === 'success' ? 'completed' : 'failed', ts, task.task_id);
-    this.recordEvent(jobId, outcome === 'success' ? 'task.completed' : 'task.failed', { taskId: task.task_id, resultId, runId, sessionKey, outcome }, `${task.task_id}|${outcome}|${resultId}`);
+    const effectiveRunId = runId || task.openclaw_run_id || null;
+    const effectiveSessionKey = sessionKey || task.openclaw_session_key || null;
+    const failureClass = outcome === 'success' ? null
+      : (/timed out|timeout|deadline/i.test(String(content || '')) ? 'NATIVE_RUNTIME_TIMEOUT' : 'NATIVE_RUNTIME_FAILURE');
+    this.recordEvent(jobId, outcome === 'success' ? 'task.completed' : 'task.failed', {
+      taskId: task.task_id,
+      resultId,
+      runId: effectiveRunId,
+      sessionKey: effectiveSessionKey,
+      outcome,
+      failureClass
+    }, `${task.task_id}|${outcome}|${resultId}`);
     // Runtime task completion is not business-job completion. The Coordinator/CTO
     // must explicitly complete the durable Job after synthesis and DoD checks.
     return this.getTask(task.task_id);

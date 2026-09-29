@@ -22,7 +22,8 @@ export function verifyWorkflowCompletion({ plan, tasks = [], results = [], repor
   for (const task of tasks) {
     let metadata = {};
     try { metadata = JSON.parse(task.metadata_json || '{}'); } catch (_) {}
-    if (metadata.workflow_plan_task_id) byPlanId.set(metadata.workflow_plan_task_id, task);
+    const planTaskId = metadata.workflow_plan_task_id || metadata.workflowPlanTaskId;
+    if (planTaskId) byPlanId.set(planTaskId, task);
   }
   const resultByTask = new Map(results.map(result => [result.task_id, result]));
   for (const spec of plan?.children || []) {
@@ -49,8 +50,20 @@ export function verifyWorkflowCompletion({ plan, tasks = [], results = [], repor
       errors.push(`native artifact missing: ${spec.role}`);
     }
     if (String(spec.role).toLowerCase() === 'reviewer' && result) {
+      const reviewerResults = results.filter(item => item.task_id === task.task_id).reverse();
+      let parsedReview = null;
+      for (const candidate of reviewerResults) {
+        try {
+          const parsed = JSON.parse(String(candidate.content || '').trim());
+          if (parsed?.review && typeof parsed.review === 'object') {
+            parsedReview = parsed;
+            break;
+          }
+        } catch (_) {}
+      }
       try {
-        const review = JSON.parse(String(result.content || '').trim());
+        if (!parsedReview) throw new Error('review artifact is not valid JSON');
+        const review = parsedReview;
         if (!review?.review || typeof review.review !== 'object') errors.push('review artifact missing');
         if (review.review.requirementsSatisfied !== true) errors.push('review requirementsSatisfied is not true');
         if (review.review.architectureConformant !== true) errors.push('review architectureConformant is not true');

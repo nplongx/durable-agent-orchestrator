@@ -9,6 +9,7 @@ function runOpenClaw(args, { timeoutMs = 120_000 } = {}) {
       if (error) {
         const err = new Error(stderr?.trim() || error.message);
         err.code = error.code;
+        err.transportCode = /timeout|timed out|deadline/i.test(`${error.message || ''}\n${stderr || ''}`) ? 'TIMEOUT' : (error.code || 'TRANSPORT_ERROR');
         err.stdout = stdout || '';
         err.stderr = stderr || '';
         reject(err);

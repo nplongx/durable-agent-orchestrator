@@ -22,13 +22,16 @@ export class TabWorker {
   async forceRefreshTarget() {
     console.warn(`[CDP:${this.role}] Wedged tab ${this.targetId} - closing and recycling to a fresh tab...`);
     this.lastRecycleAt = Date.now();
+    const closedTargetId = this.targetId;
+    // Create replacement first. Closing the only page can make Chrome exit,
+    // taking the CDP port down and turning a tab recovery into a browser restart.
+    const fresh = await this.bridge.createNewTab('https://chatgpt.com');
     if (this.bridge && this.targetId) {
       try { await fetch(`${this.bridge.cdpBaseUrl}/json/close/${this.targetId}`); } catch {}
     }
     // /json/close is asynchronous. Do not immediately reacquire: Chrome can
     // still advertise the closing target briefly, causing recycle to select
     // the same stale target again.
-    const closedTargetId = this.targetId;
     const closeWaitStart = Date.now();
     while (Date.now() - closeWaitStart < 5000) {
       try {
@@ -38,9 +41,6 @@ export class TabWorker {
       await new Promise(r => setTimeout(r, 150));
     }
     this.resetConnection('recycling wedged tab');
-    this.targetId = null;
-    this.target = null;
-    const fresh = await this.bridge.acquireTarget(this.role);
     this.target = fresh;
     this.targetId = fresh.id;
     console.log(`[CDP:${this.role}] Recycled to fresh tab ${fresh.id.slice(0, 14)}...`);
@@ -110,14 +110,6 @@ export class TabWorker {
               await this.sendRaw('Runtime.enable');
               await this.sendRaw('Page.enable');
               this.ready = true;
-              try {
-                await this.sendRaw('Runtime.evaluate', {
-                  expression: `window.__DSH_ROLE__ = ${JSON.stringify(this.role)}; console.log('[DSH] Role tab activated: ' + window.__DSH_ROLE__);`,
-                  returnByValue: true
-                }, 5000);
-              } catch (evalErr) {
-                console.warn(`[CDP:${this.role}] Initial window.__DSH_ROLE__ evaluation deferred:`, evalErr.message);
-              }
               console.log(`[CDP:${this.role}] Tab ${this.targetId} connected and initialized for role '${this.role}'.`);
               resolve();
             } catch (e) {
@@ -1059,6 +1051,7 @@ export class ChatGPTBrowserBridge {
     this.workers = new Map(); // role -> TabWorker
     this.masterWorker = null;
     this.prewarmRoles = ['coordinator', 'cto', 'reviewer'];
+    this.browserStartPromise = null;
   }
 
   get cdpBaseUrl() {
@@ -1106,6 +1099,19 @@ export class ChatGPTBrowserBridge {
   async ensureBrowserRunning() {
     if (await this.isCdpAvailable()) return;
 
+    if (this.browserStartPromise) return this.browserStartPromise;
+
+    this.browserStartPromise = this._startBrowser();
+    try {
+      await this.browserStartPromise;
+    } finally {
+      this.browserStartPromise = null;
+    }
+  }
+
+  async _startBrowser() {
+    if (await this.isCdpAvailable()) return;
+
     const display = await this.ensureVirtualDisplay();
 
     console.log(`[CDP] Chrome CDP port ${this.cdpPort} is not running. Auto-launching Chrome on virtual display ${display}...`);
@@ -1148,15 +1154,17 @@ export class ChatGPTBrowserBridge {
     }
 
     const start = Date.now();
-    while (Date.now() - start < 20000) {
+    while (Date.now() - start < 90000) {
       await new Promise(r => setTimeout(r, 500));
-      if (await this.isCdpAvailable()) {
-        console.log(`[CDP] Chrome CDP is now online on port ${this.cdpPort}!`);
-        await new Promise(r => setTimeout(r, 1000));
-        return;
-      }
+        if (await this.isCdpAvailable()) {
+          console.log(`[CDP] Chrome CDP is now online on port ${this.cdpPort}!`);
+          // Port readiness can precede renderer readiness by several seconds.
+          // Let Chrome finish renderer startup before TabWorker sends Runtime.enable.
+          await new Promise(r => setTimeout(r, 10_000));
+          return;
+        }
     }
-    throw new Error(`Chrome was launched but CDP port ${this.cdpPort} did not become ready within 20 seconds.`);
+    throw new Error(`Chrome was launched but CDP port ${this.cdpPort} did not become ready within 90 seconds.`);
   }
 
   async getTargets() {
@@ -1432,16 +1440,16 @@ export class MultiAccountChatGPTBridge {
   }
 
   async prewarm(roles) {
-    for (const acc of this.accounts) {
-      if (await acc.bridge.isCdpAvailable()) {
-        console.log(`[AccountPool] Pre-warming ${acc.name} (Port ${acc.port})...`);
-        try {
-          await acc.bridge.prewarm(roles);
-        } catch (e) {
-          console.warn(`[AccountPool] Pre-warm failed for ${acc.name}:`, e.message);
-        }
+    const prewarmAll = process.env.PREWARM_ALL_ACCOUNTS === 'true';
+    await Promise.all(this.accounts.map(async acc => {
+      if (!prewarmAll && !(await acc.bridge.isCdpAvailable())) return;
+      console.log(`[AccountPool] Pre-warming ${acc.name} (Port ${acc.port})...`);
+      try {
+        await acc.bridge.prewarm(roles);
+      } catch (e) {
+        console.warn(`[AccountPool] Pre-warm failed for ${acc.name}:`, e.message);
       }
-    }
+    }));
   }
 
   resetRateLimits() {

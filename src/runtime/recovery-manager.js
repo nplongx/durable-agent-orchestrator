@@ -5,6 +5,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { deliverSessionMessage } from './session-transport.js';
 import { isProductionWorkflow } from './workflow/definitions/production.js';
+import { isSupportedWorkflow } from './workflow/definitions/index.js';
 import { ProductionRoles } from './workflow/catalog/production.js';
 
 const execFileAsync = promisify(execFile);
@@ -228,8 +229,7 @@ export class RecoveryManager {
       : this.store.db.prepare("SELECT * FROM tasks WHERE status = 'running' AND openclaw_session_key IS NOT NULL").all())
       .filter(t => ['running', 'failed'].includes(String(t.status).toLowerCase())
         && t.openclaw_session_key
-        && ProductionRoles.includes(String(t.role || '').toLowerCase())
-        && isProductionWorkflow(this.store.getJob(t.job_id)));
+        && isSupportedWorkflow(this.store.getJob(t.job_id)));
     for (const task of reconcilableTasks) {
       const runtime = runtimeMap?.get(task.openclaw_session_key);
       const runtimeStatus = String(runtime?.status || '').toLowerCase();

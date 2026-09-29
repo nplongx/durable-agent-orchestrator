@@ -1,5 +1,7 @@
 import { ProductionWorkflow } from './definitions/production.js';
+import { EngineeringWorkflow } from './definitions/engineering.js';
 import { productionTaskSpec } from './catalog/production.js';
+import { engineeringTaskSpec } from './catalog/engineering.js';
 
 export function validateWorkflowDefinition(definition) {
   if (!definition?.id) throw new Error('workflow definition id is required');
@@ -15,5 +17,12 @@ export function validateProductionWorkflow(workspace = process.env.WORKFLOW_WORK
   validateWorkflowDefinition(ProductionWorkflow);
   for (const taskId of ProductionWorkflow.requiredChildren) productionTaskSpec(taskId, { workspace });
   productionTaskSpec(ProductionWorkflow.synthesisTask, { workspace });
+  return true;
+}
+
+export function validateEngineeringWorkflow(workspace = process.env.WORKFLOW_WORKSPACE) {
+  validateWorkflowDefinition(EngineeringWorkflow);
+  for (const taskId of EngineeringWorkflow.requiredChildren) engineeringTaskSpec(taskId, { workspace });
+  engineeringTaskSpec(EngineeringWorkflow.synthesisTask, { workspace });
   return true;
 }

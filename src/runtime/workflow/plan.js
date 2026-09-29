@@ -25,10 +25,22 @@ export function validateExecutionPlan(plan) {
     if (!task?.id || ids.has(task.id)) throw new Error('invalid or duplicate execution plan task: ' + task?.id);
     ids.add(task.id);
     if (!task.role) throw new Error('execution plan task role is required: ' + task.id);
+    if (task.capability != null && typeof task.capability !== 'string') throw new Error('execution plan task capability is invalid: ' + task.id);
+    if (!Array.isArray(task.dependencies)) throw new Error('execution plan task dependencies are required: ' + task.id);
+    for (const dependency of task.dependencies) {
+      if (typeof dependency !== 'string' || !dependency) throw new Error('invalid execution plan dependency: ' + task.id);
+      if (dependency === task.id) throw new Error('execution plan task cannot depend on itself: ' + task.id);
+    }
     if (task.execution?.deterministic) {
       if (task.execution.executor !== 'ExecutionManager') throw new Error('deterministic task must use ExecutionManager: ' + task.id);
       if (!task.execution.executable || !Array.isArray(task.execution.args)) throw new Error('structured execution contract required: ' + task.id);
       if (!task.execution.cwd || !Number.isInteger(task.execution.timeout_ms) || task.execution.timeout_ms <= 0) throw new Error('invalid deterministic execution metadata: ' + task.id);
+    }
+  }
+  const taskIds = new Set([...plan.children, plan.synthesis].map(task => task.id));
+  for (const task of [...plan.children, plan.synthesis]) {
+    for (const dependency of task.dependencies) {
+      if (!taskIds.has(dependency)) throw new Error(`execution plan dependency not found: ${task.id} -> ${dependency}`);
     }
   }
   return plan;
