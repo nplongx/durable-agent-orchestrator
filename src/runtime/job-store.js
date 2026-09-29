@@ -8,6 +8,7 @@ import { isSupportedWorkflow } from './workflow/definitions/index.js';
 import { ProductionRoles } from './workflow/catalog/production.js';
 import { compileWorkflowPlan } from './workflow/compiler.js';
 import { canonicalJson } from './workflow/plan.js';
+import { summarizeObservability } from './observability.js';
 
 const DATA_DIR = process.env.WORKFLOW_DATA_DIR || '/home/long/work/chatgpt-adapter/data';
 const DB_PATH = process.env.WORKFLOW_DB || path.join(DATA_DIR, 'workflow.db');
@@ -431,6 +432,21 @@ export class WorkflowStore {
     const eid = eventId(jobId, type, dedupeKey); const ts = now();
     this.db.prepare('INSERT OR IGNORE INTO events(event_id, job_id, type, payload_json, created_at) VALUES(?, ?, ?, ?, ?)').run(eid, jobId, type, JSON.stringify(payload), ts);
     return eid;
+  }
+
+  listEvents(jobId, { limit = 200, type = null } = {}) {
+    const safeLimit = Math.max(1, Math.min(1000, Number(limit) || 200));
+    if (type) return this.db.prepare('SELECT * FROM events WHERE job_id=? AND type=? ORDER BY created_at ASC LIMIT ?').all(jobId, type, safeLimit);
+    return this.db.prepare('SELECT * FROM events WHERE job_id=? ORDER BY created_at ASC LIMIT ?').all(jobId, safeLimit);
+  }
+
+  getObservabilitySnapshot(jobId, { eventLimit = 500 } = {}) {
+    const events = this.listEvents(jobId, { limit: eventLimit });
+    const tasks = this.db.prepare('SELECT task_id,status,execution_attempt,execution_started_at,execution_finished_at FROM tasks WHERE job_id=? ORDER BY created_at ASC').all(jobId);
+    const leases = this.db.prepare('SELECT * FROM task_leases WHERE job_id=? ORDER BY issued_at ASC').all(jobId);
+    const providerRuns = this.db.prepare('SELECT * FROM provider_runs WHERE job_id=? ORDER BY created_at ASC').all(jobId);
+    const summary = summarizeObservability({ events, tasks, leases, providerRuns });
+    return { job_id: jobId, generated_at: now(), ...summary };
   }
 
   hasEvent(jobId, type) {
