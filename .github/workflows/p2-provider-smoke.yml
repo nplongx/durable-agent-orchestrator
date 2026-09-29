@@ -1,0 +1,79 @@
+name: P2 GitHub Actions Provider Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        required: true
+      task_id:
+        required: true
+      lease_id:
+        required: true
+      attempt:
+        required: true
+      input_commit:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  provider-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      JOB_ID: ${{ inputs.job_id }}
+      TASK_ID: ${{ inputs.task_id }}
+      LEASE_ID: ${{ inputs.lease_id }}
+      ATTEMPT: ${{ inputs.attempt }}
+      INPUT_COMMIT: ${{ inputs.input_commit }}
+    steps:
+      - name: Checkout requested revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.input_commit }}
+          fetch-depth: 0
+
+      - name: Validate correlation
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$INPUT_COMMIT"
+          test "$JOB_ID" != ""
+          test "$TASK_ID" != ""
+          test "$LEASE_ID" != ""
+          test "$ATTEMPT" -ge 1
+
+      - name: Produce provider result
+        run: |
+          set -Eeuo pipefail
+          mkdir -p .p2-provider
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const now = new Date().toISOString();
+          const result = {
+            schema_version: 1,
+            job_id: process.env.JOB_ID,
+            task_id: process.env.TASK_ID,
+            lease_id: process.env.LEASE_ID,
+            attempt: Number(process.env.ATTEMPT),
+            status: 'SUCCEEDED',
+            input_commit: process.env.INPUT_COMMIT,
+            output_commit: process.env.INPUT_COMMIT,
+            exit_code: 0,
+            provider_run_id: process.env.GITHUB_RUN_ID,
+            evidence_artifact: `p2-provider-${process.env.GITHUB_RUN_ID}`,
+            evidence_refs: ['correlation-check', 'input-commit-check'],
+            started_at: now,
+            finished_at: now,
+            error: null
+          };
+          fs.writeFileSync('.p2-provider/result.json', JSON.stringify(result, null, 2) + '\n');
+          NODE
+          cat .p2-provider/result.json
+
+      - name: Upload provider result
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-provider-${{ github.run_id }}
+          path: .p2-provider/result.json
+          if-no-files-found: error
