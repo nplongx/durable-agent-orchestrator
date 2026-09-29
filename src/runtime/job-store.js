@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { createEnvelope, validateEnvelope, validatePayload } from '../../protocol/cos-ap-v1/index.js';
 import { isProductionWorkflow } from './workflow/definitions/production.js';
+import { isSupportedWorkflow } from './workflow/definitions/index.js';
 import { ProductionRoles } from './workflow/catalog/production.js';
 import { compileWorkflowPlan } from './workflow/compiler.js';
 import { canonicalJson } from './workflow/plan.js';
@@ -189,6 +190,22 @@ CREATE TABLE IF NOT EXISTS workflow_runtime_state (
   last_error TEXT,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS task_leases (
+  lease_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(task_id),
+  job_id TEXT NOT NULL REFERENCES jobs(job_id),
+  attempt INTEGER NOT NULL,
+  worker_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('ACTIVE','EXPIRED','RELEASED','COMPLETED','FAILED')),
+  issued_at TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  released_at TEXT,
+  last_error TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_leases_active_task ON task_leases(task_id) WHERE state='ACTIVE';
+CREATE INDEX IF NOT EXISTS idx_task_leases_expiry ON task_leases(state, expires_at);
+CREATE INDEX IF NOT EXISTS idx_task_leases_worker ON task_leases(worker_id, state);
 CREATE TABLE IF NOT EXISTS workflow_plans (
   job_id TEXT PRIMARY KEY REFERENCES jobs(job_id),
   workflow_id TEXT NOT NULL,
@@ -209,9 +226,9 @@ const WORKFLOW_TRANSITIONS = Object.freeze({
   PROPOSED: new Set(['APPROVED', 'FAILED']),
   APPROVED: new Set(['SPAWN_CTO', 'FAILED']),
   SPAWN_CTO: new Set(['ASSIGN_CHILDREN', 'FAILED']),
-  ASSIGN_CHILDREN: new Set(['RUN_CHILDREN', 'FAILED']),
+  ASSIGN_CHILDREN: new Set(['RUN_CHILDREN', 'WAIT', 'FAILED']),
   RUN_CHILDREN: new Set(['WAIT', 'FAILED']),
-  WAIT: new Set(['WAIT', 'VALIDATE_EVIDENCE', 'FAILED']),
+  WAIT: new Set(['WAIT', 'ASSIGN_CHILDREN', 'VALIDATE_EVIDENCE', 'FAILED']),
   VALIDATE_EVIDENCE: new Set(['SYNTHESIZE', 'FAILED']),
   SYNTHESIZE: new Set(['TERMINALIZE', 'FAILED']),
   TERMINALIZE: new Set(['PROJECT', 'FAILED']),
@@ -444,6 +461,85 @@ export class WorkflowStore {
     return matches.at(-1)?.[1] || null;
   }
   getTask(taskId) { return this.db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(taskId) || null; }
+
+  acquireTaskLease(taskId, { leaseId, workerId, ttlMs = 60000, attempt = null } = {}) {
+    if (!leaseId || !workerId) throw new Error('leaseId and workerId are required');
+    const task = this.getTask(taskId); if (!task) throw new Error(`task not found: ${taskId}`);
+    const nextAttempt = attempt == null ? Math.max(1, Number(task.execution_attempt || 0) + 1) : Number(attempt);
+    if (!Number.isInteger(nextAttempt) || nextAttempt < 1) throw new Error('invalid lease attempt');
+    const nowTs = new Date().toISOString();
+    const expires = new Date(Date.now() + Math.max(1000, Number(ttlMs) || 60000)).toISOString();
+    const tx = this.db.transaction(() => {
+      const active = this.db.prepare("SELECT * FROM task_leases WHERE task_id=? AND state='ACTIVE'").get(taskId);
+      if (active) throw new Error(`task already leased: ${taskId}`);
+      const current = this.getTask(taskId);
+      if (['completed','cancelled'].includes(String(current.status))) throw new Error(`cannot lease terminal task: ${taskId}`);
+      this.db.prepare(`INSERT INTO task_leases(lease_id,task_id,job_id,attempt,worker_id,state,issued_at,heartbeat_at,expires_at)
+        VALUES(?,?,?,?,?,'ACTIVE',?,?,?)`).run(leaseId, taskId, task.job_id, nextAttempt, workerId, nowTs, nowTs, expires);
+      this.db.prepare("UPDATE tasks SET status='running', execution_attempt=?, updated_at=? WHERE task_id=? AND status IN ('pending','failed','running')")
+        .run(nextAttempt, nowTs, taskId);
+      this.recordEvent(task.job_id, 'task.lease.acquired', { taskId, leaseId, workerId, attempt: nextAttempt, expiresAt: expires }, leaseId);
+    });
+    tx();
+    return this.getTaskLease(leaseId);
+  }
+
+  getTaskLease(leaseId) { return this.db.prepare('SELECT * FROM task_leases WHERE lease_id=?').get(leaseId) || null; }
+
+  heartbeatTaskLease(leaseId, { workerId, ttlMs = 60000 } = {}) {
+    const lease = this.getTaskLease(leaseId);
+    if (!lease || lease.state !== 'ACTIVE') return { ok: false, reason: 'lease_not_active' };
+    if (lease.worker_id !== workerId) return { ok: false, reason: 'worker_fenced' };
+    if (Date.parse(lease.expires_at) <= Date.now()) {
+      this.expireTaskLease(leaseId, { reason: 'heartbeat_after_expiry' });
+      return { ok: false, reason: 'lease_expired' };
+    }
+    const nowTs = new Date().toISOString();
+    const expires = new Date(Date.now() + Math.max(1000, Number(ttlMs) || 60000)).toISOString();
+    this.db.prepare("UPDATE task_leases SET heartbeat_at=?, expires_at=? WHERE lease_id=? AND state='ACTIVE' AND worker_id=?")
+      .run(nowTs, expires, leaseId, workerId);
+    return { ok: true, lease: this.getTaskLease(leaseId) };
+  }
+
+  completeTaskLease(leaseId, { workerId, success = true, error = null } = {}) {
+    const lease = this.getTaskLease(leaseId);
+    if (!lease || lease.state !== 'ACTIVE') return { ok: false, reason: 'lease_not_active' };
+    if (lease.worker_id !== workerId) return { ok: false, reason: 'worker_fenced' };
+    const state = success ? 'COMPLETED' : 'FAILED';
+    const ts = new Date().toISOString();
+    this.db.prepare('UPDATE task_leases SET state=?, released_at=?, last_error=? WHERE lease_id=? AND state=\'ACTIVE\' AND worker_id=?')
+      .run(state, ts, error, leaseId, workerId);
+    this.recordEvent(lease.job_id, 'task.lease.completed', { taskId: lease.task_id, leaseId, attempt: lease.attempt, success, error }, leaseId);
+    return { ok: true, lease: this.getTaskLease(leaseId) };
+  }
+
+  expireTaskLease(leaseId, { reason = 'lease_expired' } = {}) {
+    const lease = this.getTaskLease(leaseId);
+    if (!lease || lease.state !== 'ACTIVE') return null;
+    const ts = new Date().toISOString();
+    this.db.prepare("UPDATE task_leases SET state='EXPIRED', released_at=?, last_error=? WHERE lease_id=? AND state='ACTIVE'")
+      .run(ts, reason, leaseId);
+    this.db.prepare("UPDATE tasks SET status='pending', updated_at=? WHERE task_id=? AND status='running' AND execution_attempt=?")
+      .run(ts, lease.task_id, lease.attempt);
+    this.recordEvent(lease.job_id, 'task.lease.expired', { taskId: lease.task_id, leaseId, attempt: lease.attempt, reason }, leaseId);
+    return this.getTaskLease(leaseId);
+  }
+
+  reapExpiredTaskLeases({ now = Date.now(), jobId = null } = {}) {
+    const rows = this.db.prepare(`SELECT lease_id FROM task_leases WHERE state='ACTIVE' AND expires_at <= ?${jobId ? ' AND job_id=?' : ''}`)
+      .all(new Date(now).toISOString(), ...(jobId ? [jobId] : []));
+    let expired = 0;
+    for (const row of rows) if (this.expireTaskLease(row.lease_id)) expired++;
+    return expired;
+  }
+
+  listTaskLeases({ taskId = null, workerId = null, state = null, limit = 100 } = {}) {
+    const clauses = []; const args = [];
+    if (taskId) { clauses.push('task_id=?'); args.push(taskId); }
+    if (workerId) { clauses.push('worker_id=?'); args.push(workerId); }
+    if (state) { clauses.push('state=?'); args.push(state); }
+    return this.db.prepare(`SELECT * FROM task_leases${clauses.length ? ' WHERE ' + clauses.join(' AND ') : ''} ORDER BY issued_at DESC LIMIT ?`).all(...args, limit);
+  }
   getExecutionBatch(batchId) { return this.db.prepare('SELECT * FROM execution_batches WHERE batch_id = ?').get(batchId) || null; }
   listExecutionBatchItems(batchId) { return this.db.prepare('SELECT * FROM execution_batch_items WHERE batch_id = ? ORDER BY rowid ASC').all(batchId); }
   createExecutionBatch(jobId, { parentTaskId = null, role = 'executor', items = [], attempt = 1 } = {}) {
@@ -940,13 +1036,14 @@ export class WorkflowStore {
     if (existing) return existing;
     const job = this.getJob(jobId);
     const normalizedRole = String(role).toLowerCase();
-    const plan = isProductionWorkflow(job) ? this.getExecutionPlan(jobId) : null;
-    if (isProductionWorkflow(job) && ProductionRoles.includes(normalizedRole) && !plan) {
+    const supportedWorkflow = isSupportedWorkflow(job);
+    const plan = supportedWorkflow ? this.getExecutionPlan(jobId) : null;
+    if (supportedWorkflow && !plan) {
       throw new Error('immutable execution plan missing before production task creation: ' + jobId);
     }
     const plannedTask = plan?.children?.find(item => String(item.role).toLowerCase() === normalizedRole) || null;
-    if (isProductionWorkflow(job) && ProductionRoles.includes(normalizedRole) && !plannedTask) {
-      throw new Error('production role is absent from immutable execution plan: ' + normalizedRole);
+    if (supportedWorkflow && !plannedTask && String(role).toLowerCase() !== 'cto') {
+      throw new Error('workflow role is absent from immutable execution plan: ' + normalizedRole);
     }
     const productionTask = plannedTask || null;
     const productionExecution = productionTask?.execution || null;
@@ -1039,8 +1136,11 @@ export class WorkflowStore {
     // part of the CTO task's execution contract and must settle first.
     if (String(task.role || '').toLowerCase() === 'cto' && outcome === 'success') {
       const children = this.db.prepare('SELECT task_id, role, status FROM tasks WHERE parent_task_id = ?').all(task.task_id);
-      const isProductionE2E = isProductionWorkflow(this.getJob(jobId));
-      const requiredRoles = isProductionE2E ? ProductionRoles : [];
+      const job = this.getJob(jobId);
+      const isProductionE2E = isProductionWorkflow(job);
+      const isSupportedNativeSynthesis = isSupportedWorkflow(job);
+      const plan = isSupportedWorkflow(job) ? this.getExecutionPlan(jobId) : null;
+      const requiredRoles = plan?.children?.length ? plan.children.map(item => String(item.role).toLowerCase()) : (isProductionE2E ? ProductionRoles : []);
       const missingRequiredRole = requiredRoles.find(role => !children.some(t => String(t.role).toLowerCase() === role));
       const openChildren = children.filter(t => !['completed', 'failed', 'cancelled'].includes(String(t.status).toLowerCase()));
       const failedChildren = children.filter(t => ['failed', 'cancelled'].includes(String(t.status).toLowerCase()));
@@ -1048,7 +1148,7 @@ export class WorkflowStore {
         console.warn(`[WorkflowStore] Ignoring premature CTO runtime completion job=${jobId} task=${task.task_id} missing=${missingRequiredRole || '-'} open=${openChildren.length} failed=${failedChildren.length}`);
         return task;
       }
-      if (isProductionE2E) {
+      if (isProductionE2E || isSupportedNativeSynthesis) {
         const synthesis = String(content || '');
         const adapterTimeout = '⚠️ Xin lỗi, hệ thống chưa nhận được phản hồi từ nguồn AI trong thời gian cho phép. Vui lòng thử lại ạ.';
         const validSynthesis = Boolean(synthesis.trim()) && synthesis.trim() !== adapterTimeout;
@@ -1056,7 +1156,7 @@ export class WorkflowStore {
           console.warn(`[WorkflowStore] Ignoring CTO runtime completion without verified synthesis job=${jobId} task=${task.task_id}`);
           this.recordEvent(jobId, 'workflow.synthesis_validation_blocked', {
             taskId: task.task_id,
-            reason: 'production-e2e CTO completion lacked verified synthesis evidence'
+            reason: 'supported workflow CTO completion lacked verified synthesis evidence'
           }, `${task.task_id}|synthesis-validation-blocked|${Date.now()}`);
           return task;
         }
@@ -1082,6 +1182,31 @@ export class WorkflowStore {
       if (refusal || !hasActualChildOutput || !hasCommand || !hasExitStatus) {
         outcome = 'failure';
         content = `${text}\n[CoS validation] Specialist result rejected: missing actual child output with verified command/exit-status evidence or contains execution refusal.`;
+      }
+    }
+    const engineeringWorkflow = String(this.getExecutionPlan(jobId)?.workflow_id || '').toLowerCase() === 'engineering';
+    if (outcome === 'success' && engineeringWorkflow) {
+      const metadata = (() => {
+        try { return JSON.parse(task.metadata_json || '{}'); } catch (_) { return {}; }
+      })();
+      const deterministic = metadata.executor === 'ExecutionManager' || metadata.deterministic === true;
+      const text = String(content || '').trim();
+      const adapterTimeout = '⚠️ Xin lỗi, hệ thống chưa nhận được phản hồi từ nguồn AI';
+      if (deterministic) {
+        const refreshed = this.getTask(task.task_id);
+        const hasExecution = Boolean(
+          refreshed?.execution_session_id
+          && refreshed?.execution_status === 'completed'
+          && Number(refreshed?.execution_exit_code) === 0
+        );
+        const hasEvidence = /\[ACTUAL (?:TOOL RESULT|EXECUTION BATCH|EXECUTION) EVIDENCE\]/i.test(text);
+        if (!hasExecution || !hasEvidence) {
+          outcome = 'failure';
+          content = text + '\n[Workflow validation] Deterministic task rejected: missing durable ExecutionManager evidence or exit code 0.';
+        }
+      } else if (!text || text.startsWith(adapterTimeout)) {
+        outcome = 'failure';
+        content = text + '\n[Workflow validation] Native task rejected: missing verified native result.';
       }
     }
     const resultId = id('result'); const ts = now();
@@ -1168,13 +1293,22 @@ export class WorkflowStore {
   }
   getSlackJobView(jobId) { return this.db.prepare('SELECT * FROM slack_job_views WHERE job_id=?').get(jobId) || null; }
   approve(jobId, rawText, actor = 'boss') {
+    const job = this.getJob(jobId);
+    if (!job) throw new Error('job not found: ' + jobId);
     const approvalId = id('approval'); const ts = now();
-    this.db.prepare("INSERT INTO approvals(approval_id, job_id, decision, actor, raw_text, created_at) VALUES(?, ?, 'approved', ?, ?, ?)").run(approvalId, jobId, actor, rawText, ts);
-    this.db.prepare('UPDATE jobs SET state = ?, approved_at = ?, updated_at = ? WHERE job_id = ?').run('APPROVED', ts, ts, jobId);
-    const runtime = this.getWorkflowRuntimeState(jobId);
-    if (runtime?.phase === 'PROPOSED') this.transitionWorkflowPhase(jobId, 'APPROVED', { event: 'workflow.approved', payload: { actor } });
-    this.recordEvent(jobId, 'approval.approved', { actor, rawText }, hash(rawText));
-    if (isProductionWorkflow(this.getJob(jobId))) this.compileExecutionPlan(jobId);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare("INSERT INTO approvals(approval_id, job_id, decision, actor, raw_text, created_at) VALUES(?, ?, 'approved', ?, ?, ?)").run(approvalId, jobId, actor, rawText, ts);
+      this.db.prepare('UPDATE jobs SET state = ?, approved_at = ?, updated_at = ? WHERE job_id = ?').run('APPROVED', ts, ts, jobId);
+      const runtime = this.getWorkflowRuntimeState(jobId);
+      if (runtime?.phase === 'PROPOSED') this.transitionWorkflowPhase(jobId, 'APPROVED', { event: 'workflow.approved', payload: { actor } });
+      this.recordEvent(jobId, 'approval.approved', { actor, rawText }, hash(rawText));
+      if (isSupportedWorkflow(this.getJob(jobId))) this.compileExecutionPlan(jobId);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
     return this.getJob(jobId);
   }
   dispatch(jobId, { role = 'cto', description }) {
@@ -1217,7 +1351,11 @@ export class WorkflowStore {
   }
   reconcileRuntimeRefs(jobId, messages = []) {
     const job = this.getJob(jobId);
-    if (!job?.active_task_id) return null;
+    // Terminal jobs are durable history, not live workflow state. Runtime
+    // transcripts may contain stale spawn receipts; never replay them into
+    // business task creation after the Job has reached a terminal status.
+    if (!job || ['completed', 'failed', 'cancelled'].includes(String(job.status || '').toLowerCase())) return null;
+    if (!job.active_task_id) return null;
     // Durable results outrank replayed runtime receipts. A restart can replay
     // an old spawn receipt after a child already completed; never resurrect it.
     const terminalTasks = this.db.prepare("SELECT t.task_id, r.outcome FROM tasks t JOIN (SELECT task_id, outcome, MAX(created_at) AS created_at FROM results GROUP BY task_id) r ON r.task_id = t.task_id WHERE t.job_id = ? AND t.status = 'running' AND r.outcome IN ('success', 'failure')").all(jobId);
@@ -1484,24 +1622,25 @@ export class WorkflowStore {
       const failedTasks = this.db.prepare("SELECT task_id, role FROM tasks WHERE job_id=? AND status IN ('failed','cancelled')").all(jobId);
       if (failedTasks.length) throw new Error(`cannot terminalize success with failed tasks: ${failedTasks.map(t => t.task_id).join(',')}`);
       const activeTask = job.active_task_id ? this.getTask(job.active_task_id) : null;
-      if (activeTask?.role === 'cto' && isProductionWorkflow(job)) {
-        const requiredRoles = ProductionRoles;
+      if (activeTask?.role === 'cto' && isSupportedWorkflow(job)) {
+        const plan = this.getExecutionPlan(jobId);
+        const requiredRoles = (plan?.children || []).map(item => String(item.role).toLowerCase());
         const children = this.db.prepare('SELECT task_id, role, status FROM tasks WHERE parent_task_id=?').all(activeTask.task_id);
         const missing = requiredRoles.filter(role => !children.some(t => String(t.role).toLowerCase() === role));
         if (missing.length) throw new Error(`cannot terminalize: missing required specialist children: ${missing.join(',')}`);
         for (const role of requiredRoles) {
           const child = children.find(t => String(t.role).toLowerCase() === role);
           const durableTask = this.getTask(child.task_id);
+          const metadata = JSON.parse(durableTask?.metadata_json || '{}');
+          const requiresExecutionEvidence = metadata.executor === 'ExecutionManager' || metadata.deterministic === true;
           const hasStructuredExecution = Boolean(
             durableTask?.execution_session_id
             && durableTask?.execution_status === 'completed'
             && Number(durableTask?.execution_exit_code) === 0
           );
-          const metadata = JSON.parse(durableTask?.metadata_json || '{}');
-          if (!hasStructuredExecution
-              || metadata.executor !== 'ExecutionManager'
-              || !metadata.command
-              || !metadata.cwd) {
+          const result = this.db.prepare('SELECT content FROM results WHERE task_id=? ORDER BY created_at DESC LIMIT 1').get(durableTask.task_id);
+          if ((requiresExecutionEvidence && (!hasStructuredExecution || !metadata.executor || (!metadata.command && !metadata.executable) || !metadata.cwd))
+              || (!requiresExecutionEvidence && !String(result?.content || '').trim())) {
             throw new Error(`cannot terminalize: invalid actual evidence for required child role=${role}`);
           }
         }
@@ -1589,7 +1728,7 @@ export class WorkflowStore {
     const attempts = taskIds.length ? this.db.prepare(`SELECT * FROM attempts WHERE task_id IN (${taskIds.map(() => '?').join(',')}) ORDER BY started_at`).all(...taskIds) : [];
     const results = taskIds.length ? this.db.prepare(`SELECT * FROM results WHERE task_id IN (${taskIds.map(() => '?').join(',')}) ORDER BY created_at`).all(...taskIds) : [];
     const approvals = this.db.prepare('SELECT * FROM approvals WHERE job_id = ? ORDER BY created_at').all(jobId);
-    const reports = this.db.prepare('SELECT report_id, kind, delivered_at, created_at FROM reports WHERE job_id = ? ORDER BY created_at').all(jobId);
+    const reports = this.db.prepare('SELECT report_id, kind, content, delivered_at, created_at FROM reports WHERE job_id = ? ORDER BY created_at').all(jobId);
     const events = this.db.prepare('SELECT event_id, type, payload_json, created_at FROM events WHERE job_id = ? ORDER BY created_at').all(jobId);
     const sessions = this.db.prepare('SELECT * FROM agent_sessions WHERE job_id = ? ORDER BY created_at').all(jobId);
     const sessionIds = sessions.map(s => s.session_id);

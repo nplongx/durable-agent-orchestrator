@@ -19,6 +19,7 @@
     "test:execution-contract": "node tests/test-execution-contract.js",
     "test:worker-protocol": "node tests/test-worker-protocol.js",
     "test:execution-verifier": "node tests/test-execution-verifier.js",
+    "test:task-lease-manager": "node tests/test-task-lease-manager.js",
     "test:production-guards": "node tests/test-production-guards.js",
     "test:workflow-policy-m1": "node tests/test-workflow-policy-m1.js",
     "test:workflow-plan-m2": "node tests/test-workflow-plan-m2.js",
