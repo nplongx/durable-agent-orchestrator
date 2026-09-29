@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { validateExecutionRequest, validateExecutionResult } from './execution-contract.js';
+import { verifyExecutionEvidence } from './execution-verifier.js';
 
 const API_VERSION = '2026-03-10';
 const DEFAULT_API = 'https://api.github.com';
@@ -195,9 +196,28 @@ export class GitHubActionsProvider {
     try {
       const result = await run('unzip', ['-o', zip, '-d', dir]);
       if (result.code !== 0) throw new Error(`unzip failed: ${result.stderr || result.stdout}`);
-      const candidates = [path.join(dir, 'result.json'), path.join(dir, '.p2-provider', 'result.json'), path.join(dir, '.p1-smoke', 'result.json')];
+      const candidates = [
+        path.join(dir, 'result.json'),
+        path.join(dir, '.p2-provider', 'result.json'),
+        path.join(dir, '.p1-smoke', 'result.json'),
+        path.join(dir, '.p3-worker', 'result.json')
+      ];
       for (const file of candidates) {
-        try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch {}
+        try {
+          const root = path.dirname(file);
+          const result = JSON.parse(await fs.readFile(file, 'utf8'));
+          const evidence = {};
+          const files = await fs.readdir(root, { withFileTypes: true });
+          for (const entry of files) {
+            if (entry.isFile()) {
+              const full = path.join(root, entry.name);
+              if (entry.name !== 'result.json') evidence[entry.name] = await fs.readFile(full, 'utf8');
+            }
+          }
+          if (evidence['task-payload.json']) evidence['task-payload.json'] = JSON.parse(evidence['task-payload.json']);
+          if (evidence['execution.json']) evidence['execution.json'] = JSON.parse(evidence['execution.json']);
+          return { result, evidence };
+        } catch {}
       }
       throw new Error('provider artifact does not contain result.json');
     } finally {
@@ -212,7 +232,9 @@ export class GitHubActionsProvider {
     const artifact = artifacts?.artifacts?.find(item => !item.expired && /^p2-provider-/.test(item.name))
       || artifacts?.artifacts?.find(item => !item.expired && /result/.test(item.name));
     if (!artifact) throw new Error(`provider run ${providerRunId} has no result artifact`);
-    const raw = await this._downloadArtifact(artifact);
+    const downloaded = await this._downloadArtifact(artifact);
+    const bundle = downloaded?.result ? downloaded : { result: downloaded, evidence: {} };
+    const raw = bundle.result;
     const persisted = this._getPersisted(providerRunId);
     const result = {
       ...raw,
@@ -226,8 +248,12 @@ export class GitHubActionsProvider {
       evidence_refs: Array.isArray(raw.evidence_refs) ? raw.evidence_refs : [artifact.archive_download_url]
     };
     validateExecutionResult(result);
+    const verification = /^p3-worker-/.test(artifact.name)
+      ? verifyExecutionEvidence({ result, evidence: bundle.evidence })
+      : { valid: true, errors: [], evidence_hash: null, skipped: true };
+    if (!verification.valid) throw new Error(`provider evidence rejected: ${verification.errors.join('; ')}`);
     this._persist({ ...(persisted || {}), provider_run_id: String(providerRunId), job_id: result.job_id, task_id: result.task_id, lease_id: result.lease_id, attempt: result.attempt, input_commit: result.input_commit, workflow: persisted?.workflow || this.workflow, ref: persisted?.ref || this.ref, state: 'COMPLETED', conclusion: status.conclusion, html_url: status.html_url, artifact_id: String(artifact.id), output_commit: result.output_commit || null, created_at: persisted?.created_at || status.created_at });
-    return result;
+    return { ...result, evidence_verification: verification };
   }
 
   async cancel(providerRunId) {
