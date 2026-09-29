@@ -30,6 +30,17 @@ export class DistributedScheduler {
   }
 
   async dispatchTask(task, { inputCommit, role = task.role || 'executor', requiredEvidence = ['task-payload.json', 'execution.json', 'stdout.txt', 'stderr.txt', 'git-status.txt'] } = {}) {
+    const existing = this.store.db.__p6Fake
+      ? null
+      : this.store.db.prepare(`SELECT * FROM task_leases WHERE task_id=? AND state='ACTIVE' LIMIT 1`).get(task.task_id);
+    if (existing?.lease_id) {
+      let providerRun = null;
+      try {
+        providerRun = this.store.db.prepare(`SELECT * FROM provider_runs WHERE lease_id=? ORDER BY created_at DESC LIMIT 1`).get(existing.lease_id);
+      } catch {}
+      if (providerRun) return { task, lease: existing, run: providerRun, idempotent: true };
+      throw new Error('task already leased without persisted provider run: ' + task.task_id);
+    }
     const leaseId = uuid();
     const lease = this.store.acquireTaskLease(task.task_id, {
       leaseId, workerId: this.workerId, ttlMs: this.leaseTtlMs

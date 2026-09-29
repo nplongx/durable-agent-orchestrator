@@ -579,6 +579,10 @@ export class WorkflowStore {
   }
 
   applyVerifiedExecutionResult(result) {
+    const providerNeedle = '"provider_run_id":"' + String(result.provider_run_id).replace(/[%_\\]/g, '\\$&') + '"';
+    const duplicate = this.db.prepare('SELECT result_id FROM results WHERE task_id=? AND content LIKE ? LIMIT 1')
+      .get(result.task_id, '%' + providerNeedle + '%');
+    if (duplicate) return { status: 'REJECTED', reason: 'duplicate_provider_result', result_id: duplicate.result_id };
     const lease = this.getTaskLease(result.lease_id);
     if (!lease) return { status: 'REJECTED', reason: 'lease_not_found' };
     if (lease.state !== 'ACTIVE') return { status: 'REJECTED', reason: 'lease_not_active' };
