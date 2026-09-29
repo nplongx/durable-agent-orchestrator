@@ -22,6 +22,7 @@
     "test:task-lease-manager": "node tests/test-task-lease-manager.js",
     "test:distributed-scheduler": "node tests/test-distributed-scheduler.js",
     "test:langgraph-control-loop": "node tests/test-langgraph-control-loop.js",
+    "test:autonomous-delivery": "node tests/test-autonomous-delivery.js",
     "test:production-guards": "node tests/test-production-guards.js",
     "test:workflow-policy-m1": "node tests/test-workflow-policy-m1.js",
     "test:workflow-plan-m2": "node tests/test-workflow-plan-m2.js",

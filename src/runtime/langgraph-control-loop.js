@@ -36,7 +36,7 @@ export class LangGraphControlLoop {
     return reconciled;
   }
 
-  async tick({ jobId, inputCommit, event = 'control.tick' } = {}) {
+  async tick({ jobId, inputCommit, event = 'control.tick', hooks = {} } = {}) {
     const job = this.store.getJob(jobId);
     if (!job) throw new Error(`job not found: ${jobId}`);
     this.store.reapExpiredTaskLeases({ jobId });
@@ -49,7 +49,8 @@ export class LangGraphControlLoop {
       job: refreshedJob, tasks, results, plan,
       runtime: this.store.getWorkflowRuntimeState(jobId),
       event, persist: true, store: this.store,
-      executeTask: async task => this.scheduler.dispatchTask(task, { inputCommit })
+      executeTask: async task => this.scheduler.dispatchTask(task, { inputCommit }),
+      ...hooks
     });
     if (decision.action === LangGraphActions.RUN_CHILDREN) {
       const dispatched = await this.scheduler.dispatchPending({ inputCommit });
