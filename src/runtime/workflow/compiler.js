@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { getWorkflowDefinition } from './definitions/index.js';
 import { ProductionTaskId, productionTaskSpec, productionChildTaskSpecs } from './catalog/production.js';
 import { engineeringTaskSpec, engineeringTaskSpecs } from './catalog/engineering.js';
+import { standardEngineeringTaskSpec, standardEngineeringTaskSpecs } from './catalog/standard-engineering.js';
 import { validateWorkflowDefinition } from './schema.js';
 import { canonicalJson, validateExecutionPlan } from './plan.js';
 
@@ -15,12 +16,13 @@ export function compileWorkflowPlan(job, { workspace = process.env.WORKFLOW_WORK
   if (!definition) throw new Error('unsupported workflow for execution plan: ' + (job.title || job.job_id));
   validateWorkflowDefinition(definition);
   const isProduction = definition.id === 'production';
+  const isStandardEngineering = definition.id === 'standard-engineering';
   const children = isProduction
     ? productionChildTaskSpecs(workspace).map(spec => ({ id: spec.id, role: spec.role, execution: spec.execution, capability: null, dependencies: [] }))
-    : engineeringTaskSpecs(workspace);
+    : isStandardEngineering ? standardEngineeringTaskSpecs(workspace) : engineeringTaskSpecs(workspace);
   const synthesis = isProduction
     ? productionTaskSpec(ProductionTaskId.CTO_SYNTHESIS, { workspace })
-    : engineeringTaskSpec(definition.synthesisTask, { workspace });
+    : isStandardEngineering ? standardEngineeringTaskSpec(definition.synthesisTask, { workspace }) : engineeringTaskSpec(definition.synthesisTask, { workspace });
   const plan = {
     schema_version: 1,
     workflow_id: definition.id,

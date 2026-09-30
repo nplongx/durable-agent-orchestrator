@@ -18,6 +18,9 @@ const report = store.createReport(job.job_id, 'executive_summary', 'PASS');
 store.claimDelivery(job.job_id, report, 'whatsapp', 'boss');
 
 const trace = store.getJobTrace(job.job_id);
+const snapshot = store.getObservabilitySnapshot(job.job_id);
+assert.equal(snapshot.schema_version, 1);
+assert.equal(snapshot.trace_id, `workflow:${job.job_id}`);
 assert.strictEqual(trace.job.job_id, job.job_id);
 assert.strictEqual(trace.tasks.length, 1);
 assert.strictEqual(trace.attempts.length, 1);
@@ -29,6 +32,8 @@ assert.strictEqual(trace.tasks[0].openclaw_run_id, 'run-obs');
 const overview = store.getObservability();
 assert.strictEqual(overview.stats.jobs, 1);
 assert.ok(overview.recentEvents.length >= 6);
+assert.strictEqual(overview.schema_version, 1);
+assert.ok(!('dbPath' in overview));
 
 fs.rmSync(dbPath, { force: true });
 fs.rmSync(`${dbPath}-wal`, { force: true });

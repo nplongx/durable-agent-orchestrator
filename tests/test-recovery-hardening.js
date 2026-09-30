@@ -12,6 +12,7 @@ const job = store.createJob({
   conversationKey: 'test-recovery-hardening',
   title: 'Production E2E recovery hardening'
 });
+store.approve(job.job_id, 'duyệt');
 store.dispatch(job.job_id, {
   role: 'cto',
   description: 'Production E2E recovery test'
@@ -24,7 +25,8 @@ const makeChild = (role, sessionKey, command) => {
     role,
     description: 'Durable Job ID: ' + job.job_id + '. Run immediately: ' + command + '. Return the exact command, actual stdout/stderr output, and exit status.',
     runId: 'run-' + role,
-    sessionKey
+    sessionKey,
+    metadata: { executor: 'ExecutionManager', deterministic: true, command }
   });
   return store.getTask(task.task_id);
 };
@@ -90,11 +92,11 @@ assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM attempts WHERE task_id 
 assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM attempts WHERE task_id = ? AND status = ?').get(architect.task_id, 'completed').n, 1);
 
 assert.equal(hasVerifiedSuccessfulRuntimeEvidence(
-  { description: 'Run immediately: node --check /home/long/work/chatgpt-adapter/server.js.' },
+  { description: 'Run immediately: node --check /home/long/work/chatgpt-adapter/server.js.', metadata_json: JSON.stringify({ executor: 'ExecutionManager', command: architectCommand }) },
   goodEvidence(architectCommand)
 ), true);
 assert.equal(hasVerifiedSuccessfulRuntimeEvidence(
-  { description: 'Run immediately: node --check /tmp/other.js.' },
+  { description: 'Run immediately: node --check /tmp/other.js.', metadata_json: JSON.stringify({ executor: 'ExecutionManager', command: 'node --check /tmp/other.js' }) },
   goodEvidence(architectCommand)
 ), false);
 
@@ -102,12 +104,14 @@ const timeoutJob = store.createJob({
   conversationKey: 'test-recovery-timeout',
   title: 'Production E2E recovery timeout'
 });
+store.approve(timeoutJob.job_id, 'duyệt');
 store.dispatch(timeoutJob.job_id, { role: 'cto', description: 'timeout test' });
 const timeoutCto = store.getTask(store.getJob(timeoutJob.job_id).active_task_id);
 const timeoutChild = store.createChildTask(timeoutJob.job_id, {
   parentTaskId: timeoutCto.task_id,
   role: 'architect',
-  description: 'Run immediately: ' + architectCommand + '.'
+  description: 'Run immediately: ' + architectCommand + '.',
+  metadata: { executor: 'ExecutionManager', deterministic: true, command: architectCommand }
 });
 store.attachTaskRuntime(timeoutChild.task_id, {
   runId: 'run-timeout',
@@ -125,6 +129,42 @@ const timeoutRecovery = new RecoveryManager(store, {
 });
 await timeoutRecovery.reconcile({ jobId: timeoutJob.job_id });
 assert.equal(store.getTask(timeoutChild.task_id).status, 'failed');
+
+const runtimeTimeoutJob = store.createJob({
+  conversationKey: 'test-runtime-timeout',
+  title: 'Engineering M4 runtime timeout reconciliation'
+});
+store.approve(runtimeTimeoutJob.job_id, 'duyệt');
+store.dispatch(runtimeTimeoutJob.job_id, { role: 'cto', description: 'runtime timeout test' });
+const runtimeTimeoutCto = store.getTask(store.getJob(runtimeTimeoutJob.job_id).active_task_id);
+const runtimeTimeoutChild = store.recordSpawn(runtimeTimeoutJob.job_id, {
+  parentTaskId: runtimeTimeoutCto.task_id,
+  role: 'architect',
+  description: 'runtime timeout child',
+  runId: 'run-runtime-timeout',
+  sessionKey: 'agent:architect:subagent:runtime-timeout-' + testSuffix,
+  metadata: { workflow_plan_task_id: 'engineering.architect' }
+});
+let trajectoryCalled = false;
+const runtimeTimeoutRecovery = new RecoveryManager(store, {
+  listSessions: async () => [{ key: runtimeTimeoutChild.openclaw_session_key, status: 'timeout', runId: 'run-runtime-timeout' }],
+  exportTrajectory: async () => { trajectoryCalled = true; throw new Error('must not export timed-out runtime'); }
+});
+await runtimeTimeoutRecovery.reconcile({ jobId: runtimeTimeoutJob.job_id });
+assert.equal(trajectoryCalled, false);
+assert.equal(store.getTask(runtimeTimeoutChild.task_id).status, 'failed');
+assert.equal(
+  store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE job_id=? AND type='session.runtime_reconciled'").get(runtimeTimeoutJob.job_id).n,
+  1
+);
+
+const terminalJob = store.createJob({ conversationKey: 'test-terminal-running-task', title: 'Terminal running task reconciliation' });
+const terminalCto = store.dispatch(terminalJob.job_id, { role: 'cto', description: 'terminal task test' });
+store.transition(terminalJob.job_id, 'FAILED', 'failed');
+const terminalTask = store.getTask(terminalCto.task_id);
+assert.equal(terminalTask.status, 'running');
+await timeoutRecovery.reconcile({ jobId: terminalJob.job_id });
+assert.equal(store.getTask(terminalTask.task_id).status, 'cancelled');
 
 const slackJob = store.createJob({
   conversationKey: 'test-slack-semantics',

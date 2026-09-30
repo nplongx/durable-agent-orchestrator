@@ -1,6 +1,6 @@
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
 
-const ADAPTER = 'http://127.0.0.1:8318';
+const ADAPTER = process.env.CHATGPT_ADAPTER_URL || 'http://127.0.0.1:8318';
 
 export default definePluginEntry({
   id: 'chatgpt-adapter-workflow-guard',

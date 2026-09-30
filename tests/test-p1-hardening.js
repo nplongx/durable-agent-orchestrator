@@ -37,6 +37,19 @@ assert.equal(intent.provider_run_id, 'gha-p1-1');
 assert.equal(intent.attempt, 1);
 assert.match(intent.dispatch_key, /^[a-f0-9]{64}$/);
 
+const pendingTask = store.createChildTask(intentJob.job_id, { role: 'engineer', description: 'provider pending dispatch task' });
+const pendingScheduler = new DistributedScheduler({
+  store,
+  provider: { async dispatch() { return { provider_run_id: null, state: 'DISPATCHING', pending_reconciliation: true }; } },
+  workerId: 'p2-pending'
+});
+const pendingDispatch = await pendingScheduler.dispatchTask(pendingTask, { inputCommit: 'c'.repeat(40) });
+assert.equal(pendingDispatch.run.provider_run_id, null);
+const pendingIntent = store.db.prepare('SELECT state,provider_run_id FROM provider_dispatch_intents WHERE task_id=?').get(pendingTask.task_id);
+assert.equal(pendingIntent.state, 'DISPATCHING');
+assert.equal(pendingIntent.provider_run_id, null);
+assert.equal(store.getTask(pendingTask.task_id).status, 'running');
+
 const recoveryKey = 'b'.repeat(64);
 store.db.prepare(`INSERT INTO provider_dispatch_intents
   (dispatch_key,job_id,task_id,lease_id,attempt,provider,input_commit,state,created_at,updated_at)

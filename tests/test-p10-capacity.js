@@ -8,7 +8,7 @@ const leases = new Map();
 let active = 0;
 let peak = 0;
 const store = {
-  db: { prepare(sql) {
+  db: { __p6Fake: true, prepare(sql) {
     if (sql.includes("state='ACTIVE'")) return { get: () => ({ n: [...leases.values()].filter(x => x.state === 'ACTIVE').length }) };
     if (sql.includes('UPDATE task_leases')) return { run: () => ({ changes: 1 }) };
     throw new Error(sql);

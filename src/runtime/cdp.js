@@ -1,6 +1,36 @@
 // cdp.js — Multi-Tab Chrome DevTools Protocol client for ChatGPT Web
 import { spawn } from 'node:child_process';
 
+function abortableDelay(ms, signal) {
+  if (signal?.aborted) return Promise.reject(new Error('Request aborted by caller'));
+  if (!signal) return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(new Error('Request aborted by caller'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function awaitWithSignal(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new Error('Request aborted by caller'));
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      const onAbort = () => reject(new Error('Request aborted by caller'));
+      signal.addEventListener('abort', onAbort, { once: true });
+      promise.finally(() => signal.removeEventListener('abort', onAbort)).catch(() => {});
+    })
+  ]);
+}
+
 export class TabWorker {
   constructor(role, bridge, target) {
     this.role = role;
@@ -19,41 +49,62 @@ export class TabWorker {
   }
 
   // Try to recycle: close the wedged tab and move this role to a fresh tab.
-  async forceRefreshTarget() {
+  async forceRefreshTarget(signal = null) {
+    if (signal?.aborted) throw new Error('Request aborted by caller');
     console.warn(`[CDP:${this.role}] Wedged tab ${this.targetId} - closing and recycling to a fresh tab...`);
     this.lastRecycleAt = Date.now();
     const closedTargetId = this.targetId;
     // Create replacement first. Closing the only page can make Chrome exit,
     // taking the CDP port down and turning a tab recovery into a browser restart.
-    const fresh = await this.bridge.createNewTab('https://chatgpt.com');
-    if (this.bridge && this.targetId) {
-      try { await fetch(`${this.bridge.cdpBaseUrl}/json/close/${this.targetId}`); } catch {}
+    const fresh = await this.bridge.createNewTab('https://chatgpt.com', signal);
+    let committed = false;
+    if (signal?.aborted) {
+      try { await fetch(`${this.bridge.cdpBaseUrl}/json/close/${fresh.id}`); } catch {}
+      throw new Error('Request aborted by caller');
     }
-    // /json/close is asynchronous. Do not immediately reacquire: Chrome can
-    // still advertise the closing target briefly, causing recycle to select
-    // the same stale target again.
-    const closeWaitStart = Date.now();
-    while (Date.now() - closeWaitStart < 5000) {
-      try {
-        const targets = await this.bridge.getTargets();
-        if (!targets.some(t => t.id === closedTargetId)) break;
-      } catch {}
-      await new Promise(r => setTimeout(r, 150));
+    try {
+      if (this.bridge && this.targetId) {
+        try { await fetch(`${this.bridge.cdpBaseUrl}/json/close/${this.targetId}`, { signal }); } catch (err) {
+          if (signal?.aborted) throw new Error('Request aborted by caller');
+        }
+      }
+      // /json/close is asynchronous. Do not immediately reacquire: Chrome can
+      // still advertise the closing target briefly, causing recycle to select
+      // the same stale target again.
+      const closeWaitStart = Date.now();
+      while (Date.now() - closeWaitStart < 5000) {
+        if (signal?.aborted) throw new Error('Request aborted by caller');
+        try {
+          const targets = await this.bridge.getTargets(signal);
+          if (!targets.some(t => t.id === closedTargetId)) break;
+        } catch (err) {
+          if (signal?.aborted) throw err;
+        }
+        await abortableDelay(150, signal);
+      }
+      if (signal?.aborted) throw new Error('Request aborted by caller');
+      this.resetConnection('recycling wedged tab');
+      this.target = fresh;
+      this.targetId = fresh.id;
+      committed = true;
+      console.log(`[CDP:${this.role}] Recycled to fresh tab ${fresh.id.slice(0, 14)}...`);
+      // acquireTarget() only returns a CDP target; it does not guarantee the
+      // ChatGPT React composer has mounted. Give a recycled tab time to mount
+      // before the injection loop probes it again.
+      await abortableDelay(5000, signal);
+    } finally {
+      if (!committed) {
+        try { await fetch(`${this.bridge.cdpBaseUrl}/json/close/${fresh.id}`); } catch {}
+      }
     }
-    this.resetConnection('recycling wedged tab');
-    this.target = fresh;
-    this.targetId = fresh.id;
-    console.log(`[CDP:${this.role}] Recycled to fresh tab ${fresh.id.slice(0, 14)}...`);
-    // acquireTarget() only returns a CDP target; it does not guarantee the
-    // ChatGPT React composer has mounted. Give a recycled tab time to mount
-    // before the injection loop probes it again.
-    await new Promise(r => setTimeout(r, 5000));
   }
 
-  resetConnection(reason = 'connection reset') {
+  resetConnection(reason = 'connection reset', expectedConnectingPromise = null) {
     console.log(`[CDP:${this.role}] Resetting connection (${reason})...`);
     this.ready = false;
-    this.connectingPromise = null;
+    if (!expectedConnectingPromise || this.connectingPromise === expectedConnectingPromise) {
+      this.connectingPromise = null;
+    }
     if (this.ws) {
       try {
         this.ws.onopen = null;
@@ -70,22 +121,25 @@ export class TabWorker {
     this.pendingCallbacks.clear();
   }
 
-  async ensureConnected() {
+  async ensureConnected(signal = null) {
+    if (signal?.aborted) throw new Error('Request aborted by caller');
     if (this.ws && this.ws.readyState === WebSocket.OPEN && this.ready) {
       return;
     }
     if (this.connectingPromise) {
-      return this.connectingPromise;
+      return awaitWithSignal(this.connectingPromise, signal);
     }
 
     for (let attempt = 0; attempt < 2; attempt++) {
       const connecting = (async () => {
         // Verify if target still exists or acquire a new one
-        const targets = await this.bridge.getTargets();
+        const targets = await this.bridge.getTargets(signal);
+        if (signal?.aborted) throw new Error('Request aborted by caller');
         let currentTarget = targets.find(t => t.id === this.targetId);
         if (!currentTarget) {
           console.log(`[CDP:${this.role}] Target ${this.targetId} disappeared, acquiring new target...`);
-          currentTarget = await this.bridge.acquireTarget(this.role);
+          currentTarget = await this.bridge.acquireTarget(this.role, signal);
+          if (signal?.aborted) throw new Error('Request aborted by caller');
           this.target = currentTarget;
           this.targetId = currentTarget.id;
         }
@@ -98,23 +152,51 @@ export class TabWorker {
           console.log(`[CDP:${this.role}] Connecting WebSocket to tab ${this.targetId}...`);
           const ws = new WebSocket(currentTarget.webSocketDebuggerUrl);
           this.ws = ws;
+          let settled = false;
+
+          const cleanupConnect = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', onAbort);
+          };
+          const resolveConnect = () => {
+            if (settled) return;
+            settled = true;
+            cleanupConnect();
+            resolve();
+          };
+          const rejectConnect = (err) => {
+            if (settled) return;
+            settled = true;
+            cleanupConnect();
+            reject(err);
+          };
+          const onAbort = () => {
+            try { ws.close(); } catch {}
+            rejectConnect(new Error('Request aborted by caller'));
+          };
 
           const timer = setTimeout(() => {
-            reject(new Error(`WebSocket connection timeout to tab ${this.targetId}`));
+            rejectConnect(new Error(`WebSocket connection timeout to tab ${this.targetId}`));
           }, 10000);
+          if (signal?.aborted) {
+            onAbort();
+            return;
+          }
+          signal?.addEventListener('abort', onAbort, { once: true });
 
           ws.onopen = async () => {
             console.log(`[CDP:${this.role}] ws.onopen triggered for ${this.targetId}`);
-            clearTimeout(timer);
             try {
+              if (signal?.aborted) throw new Error('Request aborted by caller');
               await this.sendRaw('Runtime.enable');
               await this.sendRaw('Page.enable');
+              if (signal?.aborted) throw new Error('Request aborted by caller');
               this.ready = true;
               console.log(`[CDP:${this.role}] Tab ${this.targetId} connected and initialized for role '${this.role}'.`);
-              resolve();
+              resolveConnect();
             } catch (e) {
               console.error(`[CDP:${this.role}] ws.onopen failed:`, e);
-              reject(e);
+              rejectConnect(e);
             }
           };
 
@@ -138,18 +220,18 @@ export class TabWorker {
           }
         };
 
-        ws.onerror = (err) => {
-          console.error(`[CDP:${this.role}] WebSocket error on tab ${this.targetId}:`, err);
-          this.ready = false;
-          this.connectingPromise = null;
-          reject(err);
-        };
+          ws.onerror = (err) => {
+            console.error(`[CDP:${this.role}] WebSocket error on tab ${this.targetId}:`, err);
+            this.ready = false;
+            if (this.connectingPromise === connecting) this.connectingPromise = null;
+            rejectConnect(err);
+          };
 
         ws.onclose = () => {
           console.log(`[CDP:${this.role}] WebSocket closed on tab ${this.targetId}.`);
           this.ws = null;
           this.ready = false;
-          this.connectingPromise = null;
+          if (this.connectingPromise === connecting) this.connectingPromise = null;
           for (const [id, cb] of this.pendingCallbacks.entries()) {
             cb.reject(new Error(`WebSocket closed while waiting for response to message ${id}`));
           }
@@ -160,24 +242,29 @@ export class TabWorker {
 
     this.connectingPromise = connecting;
     try {
-      await this.connectingPromise;
+      await awaitWithSignal(connecting, signal);
       return;
     } catch (e) {
       console.error(`[CDP:${this.role}] Connect attempt ${attempt + 1} failed: ${e.message}`);
-      this.resetConnection('connect attempt failed');
-          if (attempt < 3 && e.message.includes('timed out') && Date.now() - this.lastRecycleAt > 30000) {
-        await this.forceRefreshTarget();
+      this.resetConnection('connect attempt failed', connecting);
+      if (attempt === 0 && e.message.includes('timed out') && Date.now() - this.lastRecycleAt > 30000) {
+        await this.forceRefreshTarget(signal);
         continue;
       }
       throw e;
     } finally {
-      this.connectingPromise = null;
+      if (this.connectingPromise === connecting) {
+        this.connectingPromise = null;
+      }
     }
   }
   }
 
   sendRaw(method, params = {}, timeoutMs = 30000) {
     return new Promise((resolve, reject) => {
+      if (this.currentItem?.signal?.aborted) {
+        return reject(new Error('Request aborted by caller'));
+      }
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         return reject(new Error(`WebSocket not connected for role ${this.role}`));
       }
@@ -215,7 +302,7 @@ export class TabWorker {
   }
 
   async evaluate(expression, timeoutMs = 10000, awaitPromise = false) {
-    await this.ensureConnected();
+    await this.ensureConnected(this.currentItem?.signal || null);
     const res = await this.sendRaw('Runtime.evaluate', {
       expression,
       returnByValue: true,
@@ -283,7 +370,8 @@ export class TabWorker {
   // Cycle to a REGULAR fresh conversation (home + new-chat button). Avoids
   // '?temporary-chat=true': free-tier WEB: transient chats frequently return
   // "Something went wrong." / stall mid-generation, poisoning the tab's session.
-  async navigateFreshChat() {
+  async navigateFreshChat(signal = null) {
+    if (signal?.aborted) throw new Error('Request aborted by caller');
     console.log(`[CDP:${this.role}] Cycling to a fresh regular chat...`);
     try {
       // 1. First attempt: click New Chat button inside SPA (instant, keeps DOM connection intact)
@@ -310,13 +398,13 @@ export class TabWorker {
             await this.dismissModals();
             return;
           }
-          await new Promise(r => setTimeout(r, 150));
+          await abortableDelay(150, signal);
         }
       }
 
       // 2. Fallback: Page.navigate to root
       await this.sendRaw('Page.navigate', { url: 'https://chatgpt.com/' }, 5000).catch(() => {});
-      await new Promise(r => setTimeout(r, 2000));
+      await abortableDelay(2000, signal);
       const fresh = await this.evaluate(`(() => {
         const n = document.querySelectorAll('[data-message-author-role="assistant"], [data-message-author-role="user"]').length;
         const ta = document.querySelector('#prompt-textarea, div[contenteditable="true"]');
@@ -336,16 +424,17 @@ export class TabWorker {
             return n === 0 && !!ta && text.length === 0;
           })()`, 3000).catch(() => false);
           if (st) break;
-          await new Promise(r => setTimeout(r, 150));
+          await abortableDelay(150, signal);
         }
       }
     } catch (e) {
       console.error(`[CDP:${this.role}] Fresh-chat navigation error:`, e.message);
     }
+    if (signal?.aborted) throw new Error('Request aborted by caller');
     await this.dismissModals();
   }
 
-  ask(prompt, onChunk = null, timeoutMs = 180000, priority = 2, callerRole = null) {
+  ask(prompt, onChunk = null, timeoutMs = 180000, priority = 2, callerRole = null, signal = null) {
     return new Promise((resolve, reject) => {
       const roleLabel = callerRole || this.role;
       const item = {
@@ -356,8 +445,20 @@ export class TabWorker {
         role: roleLabel,
         resolve,
         reject,
+        signal,
+        cancelled: Boolean(signal?.aborted),
+        emittedAny: false,
         queuedAt: Date.now()
       };
+      if (item.cancelled) return reject(new Error('Request aborted by caller'));
+      const onAbort = () => {
+        item.cancelled = true;
+        if (this.processing && this.currentItem === item) this.resetConnection('request aborted by caller');
+        else { const idx = this.queue.indexOf(item); if (idx >= 0) this.queue.splice(idx, 1); }
+        reject(new Error('Request aborted by caller'));
+      };
+      item.abortHandler = onAbort;
+      signal?.addEventListener('abort', onAbort, { once: true });
 
       // Insert into priority queue: lower priority number = higher urgency (P0 > P1 > P2)
       let inserted = false;
@@ -382,22 +483,32 @@ export class TabWorker {
     this.processing = true;
 
     const item = this.queue.shift();
+    this.currentItem = item;
     const waitTime = Date.now() - item.queuedAt;
     console.log(`[CDP:${this.role}] Processing prompt for '${item.role}' [P${item.priority}] (waited in queue: ${waitTime}ms)...`);
+    const emitChunk = (chunk) => {
+      if (chunk) item.emittedAny = true;
+      item.onChunk?.(chunk);
+    };
 
     try {
-      const result = await this._executePrompt(item.prompt, item.onChunk, item.timeoutMs);
+      if (item.cancelled || item.signal?.aborted) throw new Error('Request aborted by caller');
+      const result = await this._executePrompt(item.prompt, emitChunk, item.timeoutMs, item.signal);
       this.lastActive = Date.now();
       item.resolve(result);
     } catch (err) {
       console.error(`[CDP:${this.role}] Execution error:`, err.message);
-      if (err.message.includes('STALL_RECOVERY') && !item.retried) {
+      if (item.cancelled || item.signal?.aborted) {
+        item.reject(new Error('Request aborted by caller'));
+        return;
+      }
+      if (err.message.includes('STALL_RECOVERY') && !item.retried && !item.emittedAny) {
         // Phantom-generation recovery: the tab was "generating" a long time with no output.
         // We already navigated it to a fresh chat; re-run the whole prompt once on the clean tab.
         console.warn(`[CDP:${this.role}] Re-running prompt on recovered tab...`);
         item.retried = true;
         try {
-          const retryResult = await this._executePrompt(item.prompt, item.onChunk, item.timeoutMs);
+          const retryResult = await this._executePrompt(item.prompt, emitChunk, item.timeoutMs, item.signal);
           this.lastActive = Date.now();
           item.resolve(retryResult);
           return;
@@ -407,14 +518,15 @@ export class TabWorker {
           return;
         }
       }
-      if (!item.retried && (err.message.includes('timed out') || err.message.includes('WebSocket') || err.message.includes('not connected') || err.message.includes('not ready') || err.message.includes('Could not inject') || err.message.includes('Composer text not confirmed'))) {
+      if (!item.retried && !item.emittedAny && (err.message.includes('timed out') || err.message.includes('WebSocket') || err.message.includes('not connected') || err.message.includes('not ready') || err.message.includes('Could not inject') || err.message.includes('Composer text not confirmed'))) {
         console.warn(`[CDP:${this.role}] Retrying prompt once after transient error: ${err.message}...`);
         item.retried = true;
         if (err.message.includes('not ready') || err.message.includes('timed out') || err.message.includes('Could not inject')) {
           console.warn(`[CDP:${this.role}] Error indicates wedged tab (${err.message}). Force recycling tab before retry...`);
           try {
-            await this.forceRefreshTarget();
+            await this.forceRefreshTarget(item.signal);
           } catch (recErr) {
+            if (item.signal?.aborted) throw recErr;
             console.error(`[CDP:${this.role}] forceRefreshTarget failed:`, recErr.message);
             this.resetConnection(`Retrying prompt after error: ${err.message}`);
           }
@@ -422,7 +534,7 @@ export class TabWorker {
           this.resetConnection(`Retrying prompt after error: ${err.message}`);
         }
         try {
-          const retryResult = await this._executePrompt(item.prompt, item.onChunk, item.timeoutMs);
+          const retryResult = await this._executePrompt(item.prompt, emitChunk, item.timeoutMs, item.signal);
           this.lastActive = Date.now();
           item.resolve(retryResult);
           return;
@@ -434,17 +546,26 @@ export class TabWorker {
       }
       item.reject(err);
     } finally {
+      item.signal?.removeEventListener('abort', item.abortHandler);
+      if (this.currentItem === item) this.currentItem = null;
       this.processing = false;
       this.processQueue();
     }
   }
 
-  async _executePrompt(prompt, onChunk, timeoutMs) {
-    await this.ensureConnected();
+  async _executePrompt(prompt, onChunk, timeoutMs, signal = null) {
+    const throwIfAborted = () => {
+      if (signal?.aborted) throw new Error('Request aborted by caller');
+    };
+    throwIfAborted();
+    await this.ensureConnected(signal);
+    throwIfAborted();
     await this.dismissModals();
+    throwIfAborted();
 
     // 0. Wake tab and activate focus to prevent Chrome background tab throttling
     try {
+      throwIfAborted();
       await this.sendRaw('Page.bringToFront', {}, 5000);
       await this.sendRaw('Emulation.setFocusEmulationEnabled', { enabled: true }, 5000);
     } catch {}
@@ -462,8 +583,9 @@ export class TabWorker {
       })()`, 4000);
 
       if (threadState && (threadState.msgCount > 0 || threadState.isSubpath)) {
+        throwIfAborted();
         console.log(`[CDP:${this.role}] Resetting to fresh chat for clean turn (msgCount: ${threadState.msgCount})...`);
-        await this.navigateFreshChat();
+        await this.navigateFreshChat(signal);
         await this.dismissModals();
       }
     } catch (e) {
@@ -479,6 +601,7 @@ export class TabWorker {
     let consecutiveEvalErrors = 0;
 
     while (Date.now() - composerStart < 35000) {
+      throwIfAborted();
       await this.dismissModals();
 
       let ready = false;
@@ -499,9 +622,10 @@ export class TabWorker {
           attemptedRecycle = true;
           console.warn(`[CDP:${this.role}] Consecutive evaluate timeouts on tab. Force recycling tab immediately...`);
           try {
-            await this.forceRefreshTarget();
-            await this.ensureConnected();
+            await this.forceRefreshTarget(signal);
+            await this.ensureConnected(signal);
           } catch (recErr) {
+            if (signal?.aborted) throw recErr;
             console.error(`[CDP:${this.role}] Auto-recovery recycle error:`, recErr.message);
           }
           consecutiveEvalErrors = 0;
@@ -531,7 +655,7 @@ export class TabWorker {
         console.warn(`[CDP:${this.role}] Composer not ready after 10s. Auto-recovering: navigating to fresh chat...`);
         try {
           await this.sendRaw('Page.navigate', { url: 'https://chatgpt.com/' }, 5000);
-          await new Promise(r => setTimeout(r, 2000));
+          await abortableDelay(2000, signal);
           await this.dismissModals();
         } catch (e) {
           console.error(`[CDP:${this.role}] Auto-recovery navigation error:`, e.message);
@@ -543,14 +667,15 @@ export class TabWorker {
         attemptedRecycle = true;
         console.warn(`[CDP:${this.role}] Composer still not ready after 18s. Force recycling tab...`);
         try {
-          await this.forceRefreshTarget();
-          await this.ensureConnected();
+          await this.forceRefreshTarget(signal);
+          await this.ensureConnected(signal);
         } catch (e) {
+          if (signal?.aborted) throw e;
           console.error(`[CDP:${this.role}] Auto-recovery recycle error:`, e.message);
         }
       }
 
-      await new Promise(r => setTimeout(r, 200));
+      await abortableDelay(200, signal);
     }
 
     if (!composerReady) {
@@ -567,6 +692,7 @@ export class TabWorker {
     let forcedFreshForStaleComposer = false;
     const injectDeadline = Date.now() + 60000;
     while (Date.now() < injectDeadline && !injected) {
+      throwIfAborted();
       await this.dismissModals();
       // Re-assert window focus + focus emulation every attempt. A single setFocus at request start
       // is insufficient: if a prior Input command wedged the pipeline, re-asserting resets it
@@ -611,7 +737,7 @@ export class TabWorker {
               await this.sendRaw('Input.dispatchMouseEvent', { type: 'mouseReleased', x: ready.x, y: ready.y, button: 'left', clickCount: 1 }, 2000);
             } catch {}
           }
-          await new Promise(r => setTimeout(r, 100));
+          await abortableDelay(100, signal);
           if (ready.hasText) {
             // React/ProseMirror may restore draft state after direct DOM mutation.
             // Clear through the real keyboard path first, then verify the rendered
@@ -624,7 +750,7 @@ export class TabWorker {
               await this.sendRaw('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 }, 2000);
               await this.sendRaw('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 }, 2000);
             } catch {}
-            await new Promise(r => setTimeout(r, 150));
+            await abortableDelay(150, signal);
             let cleared = await this.evaluate(`() => {
               const ta = document.querySelector('#prompt-textarea, div[contenteditable="true"]');
               if (!ta) return false;
@@ -682,16 +808,17 @@ export class TabWorker {
               if (!injected) {
                 console.warn(`[CDP:${this.role}] Composer draft survived replacement; recycling tab.`);
                 try {
-                  await this.forceRefreshTarget();
-                  await this.ensureConnected();
+                  await this.forceRefreshTarget(signal);
+                  await this.ensureConnected(signal);
                 } catch (e) {
+                  if (signal?.aborted) throw e;
                   console.error(`[CDP:${this.role}] Composer recycle error:`, e.message);
                 }
-                await new Promise(r => setTimeout(r, 250));
+                await abortableDelay(250, signal);
               }
               continue;
             }
-            await new Promise(r => setTimeout(r, 250));
+            await abortableDelay(250, signal);
           }
           try {
             await this.sendRaw('Input.insertText', { text: prompt }, 3000);
@@ -736,7 +863,7 @@ export class TabWorker {
                 injected = normObserved === normPrompt || (normPrompt.length > 150 && normObserved.includes(normPrompt.slice(0, 80)));
               }
             } catch {}
-            if (injected) await new Promise(r => setTimeout(r, 200));
+            if (injected) await abortableDelay(200, signal);
           }
         }
       } catch (err) {
@@ -751,13 +878,14 @@ export class TabWorker {
           injectFailures = 0;
           console.warn(`[CDP:${this.role}] 2nd inject failure. Recycling tab to clear renderer/composer state (since failure #${reloaded})...`);
           try {
-            await this.forceRefreshTarget();
-            await this.ensureConnected();
+            await this.forceRefreshTarget(signal);
+            await this.ensureConnected(signal);
           } catch (e) {
+            if (signal?.aborted) throw e;
             console.error(`[CDP:${this.role}] Recovery recycle error:`, e.message);
           }
         }
-        await new Promise(r => setTimeout(r, 120));
+        await abortableDelay(120, signal);
       }
     }
 
@@ -768,6 +896,7 @@ export class TabWorker {
     // 3b. Verify the composer actually contains the prompt (fast: usually <150ms)
     const injectStart = Date.now();
     while (Date.now() - injectStart < 3000) {
+      throwIfAborted();
       try {
         const got = await this.evaluate(`(() => {
           const ta = document.querySelector('#prompt-textarea, div[contenteditable="true"]');
@@ -780,7 +909,7 @@ export class TabWorker {
           break;
         }
       } catch {}
-      await new Promise(r => setTimeout(r, 60));
+      await abortableDelay(60, signal);
     }
 
     if (!verified) {
@@ -839,6 +968,7 @@ export class TabWorker {
     const sendStart = Date.now();
     let clickedSend = false;
     while (Date.now() - sendStart < 5000) {
+      throwIfAborted();
       try {
         const res = await this.evaluate(`(() => {
           const bottom = document.querySelector('#thread-bottom-container') || document;
@@ -859,7 +989,7 @@ export class TabWorker {
           break;
         }
       } catch {}
-      await new Promise(r => setTimeout(r, 150));
+      await abortableDelay(150, signal);
     }
 
     // Fallback: If Send button wasn't clicked in time, dispatch Enter key via CDP
@@ -898,7 +1028,9 @@ export class TabWorker {
     const POLL_INTERVAL = 120;
 
     while (Date.now() - startTime < timeoutMs) {
-      await new Promise(r => setTimeout(r, POLL_INTERVAL));
+      throwIfAborted();
+        await abortableDelay(POLL_INTERVAL, signal);
+      throwIfAborted();
 
       const pollExpr = `(() => {
         const pageText = String(document.body?.innerText || '');
@@ -927,12 +1059,13 @@ export class TabWorker {
         status = await this.evaluate(pollExpr, 5000);
         consecutivePollErrors = 0;
       } catch (pollErr) {
+        throwIfAborted();
         consecutivePollErrors++;
         console.warn(`[CDP:${this.role}] Poll evaluate warning (${consecutivePollErrors}):`, pollErr.message);
         if (consecutivePollErrors >= 6) {
           throw pollErr;
         }
-        await new Promise(r => setTimeout(r, 250));
+        await abortableDelay(250, signal);
         continue;
       }
 
@@ -961,7 +1094,7 @@ export class TabWorker {
       if (status.openaiError) {
         console.warn(`[CDP:${this.role}] OpenAI web returned an error bubble. Cycling to a fresh chat.`);
         try {
-          await this.navigateFreshChat();
+          await this.navigateFreshChat(signal);
         } catch (e) {
           console.error(`[CDP:${this.role}] Error-recovery navigation failure:`, e.message);
         }
@@ -1001,7 +1134,7 @@ export class TabWorker {
         genRecovered = 1;
         console.warn(`[CDP:${this.role}] Response stalled ${Math.round(unchangedMs / 1000)}s with no text progress. Hard-recovering to fresh chat...`);
         try {
-          await this.navigateFreshChat();
+          await this.navigateFreshChat(signal);
         } catch (e) {
           console.error(`[CDP:${this.role}] Stall-recovery navigation error:`, e.message);
         }
@@ -1058,26 +1191,31 @@ export class ChatGPTBrowserBridge {
     return `http://${this.cdpHost}:${this.cdpPort}`;
   }
 
-  async isCdpAvailable() {
+  async isCdpAvailable(signal = null) {
     try {
-      const res = await fetch(`${this.cdpBaseUrl}/json/version`, { signal: AbortSignal.timeout(1500) });
+      const probeSignal = signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(1500)])
+        : AbortSignal.timeout(1500);
+      const res = await fetch(`${this.cdpBaseUrl}/json/version`, { signal: probeSignal });
       return res.ok;
     } catch {
+      if (signal?.aborted) throw new Error('Request aborted by caller');
       return false;
     }
   }
 
-  async ensureVirtualDisplay() {
+  async ensureVirtualDisplay(signal = null) {
+    if (signal?.aborted) throw new Error('Request aborted by caller');
     const display = process.env.VIRTUAL_DISPLAY || ':99';
     try {
       const test = spawn('xdpyinfo', [], {
         env: { ...process.env, DISPLAY: display },
         stdio: 'ignore'
       });
-      const ok = await new Promise((resolve) => {
+      const ok = await awaitWithSignal(new Promise((resolve) => {
         test.on('exit', code => resolve(code === 0));
         test.on('error', () => resolve(false));
-      });
+      }), signal);
       if (ok) return display;
     } catch {}
 
@@ -1089,23 +1227,27 @@ export class ChatGPTBrowserBridge {
         stdio: 'ignore'
       });
       xvfb.unref();
-      await new Promise(r => setTimeout(r, 1000));
+      await abortableDelay(1000, signal);
     } catch (e) {
       console.error('[CDP] Could not start Xvfb:', e.message);
     }
     return display;
   }
 
-  async ensureBrowserRunning() {
-    if (await this.isCdpAvailable()) return;
+  async ensureBrowserRunning(signal = null) {
+    if (signal?.aborted) throw new Error('Request aborted by caller');
+    if (await this.isCdpAvailable(signal)) return;
 
-    if (this.browserStartPromise) return this.browserStartPromise;
+    if (this.browserStartPromise) return awaitWithSignal(this.browserStartPromise, signal);
 
-    this.browserStartPromise = this._startBrowser();
+    const startup = this._startBrowser();
+    this.browserStartPromise = startup;
     try {
-      await this.browserStartPromise;
+      await awaitWithSignal(startup, signal);
     } finally {
-      this.browserStartPromise = null;
+      if (this.browserStartPromise === startup) {
+        this.browserStartPromise = null;
+      }
     }
   }
 
@@ -1155,29 +1297,30 @@ export class ChatGPTBrowserBridge {
 
     const start = Date.now();
     while (Date.now() - start < 90000) {
-      await new Promise(r => setTimeout(r, 500));
+      await abortableDelay(500);
         if (await this.isCdpAvailable()) {
           console.log(`[CDP] Chrome CDP is now online on port ${this.cdpPort}!`);
           // Port readiness can precede renderer readiness by several seconds.
           // Let Chrome finish renderer startup before TabWorker sends Runtime.enable.
-          await new Promise(r => setTimeout(r, 10_000));
+          await abortableDelay(10_000);
           return;
         }
     }
     throw new Error(`Chrome was launched but CDP port ${this.cdpPort} did not become ready within 90 seconds.`);
   }
 
-  async getTargets() {
-    await this.ensureBrowserRunning();
-    const res = await fetch(`${this.cdpBaseUrl}/json/list`);
+  async getTargets(signal = null) {
+    await this.ensureBrowserRunning(signal);
+    if (signal?.aborted) throw new Error('Request aborted by caller');
+    const res = await fetch(`${this.cdpBaseUrl}/json/list`, { signal });
     if (!res.ok) throw new Error(`Failed to fetch targets: ${res.statusText}`);
     return await res.json();
   }
 
-  async createNewTab(url = 'https://chatgpt.com') {
-    await this.ensureBrowserRunning();
+  async createNewTab(url = 'https://chatgpt.com', signal = null) {
+    await this.ensureBrowserRunning(signal);
     console.log(`[CDP] Creating new tab for ${url}...`);
-    const res = await fetch(`${this.cdpBaseUrl}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
+    const res = await fetch(`${this.cdpBaseUrl}/json/new?${encodeURIComponent(url)}`, { method: 'PUT', signal });
     if (!res.ok) throw new Error(`Failed to create tab: ${res.statusText}`);
     return await res.json();
   }
@@ -1199,8 +1342,8 @@ export class ChatGPTBrowserBridge {
     return r;
   }
 
-  async acquireTarget(role) {
-    const targets = await this.getTargets();
+  async acquireTarget(role, signal = null) {
+    const targets = await this.getTargets(signal);
     const chatGptPages = targets.filter(t => t.type === 'page' && (t.url?.includes('chatgpt.com') || t.url === 'about:blank'));
 
     // In Single-Tab Mode, all roles multiplex onto one single tab
@@ -1212,7 +1355,7 @@ export class ChatGPTBrowserBridge {
         return chosen;
       }
       console.log(`[CDP] [SingleTab] No active ChatGPT tab found. Creating the single master tab...`);
-      return await this.createNewTab('https://chatgpt.com');
+      return await this.createNewTab('https://chatgpt.com', signal);
     }
 
     // Multi-Tab Mode:
@@ -1233,18 +1376,20 @@ export class ChatGPTBrowserBridge {
 
     // 3. No unassigned tab found -> Create a new tab!
     console.log(`[CDP] No unassigned tab found for role '${role}'. Creating a new tab in Chrome...`);
-    const newTarget = await this.createNewTab('https://chatgpt.com');
+    const newTarget = await this.createNewTab('https://chatgpt.com', signal);
     console.log(`[CDP] Created new tab ${newTarget.id} for role '${role}'.`);
     return newTarget;
   }
 
-  async getWorker(role = 'coordinator') {
+  async getWorker(role = 'coordinator', signal = null) {
+    if (signal?.aborted) throw new Error('Request aborted by caller');
     if (this.singleTabMode) {
       if (this.masterWorker) {
         return this.masterWorker;
       }
       console.log(`[CDP] [SingleTab] Initializing unified Master TabWorker...`);
-      const target = await this.acquireTarget('master');
+      const target = await this.acquireTarget('master', signal);
+      if (signal?.aborted) throw new Error('Request aborted by caller');
       this.masterWorker = new TabWorker('master', this, target);
       this.workers.set('master', this.masterWorker);
 
@@ -1263,7 +1408,8 @@ export class ChatGPTBrowserBridge {
     }
 
     console.log(`[CDP] Initializing dedicated TabWorker for role '${normRole}'...`);
-    const target = await this.acquireTarget(normRole);
+    const target = await this.acquireTarget(normRole, signal);
+    if (signal?.aborted) throw new Error('Request aborted by caller');
     const worker = new TabWorker(normRole, this, target);
     this.workers.set(normRole, worker);
 
@@ -1275,7 +1421,7 @@ export class ChatGPTBrowserBridge {
     return worker;
   }
 
-  async ask(prompt, onChunk = null, timeoutMs = 180000, role = 'coordinator', priority = null) {
+  async ask(prompt, onChunk = null, timeoutMs = 180000, role = 'coordinator', priority = null, signal = null) {
     if (priority === null) {
       const norm = this.normalizeRole(role);
       if (norm === 'coordinator' || norm.includes('boss')) {
@@ -1286,8 +1432,10 @@ export class ChatGPTBrowserBridge {
         priority = 2; // P2: Worker / Code / QA / Content
       }
     }
-    const worker = await this.getWorker(role);
-    return await worker.ask(prompt, onChunk, timeoutMs, priority, role);
+    if (signal?.aborted) throw new Error('Request aborted by caller');
+    const worker = await this.getWorker(role, signal);
+    if (signal?.aborted) throw new Error('Request aborted by caller');
+    return await worker.ask(prompt, onChunk, timeoutMs, priority, role, signal);
   }
 
   async cleanupExtraTabs() {
@@ -1498,12 +1646,13 @@ export class MultiAccountChatGPTBridge {
     };
   }
 
-  async getAvailableAccounts(role = null) {
+  async getAvailableAccounts(role = null, signal = null) {
+    if (signal?.aborted) throw new Error('Request aborted by caller');
     const probes = await Promise.all(this.accounts.map(async acc => {
       if (Date.now() < acc.rateLimitedUntil) return null;
       const isUp = await Promise.race([
-        acc.bridge.isCdpAvailable(),
-        new Promise(resolve => setTimeout(() => resolve(false), 2000))
+        acc.bridge.isCdpAvailable(signal),
+        abortableDelay(2000, signal).then(() => false)
       ]);
       if (isUp) {
         if (role) {
@@ -1514,27 +1663,31 @@ export class MultiAccountChatGPTBridge {
           // will finish initialization instead of silently removing the lane and
           // routing into a known stale account.
           if (roleStatus && (!roleStatus.ready || !roleStatus.connected)) {
-            return { acc, isRunning: true };
+            return { acc, isRunning: true, admissionState: 'starting' };
           }
         }
-        return { acc, isRunning: true };
+        return { acc, isRunning: true, admissionState: 'healthy' };
       }
       // Keep the primary lane eligible even during a transient CDP probe miss;
       // ChatGPTBrowserBridge can reconnect/spawn its target. Treating it as
       // non-running here can exclude the healthy primary account whenever another
       // stale account happens to report CDP up.
-      if (acc.id === 1) return { acc, isRunning: true };
+      if (acc.id === 1) return { acc, isRunning: true, admissionState: 'starting' };
       return null;
     }));
+    if (signal?.aborted) throw new Error('Request aborted by caller');
     return probes.filter(Boolean);
   }
 
-  async pickAccount(priority = 2, role = null) {
+  async pickAccount(priority = 2, role = null, signal = null) {
+    const throwIfAborted = () => { if (signal?.aborted) throw new Error('Request aborted by caller'); };
     // Selection itself contains awaits (CDP probes). Reserve the chosen slot
     // before any further await so concurrent callers cannot select the same
     // account based on the same stale activeRequests value.
     for (;;) {
-      const candidates = await this.getAvailableAccounts(role);
+      throwIfAborted();
+      const candidates = await this.getAvailableAccounts(role, signal);
+      throwIfAborted();
 
       if (candidates.length === 0) {
         const rateLimited = this.accounts.filter(a => Date.now() < a.rateLimitedUntil);
@@ -1562,7 +1715,7 @@ export class MultiAccountChatGPTBridge {
       // No account has a free model slot. Backpressure instead of launching a
       // concurrent request that can trigger ChatGPT's burst protection.
       if (freePool.length === 0) {
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await abortableDelay(250, signal);
         continue;
       }
 
@@ -1574,11 +1727,16 @@ export class MultiAccountChatGPTBridge {
         if (primary) {
           primary.acc.reservedRequests++;
           const remainingWaitMs = Math.max(0, this.cooldownMs - (now - primary.acc.lastCompletedAt));
-          if (remainingWaitMs > 0) {
-            console.log(`[AccountPool] Control-plane pacing: waiting ${remainingWaitMs}ms on Account 1 for role '${role}'.`);
-            await new Promise(r => setTimeout(r, remainingWaitMs));
+          try {
+            if (remainingWaitMs > 0) {
+              console.log(`[AccountPool] Control-plane pacing: waiting ${remainingWaitMs}ms on Account 1 for role '${role}'.`);
+              await abortableDelay(remainingWaitMs, signal);
+            }
+            return primary.acc;
+          } catch (err) {
+            primary.acc.reservedRequests = Math.max(0, primary.acc.reservedRequests - 1);
+            throw err;
           }
-          return primary.acc;
         }
         // If the primary account is absent from the candidate pool because it
         // is rate-limited/unavailable, fail over to a genuinely healthy account.
@@ -1588,7 +1746,7 @@ export class MultiAccountChatGPTBridge {
           freePool[0].acc.reservedRequests++;
           return freePool[0].acc;
         }
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await abortableDelay(250, signal);
         continue;
       }
 
@@ -1597,6 +1755,9 @@ export class MultiAccountChatGPTBridge {
 
       if (cooledDown.length > 0) {
         cooledDown.sort((a, b) => {
+          const stateA = a.admissionState === 'healthy' ? 0 : 1;
+          const stateB = b.admissionState === 'healthy' ? 0 : 1;
+          if (stateA !== stateB) return stateA - stateB;
           const loadA = a.acc.activeRequests + a.acc.reservedRequests;
           const loadB = b.acc.activeRequests + b.acc.reservedRequests;
           if (loadA !== loadB) return loadA - loadB;
@@ -1618,23 +1779,37 @@ export class MultiAccountChatGPTBridge {
       const chosen = freePool[0].acc;
       chosen.reservedRequests++;
       const remainingWaitMs = Math.max(0, this.cooldownMs - (now - chosen.lastCompletedAt));
-      if (remainingWaitMs > 0) {
-        console.log(`[AccountPool] ⏳ Pacing Cooldown: Đang chờ ${remainingWaitMs}ms trên ${chosen.name} để chống burst rate limit...`);
-        await new Promise(r => setTimeout(r, remainingWaitMs));
+      try {
+        if (remainingWaitMs > 0) {
+          console.log(`[AccountPool] ⏳ Pacing Cooldown: Đang chờ ${remainingWaitMs}ms trên ${chosen.name} để chống burst rate limit...`);
+          await abortableDelay(remainingWaitMs, signal);
+        }
+        return chosen;
+      } catch (err) {
+        chosen.reservedRequests = Math.max(0, chosen.reservedRequests - 1);
+        throw err;
       }
-      return chosen;
     }
   }
 
-  async ask(prompt, onChunk = null, timeoutMs = 180000, role = 'coordinator', priority = null) {
+  async ask(prompt, onChunk = null, timeoutMs = 180000, role = 'coordinator', priority = null, signal = null) {
     const maxRetries = Math.max(2, this.accounts.length);
+    const deadlineController = new AbortController();
+    const deadlineTimer = setTimeout(() => deadlineController.abort(), Math.max(1, timeoutMs));
+    const effectiveSignal = signal
+      ? AbortSignal.any([signal, deadlineController.signal])
+      : deadlineController.signal;
     let lastError = null;
 
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
       let chosenAcc;
       try {
-        chosenAcc = await this.pickAccount(priority, role);
+        chosenAcc = await this.pickAccount(priority, role, effectiveSignal);
       } catch (err) {
+        if (deadlineController.signal.aborted && !signal?.aborted) {
+          throw new Error(`Timeout waiting for ChatGPT response after ${timeoutMs}ms`);
+        }
         throw err;
       }
 
@@ -1644,13 +1819,36 @@ export class MultiAccountChatGPTBridge {
       chosenAcc.totalRequests++;
 
       try {
-        const result = await chosenAcc.bridge.ask(prompt, onChunk, timeoutMs, role, priority);
+        if (signal?.aborted) throw new Error('Request aborted by caller');
+        if (deadlineController.signal.aborted) throw new Error(`Timeout waiting for ChatGPT response after ${timeoutMs}ms`);
+        const result = await chosenAcc.bridge.ask(prompt, onChunk, timeoutMs, role, priority, effectiveSignal);
         chosenAcc.lastCompletedAt = Date.now();
         chosenAcc.failedAttempts = 0;
         chosenAcc.rateLimitStreak = 0;
         return result;
       } catch (err) {
         lastError = err;
+        if (signal?.aborted) {
+          // An aborted request must still advance pacing/LRU state. Otherwise
+          // a specialist retry sees Account 1 as the oldest/free lane and keeps
+          // selecting the same account after every client disconnect.
+          chosenAcc.lastCompletedAt = Date.now();
+          chosenAcc.failedAttempts++;
+          throw new Error('Request aborted by caller');
+        }
+        if (deadlineController.signal.aborted) {
+          chosenAcc.lastCompletedAt = Date.now();
+          chosenAcc.failedAttempts++;
+          throw new Error(`Timeout waiting for ChatGPT response after ${timeoutMs}ms`);
+        }
+        if (err.message === 'Request aborted by caller') {
+          // Preserve the original provider/bridge abort only when neither the
+          // caller nor this bridge's deadline caused it. This keeps the HTTP
+          // timeout contract distinct from an actual client disconnect.
+          chosenAcc.lastCompletedAt = Date.now();
+          chosenAcc.failedAttempts++;
+          throw err;
+        }
         err.accountId = chosenAcc.id;
         err.accountName = chosenAcc.name;
         const errMsg = err.message || '';
@@ -1659,6 +1857,15 @@ export class MultiAccountChatGPTBridge {
         const isTransient = /Timeout waiting for ChatGPT response|STALL_RECOVERY|OpenAI web error bubble|CDP command .* timed out|WebSocket not connected|Composer text not confirmed after injection|Could not inject prompt into composer|fetch failed/i.test(errMsg)
           || err?.name === 'ErrorEvent'
           || err?.constructor?.name === 'ErrorEvent';
+
+        // `timeoutMs` is the request's provider deadline. Do not turn an
+        // already-expired provider attempt into an unbounded account failover
+        // loop; the caller must receive the timeout contract promptly.
+        if (/Timeout waiting for ChatGPT response/i.test(errMsg)) {
+          chosenAcc.lastCompletedAt = Date.now();
+          chosenAcc.failedAttempts++;
+          throw err;
+        }
 
         if (isRateLimit) {
           chosenAcc.rateLimitStreak = Math.min(8, (chosenAcc.rateLimitStreak || 0) + 1);
@@ -1713,8 +1920,11 @@ export class MultiAccountChatGPTBridge {
       } finally {
         chosenAcc.activeRequests = Math.max(0, chosenAcc.activeRequests - 1);
       }
-    }
+      }
 
-    throw lastError || new Error(`[AccountPool] Failed to execute request across all available accounts.`);
+      throw lastError || new Error(`[AccountPool] Failed to execute request across all available accounts.`);
+    } finally {
+      clearTimeout(deadlineTimer);
+    }
   }
 }

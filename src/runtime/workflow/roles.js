@@ -11,9 +11,17 @@ export const TaskCapability = Object.freeze({
   DOCUMENTATION_WRITE: 'documentation.write'
 });
 
+import { getAgentContract } from './agent-contracts.js';
+
 const ROLE_CONTRACTS = Object.freeze({
   productowner: Object.freeze({
     role: 'productowner',
+    capability: TaskCapability.PRODUCT_REQUIREMENTS,
+    executor: 'OpenClaw',
+    permissions: Object.freeze(['workspace.read', 'artifact.create'])
+  }),
+  'product-owner': Object.freeze({
+    role: 'product-owner',
     capability: TaskCapability.PRODUCT_REQUIREMENTS,
     executor: 'OpenClaw',
     permissions: Object.freeze(['workspace.read', 'artifact.create'])
@@ -78,7 +86,8 @@ export function getRoleContract(role) {
   const key = String(role || '').toLowerCase();
   const contract = ROLE_CONTRACTS[key];
   if (!contract) throw new Error(`unknown workflow role: ${role}`);
-  return contract;
+  const canonicalRole = key === 'productowner' ? 'product-owner' : key;
+  return getAgentContract(canonicalRole);
 }
 
 export function validateRoleContract(role, { capability, executor } = {}) {

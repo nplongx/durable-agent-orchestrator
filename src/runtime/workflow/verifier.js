@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { canonicalJson } from './plan.js';
+import { parseReviewerArtifact } from './artifact-normalizer.js';
 
 function hash(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -53,13 +54,8 @@ export function verifyWorkflowCompletion({ plan, tasks = [], results = [], repor
       const reviewerResults = results.filter(item => item.task_id === task.task_id).reverse();
       let parsedReview = null;
       for (const candidate of reviewerResults) {
-        try {
-          const parsed = JSON.parse(String(candidate.content || '').trim());
-          if (parsed?.review && typeof parsed.review === 'object') {
-            parsedReview = parsed;
-            break;
-          }
-        } catch (_) {}
+        parsedReview = parseReviewerArtifact(candidate.content);
+        if (parsedReview) break;
       }
       try {
         if (!parsedReview) throw new Error('review artifact is not valid JSON');
@@ -67,7 +63,10 @@ export function verifyWorkflowCompletion({ plan, tasks = [], results = [], repor
         if (!review?.review || typeof review.review !== 'object') errors.push('review artifact missing');
         if (review.review.requirementsSatisfied !== true) errors.push('review requirementsSatisfied is not true');
         if (review.review.architectureConformant !== true) errors.push('review architectureConformant is not true');
+        if (!Array.isArray(review.review.implementationIssues) || !review.review.implementationIssues.every(item => typeof item === 'string')) errors.push('review implementationIssues must be an array of strings');
+        if (!Array.isArray(review.review.evidenceIssues) || !review.review.evidenceIssues.every(item => typeof item === 'string')) errors.push('review evidenceIssues must be an array of strings');
         if (!Array.isArray(review.review.blockingIssues) || review.review.blockingIssues.length) errors.push('review contains blocking issues');
+        if (!Array.isArray(review.review.blockingIssues) || !review.review.blockingIssues.every(item => typeof item === 'string')) errors.push('review blockingIssues must be an array of strings');
       } catch (_) {
         errors.push('review artifact is not valid JSON');
       }

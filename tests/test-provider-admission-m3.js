@@ -22,7 +22,22 @@ assert.ok(admission.status(lease.providerId).in_flight >= 1);
 admission.release(lease.leaseId);
 assert.equal(admission.status(lease.providerId).state, ProviderStates.READY);
 
+const contentionLeases = providers.map((provider, index) => admission.admit({
+  providerIds: providers,
+  jobId: job.job_id,
+  taskId: `contention-${index}`,
+  role: 'engineer'
+}));
+assert.throws(
+  () => admission.admit({ providerIds: providers, jobId: job.job_id, role: 'qa' }),
+  error => error.code === 'PROVIDER_UNAVAILABLE' && error.admissionReason === 'capacity'
+);
+assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE job_id=? AND type='provider.capacity_wait'").get(job.job_id).n, 1);
+assert.equal(admission.getMetrics().capacityWaits, 1);
+for (const lease of contentionLeases) admission.release(lease.leaseId);
+
 for (const provider of providers) admission.markRateLimited(provider, 'test-hard-block', 60_000);
+assert.equal(admission.getMetrics().rateLimits, providers.length);
 assert.throws(
   () => admission.admit({ providerIds: providers, jobId: job.job_id, role: 'architect' }),
   error => error.code === 'PROVIDER_UNAVAILABLE' && error.retryAfterMs > 0

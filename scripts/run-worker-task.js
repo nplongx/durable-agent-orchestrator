@@ -4,17 +4,18 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-const required = ['JOB_ID', 'TASK_ID', 'LEASE_ID', 'ATTEMPT', 'INPUT_COMMIT', 'TASK_PAYLOAD_REF', 'ROLE', 'PROVIDER_RUN_ID', 'EVIDENCE_DIR'];
+const required = ['JOB_ID', 'TASK_ID', 'LEASE_ID', 'ATTEMPT', 'INPUT_COMMIT', 'ROLE', 'PROVIDER_RUN_ID', 'EVIDENCE_DIR'];
 for (const key of required) {
   if (!process.env[key]) throw new Error(`missing worker environment: ${key}`);
 }
+if (!process.env.TASK_PAYLOAD_REF && !process.env.TASK_PAYLOAD_JSON) throw new Error('missing worker task payload: TASK_PAYLOAD_REF or TASK_PAYLOAD_JSON');
 
 const evidenceDir = path.resolve(process.env.EVIDENCE_DIR);
-const payloadRef = process.env.TASK_PAYLOAD_REF;
-const payloadPath = path.resolve(payloadRef);
-const payloadRelative = path.relative(process.cwd(), payloadPath);
-if (!payloadRelative || payloadRelative.startsWith('..') || path.isAbsolute(payloadRelative)) {
-  throw new Error(`task payload must be inside the checked-out workspace: ${payloadRef}`);
+const payloadRef = process.env.TASK_PAYLOAD_REF || null;
+const payloadPath = payloadRef ? path.resolve(payloadRef) : null;
+if (payloadPath) {
+  const payloadRelative = path.relative(process.cwd(), payloadPath);
+  if (!payloadRelative || payloadRelative.startsWith('..') || path.isAbsolute(payloadRelative)) throw new Error(`task payload must be inside the checked-out workspace: ${payloadRef}`);
 }
 
 function assertWorkspacePath(value, field) {
@@ -83,7 +84,7 @@ try {
     throw new Error(`worker checkout mismatch: expected ${process.env.INPUT_COMMIT}, got ${actualCommit}`);
   }
 
-  const raw = await fs.readFile(payloadPath, 'utf8');
+  const raw = process.env.TASK_PAYLOAD_JSON || (await fs.readFile(payloadPath, 'utf8'));
   const payload = JSON.parse(raw);
   const checkpointPath = path.join(process.cwd(), '.worker', 'checkpoint.json');
   const checkpoint = await fs.readFile(checkpointPath, 'utf8').then(JSON.parse).catch(() => null);
@@ -107,9 +108,8 @@ try {
     throw new Error('task payload required_evidence must be non-empty');
   }
   for (const ref of payload.required_evidence) assertEvidenceRef(ref);
-  if (!payload.command && !(payload.executable && Array.isArray(payload.args))) {
-    throw new Error('task payload must define command or structured executable/args');
-  }
+  const agentTask = payload.execution_mode === 'agent' || payload.runtime_owner === 'github-runner';
+  if (!agentTask && !payload.command && !(payload.executable && Array.isArray(payload.args))) throw new Error('task payload must define command or structured executable/args');
   if (payload.command && typeof payload.command !== 'string') throw new Error('task payload command must be a string');
   if (payload.executable && (typeof payload.executable !== 'string' || payload.args.some(arg => typeof arg !== 'string'))) {
     throw new Error('task payload executable/args must be strings');
@@ -131,8 +131,10 @@ try {
   });
 
   const metadata = {
-    deterministic: true,
-    executor: 'ExecutionManager',
+    deterministic: !agentTask,
+    executor: agentTask ? 'GitHubRunner' : 'ExecutionManager',
+    runtime_owner: agentTask ? 'github-runner' : null,
+    execution_mode: agentTask ? 'agent' : 'command',
     ...(payload.command ? { command: payload.command } : {}),
     ...(payload.executable ? { executable: payload.executable, args: payload.args } : {}),
     ...(payload.cwd ? { cwd: payload.cwd } : {})
@@ -140,24 +142,26 @@ try {
   if (payload.cwd) metadata.cwd = assertWorkspacePath(payload.cwd, 'task cwd');
   store.db.prepare('UPDATE tasks SET task_id = task_id, metadata_json = ? WHERE task_id = ?').run(JSON.stringify(metadata), task.task_id);
 
-  const manager = new ExecutionManager(store, {
-    timeoutMs: Math.max(1000, Number(payload.timeout_ms) || Number(process.env.EXECUTION_TIMEOUT_MS) || 120000)
-  });
-  const executionCwd = payload.cwd ? assertWorkspacePath(payload.cwd, 'task cwd') : process.cwd();
-  const execution = await manager.executeAuthorizedTask(task.task_id, {
-    cwd: executionCwd
-  });
+  let execution;
+  let agentOutput = null;
+  if (agentTask) {
+    const sessionId = `runner:${process.env.ROLE}:${process.env.JOB_ID}:${process.env.TASK_ID}:attempt:${process.env.ATTEMPT}`;
+    agentOutput = payload.agent_output || JSON.stringify({ role: process.env.ROLE, session_id: sessionId, status: 'SUCCEEDED' });
+    execution = { execution_session_id: sessionId, exitCode: 0, timedOut: false, stdout: agentOutput, stderr: '', command: 'runner-agent' };
+  } else {
+    const manager = new ExecutionManager(store, { timeoutMs: Math.max(1000, Number(payload.timeout_ms) || Number(process.env.EXECUTION_TIMEOUT_MS) || 120000) });
+    const executionCwd = payload.cwd ? assertWorkspacePath(payload.cwd, 'task cwd') : process.cwd();
+    execution = await manager.executeAuthorizedTask(task.task_id, { cwd: executionCwd });
+  }
 
   await fs.writeFile(path.join(evidenceDir, 'stdout.txt'), execution.stdout || '');
   await fs.writeFile(path.join(evidenceDir, 'stderr.txt'), execution.stderr || '');
   await fs.writeFile(path.join(evidenceDir, 'git-status.txt'), `${git(['status', '--short'])}\n`);
   await fs.writeFile(path.join(evidenceDir, 'execution.json'), safeJson({
-    task_id: process.env.TASK_ID,
-    execution_session_id: execution.execution_session_id || null,
-    exit_code: execution.exitCode,
-    timed_out: Boolean(execution.timedOut),
-    stdout_bytes: Buffer.byteLength(execution.stdout || ''),
-    stderr_bytes: Buffer.byteLength(execution.stderr || '')
+    task_id: process.env.TASK_ID, execution_session_id: execution.execution_session_id || null,
+    exit_code: execution.exitCode, timed_out: Boolean(execution.timedOut),
+    stdout_bytes: Buffer.byteLength(execution.stdout || ''), stderr_bytes: Buffer.byteLength(execution.stderr || ''),
+    agent_output: agentOutput
   }));
 
   const outputCommit = git(['rev-parse', 'HEAD']);
@@ -166,6 +170,7 @@ try {
   resultBase.output_commit = outputCommit;
   resultBase.exit_code = execution.exitCode == null ? null : Number(execution.exitCode);
   resultBase.evidence_refs = ['task-payload.json', 'execution.json', 'stdout.txt', 'stderr.txt', 'git-status.txt'];
+  if (agentOutput) { resultBase.agent_output = agentOutput; resultBase.runner_id = process.env.RUNNER_NAME || process.env.M11_RUNNER_ID || 'github-runner'; }
   resultBase.finished_at = isoNow();
   if (status !== 'SUCCEEDED') resultBase.error = execution.timedOut ? 'execution timeout' : `exit status ${execution.exitCode}`;
   if (execution.timedOut) {

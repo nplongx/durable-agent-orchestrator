@@ -53,7 +53,7 @@ export function validateExecutionRequest(request) {
   object(request, 'execution request');
   exactKeys(request, [
     'schema_version', 'job_id', 'task_id', 'lease_id', 'attempt',
-    'role', 'input_commit', 'task_payload_ref', 'workspace', 'required_evidence'
+    'role', 'input_commit', 'task_payload_ref', 'workspace', 'required_evidence', 'task_payload_inline'
   ], 'execution request');
 
   if (request.schema_version !== EXECUTION_CONTRACT_VERSION) fail(`schema_version must be ${EXECUTION_CONTRACT_VERSION}`);
@@ -65,6 +65,7 @@ export function validateExecutionRequest(request) {
   gitCommit(request.input_commit, 'input_commit');
   requiredString(request.task_payload_ref, 'task_payload_ref');
   optionalString(request.workspace, 'workspace');
+  if (request.task_payload_inline !== undefined && (request.task_payload_inline === null || typeof request.task_payload_inline !== 'object' || Array.isArray(request.task_payload_inline))) fail('task_payload_inline must be an object');
 
   if (!Array.isArray(request.required_evidence) || request.required_evidence.length === 0) {
     fail('required_evidence must be a non-empty array');
@@ -84,7 +85,7 @@ export function validateExecutionResult(result) {
     'schema_version', 'job_id', 'task_id', 'lease_id', 'attempt', 'status',
     'input_commit', 'output_commit', 'exit_code', 'provider_run_id',
     'evidence_artifact', 'evidence_refs', 'started_at', 'finished_at', 'error',
-    'checkpoint_commit', 'checkpoint_ref'
+    'checkpoint_commit', 'checkpoint_ref', 'agent_output', 'runner_id'
   ], 'execution result');
 
   if (result.schema_version !== EXECUTION_CONTRACT_VERSION) fail(`schema_version must be ${EXECUTION_CONTRACT_VERSION}`);
@@ -109,6 +110,8 @@ export function validateExecutionResult(result) {
   optionalString(result.error, 'error');
   optionalString(result.checkpoint_commit, 'checkpoint_commit');
   optionalString(result.checkpoint_ref, 'checkpoint_ref');
+  optionalString(result.agent_output, 'agent_output');
+  optionalString(result.runner_id, 'runner_id');
   if (result.checkpoint_commit && !/^[0-9a-f]{7,64}$/i.test(result.checkpoint_commit)) fail('checkpoint_commit must be a Git commit SHA');
 
   if (result.status === 'SUCCEEDED') {

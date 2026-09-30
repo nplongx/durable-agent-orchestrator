@@ -21,7 +21,7 @@ export class LangGraphControlLoop {
     const reconciled = [];
     for (const run of active) {
       const status = await this.provider.getStatus(run.provider_run_id);
-      if (status.status !== 'COMPLETED') continue;
+      if (status.state !== 'COMPLETED' && String(status.status || '').toUpperCase() !== 'COMPLETED') continue;
       let result;
       try {
         result = await this.provider.collectResult(run.provider_run_id);

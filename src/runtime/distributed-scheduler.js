@@ -44,7 +44,7 @@ export class DistributedScheduler {
     } catch { return fallback; }
   }
 
-  async dispatchTask(task, { inputCommit, role = task.role || 'executor', requiredEvidence = ['task-payload.json', 'execution.json', 'stdout.txt', 'stderr.txt', 'git-status.txt'] } = {}) {
+  async dispatchTask(task, { inputCommit, role = task.role || 'executor', requiredEvidence = ['task-payload.json', 'execution.json', 'stdout.txt', 'stderr.txt', 'git-status.txt'], taskPayloadInline = null } = {}) {
     const existing = this.store.db.__p6Fake
       ? null
       : this.store.db.prepare(`SELECT * FROM task_leases WHERE task_id=? AND state='ACTIVE' LIMIT 1`).get(task.task_id);
@@ -69,7 +69,8 @@ export class DistributedScheduler {
       input_commit: this._resumeCommit(task, inputCommit),
       task_payload_ref: this._taskPayloadRef(task),
       workspace: 'ephemeral',
-      required_evidence: requiredEvidence
+      required_evidence: requiredEvidence,
+      ...(taskPayloadInline ? { task_payload_inline: taskPayloadInline } : {})
     });
     const dispatchKey = crypto.createHash('sha256').update(`${request.job_id}|${request.task_id}|${request.lease_id}|${request.attempt}|${request.input_commit}`).digest('hex');
     if (!this.store.db.__p6Fake) {
@@ -88,13 +89,18 @@ export class DistributedScheduler {
     try {
       const run = await this.provider.dispatch({ ...request, dispatch_key: dispatchKey });
       if (!this.store.db.__p6Fake) {
-        this.store.db.prepare('UPDATE provider_dispatch_intents SET state=?, provider_run_id=?, updated_at=? WHERE dispatch_key=?')
-          .run('DISPATCHED', run.provider_run_id, new Date().toISOString(), dispatchKey);
+        if (run?.provider_run_id) {
+          this.store.db.prepare('UPDATE provider_dispatch_intents SET state=?, provider_run_id=?, updated_at=? WHERE dispatch_key=?')
+            .run('DISPATCHED', run.provider_run_id, new Date().toISOString(), dispatchKey);
+        } else {
+          this.store.db.prepare('UPDATE provider_dispatch_intents SET state=?, updated_at=? WHERE dispatch_key=?')
+            .run('DISPATCHING', new Date().toISOString(), dispatchKey);
+        }
       }
       this.store.db.prepare(`UPDATE task_leases SET last_error=NULL WHERE lease_id=?`).run(lease.lease_id);
-      this.store.recordEvent(task.job_id, 'task.provider.dispatched', {
+      this.store.recordEvent(task.job_id, run?.provider_run_id ? 'task.provider.dispatched' : 'task.provider.dispatch_pending', {
         taskId: task.task_id, leaseId: lease.lease_id, attempt: lease.attempt,
-        providerRunId: run.provider_run_id
+        providerRunId: run?.provider_run_id || null, dispatchKey
       }, lease.lease_id);
       return { task, lease, request, run };
     } catch (error) {

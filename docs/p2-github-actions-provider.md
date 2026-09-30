@@ -11,7 +11,7 @@ provider.collectResult(providerRunId)
 provider.cancel(providerRunId)
 ```
 
-`dispatch()` validates the P0 request, sends `workflow_dispatch` with `job_id`, `task_id`, `lease_id`, `attempt`, and `input_commit`, then persists the returned `workflow_run_id`.
+`dispatch()` validates the P0 request, sends `workflow_dispatch` with `job_id`, `task_id`, `lease_id`, `attempt`, and `input_commit`, then persists the `workflow_run_id`. GitHub normally returns HTTP `204` for `workflow_dispatch`, so the provider reconciles the dispatch intent by polling the workflow run list using the unique `dispatch_key`. If the run has been accepted but is not yet visible, the durable intent remains `DISPATCHING` and is reconciled by the control loop rather than being treated as a failed dispatch.
 
 GitHub's workflow-dispatch REST endpoint requires Actions repository write permission for a fine-grained token or GitHub App installation token. Read-only status/artifact endpoints require Actions read permission. citeturn0search0turn0search1
 

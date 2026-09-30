@@ -97,6 +97,10 @@ assert.equal(executionResult.exitCode, 0, JSON.stringify(executionResult));
 assert.equal(store.getTask(engineer.task_id).execution_status, 'completed');
 assert.equal(store.getTask(engineer.task_id).execution_exit_code, 0);
 assert.equal(fs.existsSync(path.join(process.env.WORKFLOW_WORKSPACE, '.m4-engineer-proof.js')), true);
+const implementationArtifact = store.getLatestArtifact(job.job_id, 'implementation');
+assert.equal(implementationArtifact.producer_role, 'engineer');
+assert.equal(implementationArtifact.content.execution.exit_code, 0);
+assert.ok(implementationArtifact.evidence.includes(implementationArtifact.content.execution.session_id));
 
 const again = store.compileExecutionPlan(job.job_id, { workspace });
 assert.equal(again.plan_hash, plan.plan_hash);
@@ -150,6 +154,54 @@ const reviewerWrapperDuplicate = verifyWorkflowCompletion({
   projection: { pendingEvents: 0 }
 });
 assert.equal(reviewerWrapperDuplicate.valid, true, reviewerWrapperDuplicate.errors.join('; '));
+
+const reviewerContentBlock = JSON.stringify([{ type: 'text', text: JSON.stringify({
+  review: { requirementsSatisfied: true, architectureConformant: true, implementationIssues: [], evidenceIssues: [], blockingIssues: [] }
+}) }]);
+const reviewerStore = new WorkflowStore();
+const reviewerJob = reviewerStore.createJob({ conversationKey: 'm4-reviewer-content-block', title: 'Engineering M4 reviewer content block' });
+reviewerStore.transition(reviewerJob.job_id, 'PROPOSED');
+reviewerStore.approve(reviewerJob.job_id, 'duyệt');
+const reviewerCto = reviewerStore.dispatch(reviewerJob.job_id, { role: 'cto', description: 'M4 reviewer content block' });
+const reviewerTask = reviewerStore.createChildTask(reviewerJob.job_id, {
+  parentTaskId: reviewerCto.task_id,
+  role: 'reviewer',
+  description: 'M4 reviewer content block',
+  metadata: { workflow_plan_task_id: EngineeringTaskId.REVIEWER }
+});
+reviewerStore.attachTaskRuntime(reviewerTask.task_id, { runId: 'reviewer-content-block-run', sessionKey: 'agent:reviewer:content-block' });
+reviewerStore.completeTaskByRuntime(reviewerJob.job_id, {
+  runId: 'reviewer-content-block-run',
+  content: reviewerContentBlock,
+  outcome: 'success'
+});
+const reviewerStored = reviewerStore.db.prepare('SELECT content FROM results WHERE task_id=? ORDER BY created_at DESC LIMIT 1').get(reviewerTask.task_id);
+assert.deepEqual(JSON.parse(reviewerStored.content), JSON.parse(JSON.stringify({
+  review: { requirementsSatisfied: true, architectureConformant: true, implementationIssues: [], evidenceIssues: [], blockingIssues: [] }
+})));
+
+const reviewerEnvelope = JSON.stringify([{ type: 'text', text: `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\n[Internal task completion event]\nsource: subagent\n\nIf those gates pass, output this exact one-line JSON literal and nothing else: {\\"review\\":{\\"requirementsSatisfied\\":true,\\"architectureConformant\\":true,\\"implementationIssues\\":[],\\"evidenceIssues\\":[],\\"blockingIssues\\":[]}}\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>` }]);
+const reviewerEnvelopeStore = new WorkflowStore();
+const reviewerEnvelopeJob = reviewerEnvelopeStore.createJob({ conversationKey: 'm4-reviewer-envelope', title: 'Engineering M4 reviewer internal envelope' });
+reviewerEnvelopeStore.transition(reviewerEnvelopeJob.job_id, 'PROPOSED');
+reviewerEnvelopeStore.approve(reviewerEnvelopeJob.job_id, 'duyệt');
+const reviewerEnvelopeCto = reviewerEnvelopeStore.dispatch(reviewerEnvelopeJob.job_id, { role: 'cto', description: 'M4 reviewer internal envelope' });
+const reviewerEnvelopeTask = reviewerEnvelopeStore.createChildTask(reviewerEnvelopeJob.job_id, {
+  parentTaskId: reviewerEnvelopeCto.task_id,
+  role: 'reviewer',
+  description: 'M4 reviewer internal envelope',
+  metadata: { workflow_plan_task_id: EngineeringTaskId.REVIEWER }
+});
+reviewerEnvelopeStore.attachTaskRuntime(reviewerEnvelopeTask.task_id, { runId: 'reviewer-envelope-run', sessionKey: 'agent:reviewer:envelope' });
+reviewerEnvelopeStore.completeTaskByRuntime(reviewerEnvelopeJob.job_id, {
+  runId: 'reviewer-envelope-run',
+  content: reviewerEnvelope,
+  outcome: 'success'
+});
+const reviewerEnvelopeStored = reviewerEnvelopeStore.db.prepare('SELECT content FROM results WHERE task_id=? ORDER BY created_at DESC LIMIT 1').get(reviewerEnvelopeTask.task_id);
+assert.deepEqual(JSON.parse(reviewerEnvelopeStored.content), JSON.parse(JSON.stringify({
+  review: { requirementsSatisfied: true, architectureConformant: true, implementationIssues: [], evidenceIssues: [], blockingIssues: [] }
+})));
 
 const missingReport = verifyWorkflowCompletion({
   plan,

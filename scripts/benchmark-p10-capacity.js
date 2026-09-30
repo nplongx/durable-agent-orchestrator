@@ -17,7 +17,7 @@ const percentile = (values, p) => {
 function makeHarness() {
   const leases = new Map();
   const store = {
-    db: { prepare(sql) {
+    db: { __p6Fake: true, prepare(sql) {
       if (sql.includes("state='ACTIVE'")) return { get: () => ({ n: [...leases.values()].filter(x => x.state === 'ACTIVE').length }) };
       if (sql.includes('UPDATE task_leases')) return { run: () => ({ changes: 1 }) };
       throw new Error(`unexpected benchmark SQL: ${sql}`);

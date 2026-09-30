@@ -3,7 +3,7 @@ import { DistributedScheduler } from '../src/runtime/distributed-scheduler.js';
 
 const calls = [];
 const store = {
-  db: { prepare(sql) {
+  db: { __p6Fake: true, prepare(sql) {
     if (sql.includes("state='ACTIVE'")) return { get: () => ({ n: 0 }) };
     if (sql.includes('UPDATE task_leases')) return { run: () => ({ changes: 1 }) };
     throw new Error(`unexpected query: ${sql}`);

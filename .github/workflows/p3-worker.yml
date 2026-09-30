@@ -21,6 +21,9 @@ on:
         default: executor
       dispatch_key:
         required: false
+      task_payload_json:
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -36,6 +39,7 @@ jobs:
       ATTEMPT: ${{ inputs.attempt }}
       INPUT_COMMIT: ${{ inputs.input_commit }}
       TASK_PAYLOAD_REF: ${{ inputs.task_payload_ref }}
+      TASK_PAYLOAD_JSON: ${{ inputs.task_payload_json }}
       ROLE: ${{ inputs.role }}
       PROVIDER_RUN_ID: ${{ github.run_id }}
       EVIDENCE_DIR: .p3-worker
@@ -57,7 +61,7 @@ jobs:
           test "$ATTEMPT" -ge 1
           test "$TASK_PAYLOAD_REF" != ""
           test "$ROLE" != ""
-          test -f "$TASK_PAYLOAD_REF"
+          if [ -n "$TASK_PAYLOAD_JSON" ]; then printf '%s' "$TASK_PAYLOAD_JSON" | node -e "JSON.parse(require('fs').readFileSync(0,'utf8'));"; else test -f "$TASK_PAYLOAD_REF"; fi
 
       - name: Validate runtime dependencies
         run: |

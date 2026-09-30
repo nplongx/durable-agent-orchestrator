@@ -23,6 +23,7 @@ export class ProviderAdmissionController {
     this.store = store;
     this.hardBlockMs = hardBlockMs;
     this.leaseMs = leaseMs;
+    this.metrics = { capacityWaits: 0, cooldownWaits: 0, rateLimits: 0 };
     this.ensureSchema();
   }
 
@@ -156,6 +157,8 @@ export class ProviderAdmissionController {
     return this.store.db.prepare('SELECT * FROM provider_admission ORDER BY provider_id').all().map(r => this._normalize(r));
   }
 
+  getMetrics() { return { ...this.metrics }; }
+
   markRateLimited(providerId, reason = 'rate_limit_hard_block', cooldownMs = this.hardBlockMs) {
     const id = String(providerId);
     this.syncProviders([id]);
@@ -165,6 +168,7 @@ export class ProviderAdmissionController {
       consecutive_rate_limits=consecutive_rate_limits+1, last_error_at=?, updated_at=? WHERE provider_id=?`)
       .run(until, until, ts, ts, id);
     this.store.recordEventForSystem?.('provider.rate_limited', { providerId: id, reason, cooldownUntil: until });
+    this.metrics.rateLimits++;
     return this.status(id);
   }
 
@@ -208,11 +212,14 @@ export class ProviderAdmissionController {
       const probe = accountRows.find(r => r.state === ProviderStates.PROBE && r.in_flight === 0);
       const chosen = ready || probe;
       if (!chosen) {
+        const inUse = accountRows.filter(r => r.state === ProviderStates.IN_USE || r.in_flight > 0);
         const earliest = accountRows.filter(r => r.cooldownRemainingMs > 0).sort((a, b) => a.cooldownRemainingMs - b.cooldownRemainingMs)[0];
         const waitMs = earliest?.cooldownRemainingMs || 0;
-        const err = new Error(`PROVIDER_UNAVAILABLE: all admitted providers are cooling down; retry after ${Math.ceil(waitMs / 1000)}s`);
+        const reason = inUse.length > 0 && inUse.length === accountRows.length ? 'capacity contention' : 'all admitted providers are cooling down';
+        const err = new Error(`PROVIDER_UNAVAILABLE: ${reason}; retry after ${Math.ceil(waitMs / 1000)}s`);
         err.code = 'PROVIDER_UNAVAILABLE';
         err.retryAfterMs = waitMs;
+        err.admissionReason = inUse.length > 0 && inUse.length === accountRows.length ? 'capacity' : 'cooldown';
         err.providerStates = rows;
         throw err;
       }
@@ -221,7 +228,19 @@ export class ProviderAdmissionController {
         VALUES(?,?,?,?,?,'ACTIVE',?,?)`).run(leaseId, chosen.provider_id, jobId, taskId, role, created, expires);
       this.store.db.exec('COMMIT');
       return { leaseId, providerId: chosen.provider_id, expiresAt: expires };
-    } catch (e) { try { this.store.db.exec('ROLLBACK'); } catch (_) {} throw e; }
+    } catch (e) {
+      try { this.store.db.exec('ROLLBACK'); } catch (_) {}
+      if (jobId && e?.admissionReason) {
+        const eventType = e.admissionReason === 'capacity' ? 'provider.capacity_wait' : 'provider.cooldown_wait';
+        this.metrics[e.admissionReason === 'capacity' ? 'capacityWaits' : 'cooldownWaits']++;
+        this.store.recordEvent(jobId, eventType, {
+          reason: e.admissionReason,
+          providers: ids.length,
+          retryAfterMs: e.retryAfterMs || 0
+        });
+      }
+      throw e;
+    }
   }
 
   release(leaseId, { success = true, rateLimited = false, reason = null } = {}) {

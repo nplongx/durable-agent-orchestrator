@@ -152,10 +152,36 @@ export class GitHubActionsProvider {
         input_commit: inputCommit
       }
     };
+    if (this.workflow.includes('p3-worker')) {
+      body.inputs.task_payload_ref = request.task_payload_ref;
+      body.inputs.role = request.role;
+      if (request.task_payload_inline !== undefined) {
+        body.inputs.task_payload_json = JSON.stringify(request.task_payload_inline);
+      }
+    }
     if (dispatchKey) body.inputs.dispatch_key = dispatchKey;
     const data = await this.request('POST', `/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/actions/workflows/${encodeURIComponent(this.workflow)}/dispatches`, body);
+    // GitHub normally answers workflow_dispatch with HTTP 204 and only exposes
+    // the workflow_run_id after the run is created. Reconcile the dispatch intent
+    // instead of treating a successful 204 as a failed dispatch.
     if (!data?.workflow_run_id) {
-      throw new Error('GitHub dispatch succeeded but response did not include workflow_run_id');
+      if (!dispatchKey || !this.store?.db) {
+        return { provider_run_id: null, dispatch_key: dispatchKey || null, state: 'DISPATCHING', pending_reconciliation: true };
+      }
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const reconciled = await this.reconcileDispatchIntent({
+          dispatch_key: dispatchKey,
+          job_id: request.job_id,
+          task_id: request.task_id,
+          lease_id: request.lease_id,
+          attempt: request.attempt,
+          input_commit: inputCommit,
+          created_at: new Date(this.now()).toISOString()
+        });
+        if (reconciled) return reconciled;
+        await sleep(250 * (attempt + 1));
+      }
+      return { provider_run_id: null, dispatch_key: dispatchKey, state: 'DISPATCHING', pending_reconciliation: true };
     }
     const run = {
       provider_run_id: String(data.workflow_run_id), job_id: request.job_id, task_id: request.task_id,

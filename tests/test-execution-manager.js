@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { tempDir } from './test-temp-dir.js';
 
 const dir = tempDir('cos-phase4-');
@@ -63,4 +64,21 @@ const authorized = store.createChildTask(job.job_id, {
 const authorizedResult = await manager.executeAuthorizedTask(authorized.task_id);
 assert.equal(authorizedResult.exitCode, 0);
 assert.equal(authorizedResult.stdout, 'AUTHORIZED');
+
+const cancelled = store.createChildTask(job.job_id, { parentTaskId: task.task_id, role: 'executor', description: 'cancel command' });
+const controller = new AbortController();
+const cancellation = manager.executeTask(cancelled.task_id, {
+  command: "node -e \"setTimeout(() => {}, 5000)\"",
+  timeoutMs: 5000,
+  signal: controller.signal
+});
+setTimeout(() => controller.abort(), 100);
+await assert.rejects(cancellation, /Request aborted by caller/);
+const cancelledTask = store.getTask(cancelled.task_id);
+assert.equal(cancelledTask.execution_status, 'cancelled');
+assert.equal(cancelledTask.status, 'cancelled');
+assert.ok(cancelledTask.execution_session_id);
+assert.notEqual(cancelledTask.execution_status, 'running');
+assert.throws(() => execFileSync('tmux', ['has-session', '-t', cancelledTask.execution_tmux_name], { stdio: 'ignore' }));
+assert.ok(store.getJobTrace(job.job_id).events.some(e => e.type === 'execution.cancelled'));
 console.log('test-execution-manager: PASS');

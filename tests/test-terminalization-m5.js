@@ -50,9 +50,24 @@ store.attachTaskRuntime(cto.task_id, { runId: 'run-cto-prod-m5', sessionKey: 'ag
 const synthesis = 'Architect: node --check /home/long/work/chatgpt-adapter/server.js exit status: 0; QA: node --check /home/long/work/chatgpt-adapter/test-tool-turn.js exit status: 0';
 // Fixture only: terminalization guard is under test; child completion is already durable.
 store.db.prepare("UPDATE tasks SET status='completed' WHERE task_id=?").run(cto.task_id);
+store.db.prepare("UPDATE agent_sessions SET state='TERMINATED' WHERE task_id=?").run(cto.task_id);
 const prodReport = store.createReport(prod.job_id, 'executive_summary', synthesis);
 store.claimDelivery(prod.job_id, prodReport, 'slack', 'C0C3RJKNKPG');
 const prodDone = store.terminalizeJob(prod.job_id, { reportId: prodReport, deliveryChannel: 'slack', deliveryTarget: 'C0C3RJKNKPG', content: synthesis });
 assert.equal(prodDone.job.state, 'COMPLETED');
+
+// Terminalization must not race live runtime resources even when all business tasks are terminal.
+const guard = store.createJob({ conversationKey: `m5-guard-${process.pid}`, title: 'M5 terminal resource guards' });
+store.approve(guard.job_id, 'Duyet');
+const guardTask = store.dispatch(guard.job_id, { role: 'cto', description: 'guard task' });
+store.db.prepare("UPDATE tasks SET status='completed' WHERE task_id=?").run(guardTask.task_id);
+const guardReport = store.createReport(guard.job_id, 'executive_summary', 'guard');
+store.claimDelivery(guard.job_id, guardReport, 'slack', 'guard-target');
+store.createAgentSession(guardTask.task_id, { sessionKey: 'agent:cto:guard-active', role: 'cto', state: 'ACTIVE' });
+assert.throws(() => store.terminalizeJob(guard.job_id, { reportId: guardReport, deliveryChannel: 'slack', deliveryTarget: 'guard-target' }), /active agent sessions/);
+store.db.prepare("UPDATE agent_sessions SET state='TERMINATED' WHERE openclaw_session_key=?").run('agent:cto:guard-active');
+store.db.prepare("INSERT INTO execution_batches(batch_id, job_id, parent_task_id, role, status, attempt, created_at, started_at) VALUES(?,?,?,?,?,?,?,?)")
+  .run('batch-m5-guard', guard.job_id, guardTask.task_id, 'cto', 'RUNNING', 1, new Date().toISOString(), new Date().toISOString());
+assert.throws(() => store.terminalizeJob(guard.job_id, { reportId: guardReport, deliveryChannel: 'slack', deliveryTarget: 'guard-target' }), /active execution batches/);
 console.log('M5 TERMINALIZATION PASS');
 for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) fs.rmSync(p, { force: true });

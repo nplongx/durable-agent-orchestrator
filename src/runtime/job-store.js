@@ -8,7 +8,11 @@ import { isSupportedWorkflow } from './workflow/definitions/index.js';
 import { ProductionRoles } from './workflow/catalog/production.js';
 import { compileWorkflowPlan } from './workflow/compiler.js';
 import { canonicalJson } from './workflow/plan.js';
-import { summarizeObservability } from './observability.js';
+import { summarizeObservability, sanitizeObservabilityEvent } from './observability.js';
+import { normalizeReviewerArtifact } from './workflow/artifact-normalizer.js';
+import { createArtifactRecord, validateArtifact, validateArtifactContent, ArtifactStatus } from './workflow/artifacts.js';
+import { getAgentArtifactType } from './workflow/agent-contracts.js';
+import { assertSessionGrantAuthority, assertSessionRevokeAuthority, normalizeGovernanceRole } from './workflow/governance.js';
 
 const DATA_DIR = process.env.WORKFLOW_DATA_DIR || '/home/long/work/chatgpt-adapter/data';
 const DB_PATH = process.env.WORKFLOW_DB || path.join(DATA_DIR, 'workflow.db');
@@ -16,6 +20,7 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true, mode: 0o700 });
 const db = new DatabaseSync(DB_PATH, { timeout: 5000, enableForeignKeyConstraints: true });
 
 db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+
 db.exec(`
 CREATE TABLE IF NOT EXISTS jobs (
   job_id TEXT PRIMARY KEY, conversation_key TEXT NOT NULL, title TEXT NOT NULL,
@@ -232,6 +237,21 @@ CREATE TABLE IF NOT EXISTS workflow_plans (
 );
 `);
 
+for (const sql of [
+  "ALTER TABLE artifacts ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1",
+  "ALTER TABLE artifacts ADD COLUMN producer_role TEXT",
+  "ALTER TABLE artifacts ADD COLUMN content TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE artifacts ADD COLUMN evidence_json TEXT NOT NULL DEFAULT '[]'",
+  "ALTER TABLE artifacts ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+  "ALTER TABLE artifacts ADD COLUMN supersedes TEXT",
+  "ALTER TABLE artifacts ADD COLUMN content_hash TEXT"
+]) {
+  try { db.exec(sql); } catch (err) {
+    if (!String(err?.message || err).toLowerCase().includes('duplicate column')) throw err;
+  }
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_artifacts_job_created ON artifacts(job_id, created_at); CREATE INDEX IF NOT EXISTS idx_artifacts_task_created ON artifacts(task_id, created_at); CREATE INDEX IF NOT EXISTS idx_artifacts_type_status ON artifacts(kind, status, created_at);');
+
 try { db.exec('ALTER TABLE approvals ADD COLUMN proposal_hash TEXT'); } catch (_) {}
 db.exec('CREATE INDEX IF NOT EXISTS idx_approvals_job_created ON approvals(job_id, created_at DESC);');
 
@@ -248,7 +268,7 @@ const WORKFLOW_TRANSITIONS = Object.freeze({
   RUN_CHILDREN: new Set(['WAIT', 'FAILED']),
   WAIT: new Set(['WAIT', 'ASSIGN_CHILDREN', 'VALIDATE_EVIDENCE', 'FAILED']),
   VALIDATE_EVIDENCE: new Set(['SYNTHESIZE', 'FAILED']),
-  SYNTHESIZE: new Set(['TERMINALIZE', 'FAILED']),
+  SYNTHESIZE: new Set(['TERMINALIZE', 'ASSIGN_CHILDREN', 'FAILED']),
   TERMINALIZE: new Set(['PROJECT', 'FAILED']),
   PROJECT: new Set(['COMPLETED', 'FAILED']),
   COMPLETED: new Set(),
@@ -360,6 +380,121 @@ export class WorkflowStore {
     return this.db.prepare("SELECT * FROM jobs WHERE status = 'active' AND state = 'PROPOSED' ORDER BY updated_at DESC LIMIT 1").get() || null;
   }
   getJob(jobId) { return this.db.prepare('SELECT * FROM jobs WHERE job_id = ?').get(jobId) || null; }
+  createArtifact(input) {
+    const task = this.getTask(input.task_id);
+    if (!task) throw new Error(`task not found: ${input.task_id}`);
+    if (task.job_id !== input.job_id) throw new Error('artifact job/task mismatch');
+    if (input.producer_role) {
+      const expectedType = getAgentArtifactType(input.producer_role);
+      if (expectedType && expectedType !== input.type) throw new Error('artifact type ' + input.type + ' is not allowed for producer role ' + input.producer_role);
+    }
+    const artifact = createArtifactRecord(input);
+    const ts = artifact.created_at;
+    const existing = this.db.prepare('SELECT * FROM artifacts WHERE artifact_id = ?').get(artifact.artifact_id);
+    if (existing) {
+      const same = existing.content_hash === artifact.content_hash && existing.kind === artifact.type && existing.task_id === artifact.task_id;
+      if (!same) throw new Error(`artifact id collision: ${artifact.artifact_id}`);
+      return this.getArtifact(artifact.artifact_id);
+    }
+    if (artifact.supersedes) {
+      const previous = this.getArtifact(artifact.supersedes);
+      if (!previous || previous.job_id !== artifact.job_id) throw new Error('artifact supersedes unknown artifact');
+      if (previous.status === ArtifactStatus.SUPERSEDED) throw new Error('artifact supersedes an already superseded artifact');
+      if (previous.type !== artifact.type) throw new Error('artifact type cannot change during supersession');
+      this.db.prepare('UPDATE artifacts SET status = ? WHERE artifact_id = ?').run(ArtifactStatus.SUPERSEDED, previous.artifact_id);
+    }
+    this.db.prepare(`INSERT INTO artifacts(artifact_id, job_id, task_id, kind, uri, metadata_json, created_at, schema_version, producer_role, content, evidence_json, status, supersedes, content_hash)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      artifact.artifact_id, artifact.job_id, artifact.task_id, artifact.type, `artifact://${artifact.artifact_id}`,
+      JSON.stringify({ schema_version: artifact.schema_version }), ts, artifact.schema_version, artifact.producer_role,
+      typeof artifact.content === 'string' ? artifact.content : JSON.stringify(artifact.content), JSON.stringify(artifact.evidence), artifact.status,
+      artifact.supersedes, artifact.content_hash
+    );
+    this.recordEvent(artifact.job_id, 'artifact.created', { artifactId: artifact.artifact_id, taskId: artifact.task_id, type: artifact.type, status: artifact.status, supersedes: artifact.supersedes }, artifact.artifact_id);
+    return this.getArtifact(artifact.artifact_id);
+  }
+  getArtifact(artifactId) {
+    const row = this.db.prepare('SELECT * FROM artifacts WHERE artifact_id = ?').get(artifactId);
+    return row ? this.hydrateArtifact(row) : null;
+  }
+  listArtifacts(jobId, { taskId = null, type = null, activeOnly = false } = {}) {
+    const clauses = ['job_id = ?']; const params = [jobId];
+    if (taskId) { clauses.push('task_id = ?'); params.push(taskId); }
+    if (type) { clauses.push('kind = ?'); params.push(type); }
+    if (activeOnly) clauses.push("status = 'active'");
+    return this.db.prepare(`SELECT * FROM artifacts WHERE ${clauses.join(' AND ')} ORDER BY created_at ASC`).all(...params).map(row => this.hydrateArtifact(row));
+  }
+  getLatestArtifact(jobId, type) {
+    const row = this.db.prepare("SELECT * FROM artifacts WHERE job_id = ? AND kind = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1").get(jobId, type);
+    return row ? this.hydrateArtifact(row) : null;
+  }
+  prepareStandardEngineeringRework(jobId) {
+    const plan = this.getExecutionPlan(jobId);
+    if (String(plan?.workflow_id || '').toLowerCase() !== 'standard-engineering') return { prepared: false, reason: 'not-standard-engineering' };
+    const decisionRow = this.db.prepare("SELECT * FROM artifacts WHERE job_id=? AND kind='cto-decision' ORDER BY created_at DESC LIMIT 1").get(jobId);
+    const decisionArtifact = decisionRow ? this.hydrateArtifact(decisionRow) : null;
+    if (!decisionArtifact) return { prepared: false, reason: 'cto-decision-missing' };
+    const decision = decisionArtifact.content;
+    if (decision?.decision !== 'rework') return { prepared: false, reason: 'decision-is-not-rework' };
+    const existing = this.db.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='workflow.rework.prepared' AND json_extract(payload_json,'$.decisionArtifactId')=? LIMIT 1").get(jobId, decisionArtifact.artifact_id);
+    if (existing) {
+      try { return { prepared: true, idempotent: true, ...JSON.parse(existing.payload_json) }; } catch (_) { return { prepared: true, idempotent: true }; }
+    }
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const reviewRow = this.db.prepare("SELECT * FROM artifacts WHERE job_id=? AND kind='review' ORDER BY created_at DESC LIMIT 1").get(jobId);
+      const review = reviewRow ? this.hydrateArtifact(reviewRow) : null;
+      if (!review) throw new Error(`cannot prepare rework without ReviewArtifact: ${jobId}`);
+      const reviewContent = review.content || {};
+      const targets = new Set(['reviewer']);
+      if (reviewContent.requirementsSatisfied === false) ['product-owner', 'researcher', 'architect', 'engineer', 'security', 'qa', 'platform', 'writer'].forEach(role => targets.add(role));
+      if (reviewContent.architectureConformant === false) ['architect', 'engineer', 'security', 'qa', 'platform', 'writer'].forEach(role => targets.add(role));
+      if (reviewContent.securityAccepted === false) ['engineer', 'security'].forEach(role => targets.add(role));
+      if (reviewContent.qaAccepted === false) ['engineer', 'qa'].forEach(role => targets.add(role));
+      if (reviewContent.platformAccepted === false) ['engineer', 'platform'].forEach(role => targets.add(role));
+      if (reviewContent.documentationAccepted === false) ['engineer', 'writer'].forEach(role => targets.add(role));
+      const planByRole = new Map((plan.children || []).map(spec => [String(spec.role).toLowerCase(), spec]));
+      const targetRoles = [...targets].filter(role => planByRole.has(role));
+      const invalidatedTypes = new Set(targetRoles.map(role => getAgentArtifactType(role)));
+      invalidatedTypes.add('review');
+      invalidatedTypes.add('cto-decision');
+      const invalidatedArtifacts = [];
+      for (const type of invalidatedTypes) {
+        const rows = this.db.prepare("SELECT artifact_id FROM artifacts WHERE job_id=? AND kind=? AND status='active'").all(jobId, type);
+        this.db.prepare("UPDATE artifacts SET status=? WHERE job_id=? AND kind=? AND status='active'").run(ArtifactStatus.INVALIDATED, jobId, type);
+        invalidatedArtifacts.push(...rows.map(row => row.artifact_id));
+      }
+      const createdTasks = [];
+      const cto = this.db.prepare("SELECT task_id FROM tasks WHERE job_id=? AND role='cto' ORDER BY created_at DESC LIMIT 1").get(jobId);
+      for (const role of targetRoles) {
+        const spec = planByRole.get(role);
+        const previous = this.db.prepare("SELECT task_id FROM tasks WHERE job_id=? AND parent_task_id=? AND role=? ORDER BY created_at DESC LIMIT 1").get(jobId, cto?.task_id || null, spec.role);
+        const task = this.createChildTask(jobId, {
+          parentTaskId: cto?.task_id || null,
+          role: spec.role,
+          description: `Rework revision for ${spec.role} after CTO decision ${decisionArtifact.artifact_id}.`,
+          dependencies: spec.dependencies || [],
+          metadata: { rework: true, rework_of_task_id: previous?.task_id || null, rework_of_artifact_id: decisionArtifact.artifact_id, workflow_plan_task_id: spec.id }
+        });
+        createdTasks.push(task.task_id);
+      }
+      const payload = { decisionArtifactId: decisionArtifact.artifact_id, reviewArtifactId: review.artifact_id, targetRoles, createdTasks, invalidatedArtifacts };
+      this.recordEvent(jobId, 'workflow.artifacts.invalidated', { decisionArtifactId: decisionArtifact.artifact_id, artifactIds: invalidatedArtifacts }, `${jobId}|artifact-invalidation|${decisionArtifact.artifact_id}`);
+      this.recordEvent(jobId, 'workflow.rework.prepared', payload, `${jobId}|rework|${decisionArtifact.artifact_id}`);
+      this.db.exec('COMMIT');
+      return { prepared: true, idempotent: false, ...payload };
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch (_) {}
+      throw error;
+    }
+  }
+  hydrateArtifact(row) {
+    const content = row.content;
+    const parsed = (() => { try { return JSON.parse(content); } catch (_) { return content; } })();
+    const artifact = { artifact_id: row.artifact_id, job_id: row.job_id, task_id: row.task_id, type: row.kind, schema_version: Number(row.schema_version || 1), producer_role: row.producer_role, content: parsed, evidence: JSON.parse(row.evidence_json || '[]'), status: row.status, created_at: row.created_at, supersedes: row.supersedes, content_hash: row.content_hash };
+    validateArtifact(artifact);
+    return artifact;
+  }
   getWorkflowRuntimeState(jobId) {
     return this.db.prepare('SELECT * FROM workflow_runtime_state WHERE job_id = ?').get(jobId) || null;
   }
@@ -474,9 +609,12 @@ export class WorkflowStore {
     const events = this.listEvents(jobId, { limit: eventLimit });
     const tasks = this.db.prepare('SELECT task_id,status,execution_attempt,execution_started_at,execution_finished_at FROM tasks WHERE job_id=? ORDER BY created_at ASC').all(jobId);
     const leases = this.db.prepare('SELECT * FROM task_leases WHERE job_id=? ORDER BY issued_at ASC').all(jobId);
-    const providerRuns = this.db.prepare('SELECT * FROM provider_runs WHERE job_id=? ORDER BY created_at ASC').all(jobId);
+    const hasProviderRuns = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_runs' LIMIT 1").get();
+    const providerRuns = hasProviderRuns
+      ? this.db.prepare('SELECT * FROM provider_runs WHERE job_id=? ORDER BY created_at ASC').all(jobId)
+      : [];
     const summary = summarizeObservability({ events, tasks, leases, providerRuns });
-    return { job_id: jobId, generated_at: now(), ...summary };
+    return { schema_version: 1, trace_id: `workflow:${jobId}`, job_id: jobId, generated_at: now(), ...summary };
   }
 
   hasEvent(jobId, type) {
@@ -505,6 +643,18 @@ export class WorkflowStore {
     const ts = now();
     this.db.prepare("UPDATE jobs SET state = ?, status = ?, updated_at = ?, completed_at = CASE WHEN ? IN ('completed','failed','cancelled') THEN ? ELSE completed_at END WHERE job_id = ?").run(state, status, ts, status, ts, jobId);
     return this.getJob(jobId);
+  }
+  reconcileRunningTaskForTerminalJob(taskId, reason = 'parent job is terminal') {
+    const task = this.getTask(taskId);
+    if (!task || task.status !== 'running') return task || null;
+    const job = this.getJob(task.job_id);
+    if (!job || !['completed', 'failed', 'cancelled'].includes(String(job.status).toLowerCase())) return task;
+    const ts = now();
+    this.db.prepare(`UPDATE tasks SET status='cancelled', execution_status=CASE WHEN execution_status='running' THEN 'cancelled' ELSE execution_status END,
+      execution_finished_at=COALESCE(execution_finished_at, ?), updated_at=? WHERE task_id=? AND status='running'`).run(ts, ts, taskId);
+    this.db.prepare("UPDATE attempts SET status='cancelled', finished_at=?, error=? WHERE task_id=? AND status='started'").run(ts, reason, taskId);
+    this.recordEvent(task.job_id, 'task.runtime_reconciled', { taskId, reason, outcome: 'cancelled' }, `${taskId}|terminal-job-reconciled`);
+    return this.getTask(taskId);
   }
   ensureTask(jobId, { role = 'cto', description }) {
     const existing = this.db.prepare("SELECT * FROM tasks WHERE job_id = ? AND status IN ('pending','running') ORDER BY created_at DESC LIMIT 1").get(jobId);
@@ -627,6 +777,7 @@ export class WorkflowStore {
     if (!task || Number(task.execution_attempt) !== Number(result.attempt)) return { status: 'REJECTED', reason: 'task_attempt_mismatch' };
     const ts = now();
     const success = result.status === 'SUCCEEDED' && Number(result.exit_code) === 0;
+    const agentOutput = typeof result.agent_output === 'string' ? result.agent_output : '';
     const checkpointed = result.status === 'TIMED_OUT' && Boolean(result.checkpoint_commit);
     if (checkpointed) {
       this.db.prepare(`INSERT OR REPLACE INTO task_checkpoints(
@@ -643,13 +794,29 @@ export class WorkflowStore {
       metadata.checkpoint_ref = result.checkpoint_ref || null;
       this.db.prepare('UPDATE tasks SET metadata_json=? WHERE task_id=?').run(JSON.stringify(metadata), result.task_id);
     }
+    const resultId = id('result');
     this.db.prepare(`INSERT INTO results(result_id, task_id, outcome, content, created_at) VALUES(?, ?, ?, ?, ?)`)
-      .run(id('result'), result.task_id, success ? 'success' : checkpointed ? 'partial' : 'failure', JSON.stringify({
+      .run(resultId, result.task_id, success ? 'success' : checkpointed ? 'partial' : 'failure', JSON.stringify({
         provider_run_id: result.provider_run_id, output_commit: result.output_commit,
         evidence_artifact: result.evidence_artifact, evidence_refs: result.evidence_refs,
+        agent_output: agentOutput || null, runner_id: result.runner_id || null,
         evidence_verification: result.evidence_verification || null, error: result.error || null,
         checkpoint_commit: result.checkpoint_commit || null, checkpoint_ref: result.checkpoint_ref || null
       }), ts);
+    const taskMetadata = (() => { try { return JSON.parse(task.metadata_json || '{}'); } catch (_) { return {}; } })();
+    if (success && taskMetadata.runtime_owner === 'github-runner') {
+      const role = String(task.role || '').toLowerCase();
+      let content = null;
+      try { content = agentOutput ? JSON.parse(agentOutput) : null; } catch (_) { content = null; }
+      const typeByRole = { 'product-owner': 'requirements', researcher: 'research', architect: 'architecture', engineer: 'implementation', security: 'security-review', qa: 'qa-report', platform: 'platform-review', writer: 'documentation', reviewer: 'review', cto: 'cto-decision' };
+      const type = typeByRole[role];
+      if (type && content) {
+        const activeArtifacts = this.listArtifacts(result.job_id, { activeOnly: true });
+        const evidence = [resultId, ...activeArtifacts.map(a => a.artifact_id)];
+        const artifactContent = type === 'review' && content.review ? content.review : content;
+        this.createArtifact({ artifact_id: `${type}-${resultId}`, job_id: result.job_id, task_id: task.task_id, type, producer_role: role, content: artifactContent, evidence });
+      }
+    }
     this.db.prepare(`UPDATE tasks SET status=?, execution_status=?, execution_exit_code=?, execution_finished_at=?, updated_at=?
       WHERE task_id=? AND status='running' AND execution_attempt=?`)
       .run(success ? 'completed' : checkpointed ? 'pending' : 'failed', success ? 'completed' : checkpointed ? 'timeout' : 'failed', result.exit_code ?? null, result.finished_at || ts, ts, result.task_id, result.attempt);
@@ -736,6 +903,14 @@ export class WorkflowStore {
     }, `${batchId}|terminal`);
     return { ...this.getExecutionBatch(batchId), items: this.listExecutionBatchItems(batchId) };
   }
+  cancelExecutionBatch(batchId, reason = 'execution request cancelled') {
+    const batch = this.getExecutionBatch(batchId); if (!batch) throw new Error(`execution batch not found: ${batchId}`);
+    const ts = now();
+    this.db.prepare("UPDATE execution_batch_items SET status='CANCELLED', error=?, finished_at=? WHERE batch_id=? AND status IN ('PENDING','RUNNING')").run(reason, ts, batchId);
+    this.db.prepare("UPDATE execution_batches SET status='CANCELLED', finished_at=?, aggregate_content=? WHERE batch_id=? AND status NOT IN ('COMPLETED','FAILED','CANCELLED')").run(ts, reason, batchId);
+    this.recordEvent(batch.job_id, 'execution.batch.cancelled', { batchId, reason }, `${batchId}|cancelled`);
+    return { ...this.getExecutionBatch(batchId), items: this.listExecutionBatchItems(batchId) };
+  }
   findDeterministicTask(jobId, { role = null, command = null } = {}) {
     // Same-task recovery must be able to re-enter the deterministic executor
     // after a prior agent attempt failed. Prefer live work, then the newest
@@ -791,13 +966,56 @@ export class WorkflowStore {
     ].filter(Boolean).join('\n');
     const resultId = id('result');
     this.db.prepare('INSERT INTO results(result_id, task_id, outcome, content, created_at) VALUES(?, ?, ?, ?, ?)').run(resultId, taskId, outcome, evidence, ts);
+    const engineeringWorkflow = String(this.getExecutionPlan(task.job_id)?.workflow_id || '').toLowerCase() === 'engineering';
+    if (outcome === 'success' && engineeringWorkflow && String(task.role || '').toLowerCase() === 'engineer') {
+      this.createArtifact({
+        artifact_id: 'implementation-' + resultId,
+        job_id: task.job_id,
+        task_id: task.task_id,
+        type: 'implementation',
+        producer_role: 'engineer',
+        content: {
+          summary: 'Engineer implementation completed with verified execution evidence.',
+          files_changed: [],
+          verification: [resultId],
+          execution: { session_id: executionSessionId, exit_code: Number(exitCode), command, verified_at: ts }
+        },
+        evidence: [resultId, executionSessionId]
+      });
+    }
+    const specialistTypes = Object.freeze({
+      security: 'security-review',
+      qa: 'qa-report',
+      platform: 'platform-review',
+      writer: 'documentation'
+    });
+    const specialistType = specialistTypes[String(task.role || '').toLowerCase()];
+    if (outcome === 'success' && engineeringWorkflow && specialistType) {
+      const implementation = this.getLatestArtifact(task.job_id, 'implementation');
+      if (!implementation) throw new Error(`cannot persist ${specialistType}: implementation artifact is missing`);
+      const contentByType = {
+        'security-review': { threats: [], findings: [evidence], decision: 'accept' },
+        'qa-report': { checks: ['execution completed'], results: [evidence], decision: 'accept' },
+        'platform-review': { runtime: { status: 'reviewed' }, deployment: { status: 'reviewed' }, recovery: { status: 'reviewed' } },
+        documentation: { summary: 'Documentation review completed.', user_facing_changes: [], verification: [evidence] }
+      };
+      this.createArtifact({
+        artifact_id: `${specialistType}-${resultId}`,
+        job_id: task.job_id,
+        task_id: task.task_id,
+        type: specialistType,
+        producer_role: task.role,
+        content: contentByType[specialistType],
+        evidence: [resultId, implementation.artifact_id]
+      });
+    }
     this.db.prepare(`UPDATE tasks SET execution_status = ?, execution_exit_code = ?, execution_finished_at = ?, execution_stdout = ?, execution_stderr = ?,
-      status = ?, updated_at = ? WHERE task_id = ?`).run(terminal, exitCode, ts, stdout || '', stderr || '', outcome === 'success' ? 'completed' : 'failed', ts, taskId);
-    const attemptStatus = terminal === 'completed' ? 'completed' : terminal === 'timeout' ? 'timeout' : 'failed';
+      status = ?, updated_at = ? WHERE task_id = ?`).run(terminal, exitCode, ts, stdout || '', stderr || '', outcome === 'success' ? 'completed' : terminal === 'cancelled' ? 'cancelled' : 'failed', ts, taskId);
+    const attemptStatus = terminal === 'completed' ? 'completed' : terminal === 'timeout' ? 'timeout' : terminal === 'cancelled' ? 'cancelled' : 'failed';
     const existingAttempt = this.db.prepare("SELECT attempt_id FROM attempts WHERE task_id = ? AND status = 'started' AND openclaw_run_id IS NULL ORDER BY started_at DESC LIMIT 1").get(taskId);
     if (existingAttempt) this.db.prepare('UPDATE attempts SET status = ?, finished_at = ?, error = ? WHERE attempt_id = ?').run(attemptStatus, ts, error || (exitCode !== 0 ? `exit status ${exitCode}` : null), existingAttempt.attempt_id);
     else this.db.prepare("INSERT INTO attempts(attempt_id, task_id, status, started_at, finished_at, error) VALUES(?, ?, ?, ?, ?, ?)").run(id('attempt'), taskId, attemptStatus, task.execution_started_at || ts, ts, error || null);
-    this.recordEvent(task.job_id, terminal === 'completed' ? 'execution.completed' : 'execution.failed', {
+    this.recordEvent(task.job_id, terminal === 'completed' ? 'execution.completed' : terminal === 'cancelled' ? 'execution.cancelled' : 'execution.failed', {
       taskId, executionSessionId, attempt, command, exitCode, status: terminal, resultId
     }, `${taskId}|execution-result|${attempt}`);
     return this.getTask(taskId);
@@ -866,10 +1084,11 @@ export class WorkflowStore {
   grantSessionAccess(sessionId, { accessorRole, permission = 'OBSERVE', grantedBy = 'system', expiresAt = null } = {}) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error(`Unknown agent session: ${sessionId}`);
-    const role = String(accessorRole || '').trim();
+    const role = normalizeGovernanceRole(accessorRole);
     const perm = String(permission || '').toUpperCase();
     if (!role) throw new Error('accessorRole is required');
     if (!['OBSERVE', 'MESSAGE', 'EXECUTE', 'TAKEOVER'].includes(perm)) throw new Error(`Invalid session permission: ${perm}`);
+    assertSessionGrantAuthority(grantedBy, role, perm);
     const existing = this.db.prepare(`SELECT * FROM session_access
       WHERE session_id = ? AND accessor_role = ? AND permission = ? AND revoked_at IS NULL
       ORDER BY created_at DESC LIMIT 1`).get(sessionId, role, perm);
@@ -889,6 +1108,7 @@ export class WorkflowStore {
     const access = this.getSessionAccess(accessId); if (!access) return null;
     if (access.revoked_at) return access;
     const session = this.getSession(access.session_id); const ts = now();
+    if (session) assertSessionRevokeAuthority(actor, session.role, access.accessor_role, access.permission);
     this.db.prepare('UPDATE session_access SET revoked_at = ? WHERE access_id = ? AND revoked_at IS NULL').run(ts, accessId);
     if (session) this.recordEvent(session.job_id, 'session.access_revoked', {
       accessId, sessionId: session.session_id, accessorRole: access.accessor_role, permission: access.permission, actor
@@ -1356,41 +1576,108 @@ export class WorkflowStore {
           }
         }
         if (String(task.role || '').toLowerCase() === 'reviewer') {
-          const marker = text.lastIndexOf('{"review"');
-          if (marker >= 0) {
-            let depth = 0;
-            let inString = false;
-            let escaped = false;
-            for (let i = marker; i < text.length; i += 1) {
-              const ch = text[i];
-              if (inString) {
-                if (escaped) escaped = false;
-                else if (ch === '\\') escaped = true;
-                else if (ch === '"') inString = false;
-                continue;
-              }
-              if (ch === '"') { inString = true; continue; }
-              if (ch === '{') depth += 1;
-              else if (ch === '}') {
-                depth -= 1;
-                if (depth === 0) {
-                  const candidate = text.slice(marker, i + 1);
-                  try {
-                    JSON.parse(candidate);
-                    content = candidate;
-                  } catch (_) {}
-                  break;
-                }
-              }
-            }
-          }
+          const normalizedReviewer = normalizeReviewerArtifact(text);
+          if (normalizedReviewer) content = normalizedReviewer;
         }
       }
     }
+    const standardWorkflow = String(this.getExecutionPlan(jobId)?.workflow_id || '').toLowerCase() === 'standard-engineering';
+    if (outcome === 'success' && standardWorkflow && String(task.role || '').toLowerCase() === 'reviewer') {
+      const upstreamTypes = ['requirements', 'architecture', 'implementation', 'security-review', 'qa-report', 'platform-review', 'documentation'];
+      const upstream = upstreamTypes.map(type => this.getLatestArtifact(jobId, type));
+      const normalized = normalizeReviewerArtifact(content);
+      let review = null;
+      try { review = normalized ? JSON.parse(normalized).review : null; } catch (_) { review = null; }
+      if (upstream.some(artifact => !artifact)) {
+        outcome = 'failure';
+        content = `${String(content || '')}\n[Workflow validation] Reviewer rejected: required upstream durable artifacts are missing.`;
+      } else if (!review) {
+        outcome = 'failure';
+        content = `${String(content || '')}\n[Workflow validation] Reviewer rejected: structured review artifact is missing.`;
+      } else {
+        try { validateArtifactContent('review', review); content = JSON.stringify({ review }); }
+        catch (error) {
+          outcome = 'failure';
+          content = `${String(content || '')}\n[Workflow validation] Reviewer rejected: ${error.message}`;
+        }
+      }
+    }
+    if (outcome === 'success' && standardWorkflow && String(task.role || '').toLowerCase() === 'cto') {
+      const review = this.getLatestArtifact(jobId, 'review');
+      let decision = null;
+      try { decision = typeof content === 'string' ? JSON.parse(content) : content; } catch (_) { decision = null; }
+      if (!review) {
+        outcome = 'failure';
+        content = `${String(content || '')}\n[Workflow validation] CTO rejected: durable ReviewArtifact is missing.`;
+      } else if (!decision || typeof decision !== 'object') {
+        outcome = 'failure';
+        content = `${String(content || '')}\n[Workflow validation] CTO rejected: structured CTO decision is missing.`;
+      } else {
+        try { validateArtifactContent('cto-decision', decision); content = JSON.stringify(decision); }
+        catch (error) {
+          outcome = 'failure';
+          content = `${String(content || '')}\n[Workflow validation] CTO rejected: ${error.message}`;
+        }
+      }
+    }
+    const specialistTypes = Object.freeze({ security: 'security-review', qa: 'qa-report', platform: 'platform-review', writer: 'documentation' });
+    const specialistType = specialistTypes[String(task.role || '').toLowerCase()];
+    const specialistImplementation = outcome === 'success' && engineeringWorkflow && specialistType
+      ? this.getLatestArtifact(jobId, 'implementation')
+      : null;
+    if (outcome === 'success' && engineeringWorkflow && specialistType && !specialistImplementation) {
+      throw new Error(`cannot persist ${specialistType}: implementation artifact is missing`);
+    }
     const resultId = id('result'); const ts = now();
     this.db.prepare('INSERT INTO results(result_id, task_id, outcome, content, created_at) VALUES(?, ?, ?, ?, ?)').run(resultId, task.task_id, outcome, content || '', ts);
+    if (outcome === 'success' && engineeringWorkflow && specialistType) {
+      const contentByType = {
+        'security-review': { threats: [], findings: [content || ''], decision: 'accept' },
+        'qa-report': { checks: ['native completion'], results: [content || ''], decision: 'accept' },
+        'platform-review': { runtime: { status: 'reviewed' }, deployment: { status: 'reviewed' }, recovery: { status: 'reviewed' } },
+        documentation: { summary: 'Documentation review completed.', user_facing_changes: [], verification: [content || ''] }
+      };
+      this.createArtifact({
+        artifact_id: `${specialistType}-${resultId}`,
+        job_id: jobId,
+        task_id: task.task_id,
+        type: specialistType,
+        producer_role: task.role,
+        content: contentByType[specialistType],
+        evidence: [resultId, specialistImplementation.artifact_id]
+      });
+    }
+    if (outcome === 'success' && standardWorkflow && String(task.role || '').toLowerCase() === 'reviewer') {
+      const upstreamTypes = ['requirements', 'architecture', 'implementation', 'security-review', 'qa-report', 'platform-review', 'documentation'];
+      const upstream = upstreamTypes.map(type => this.getLatestArtifact(jobId, type));
+      const review = JSON.parse(String(content)).review;
+      this.createArtifact({
+        artifact_id: `review-${resultId}`,
+        job_id: jobId,
+        task_id: task.task_id,
+        type: 'review',
+        producer_role: 'reviewer',
+        content: review,
+        evidence: [resultId, ...upstream.map(artifact => artifact.artifact_id)]
+      });
+    }
+    if (outcome === 'success' && standardWorkflow && String(task.role || '').toLowerCase() === 'cto') {
+      const review = this.getLatestArtifact(jobId, 'review');
+      const decision = JSON.parse(String(content));
+      this.createArtifact({
+        artifact_id: `cto-decision-${resultId}`,
+        job_id: jobId,
+        task_id: task.task_id,
+        type: 'cto-decision',
+        producer_role: 'cto',
+        content: decision,
+        evidence: [resultId, review.artifact_id]
+      });
+    }
     this.db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE task_id = ?').run(outcome === 'success' ? 'completed' : 'failed', ts, task.task_id);
     this.db.prepare("UPDATE attempts SET status = ?, finished_at = ? WHERE task_id = ? AND status = 'started'").run(outcome === 'success' ? 'completed' : 'failed', ts, task.task_id);
+    this.db.prepare("UPDATE agent_sessions SET state = ?, updated_at = ?, last_activity_at = ? WHERE task_id = ? AND state IN ('CREATED','ACTIVE','PAUSED')")
+      .run(outcome === 'success' ? 'TERMINATED' : 'FAILED', ts, ts, task.task_id);
     const effectiveRunId = runId || task.openclaw_run_id || null;
     const effectiveSessionKey = sessionKey || task.openclaw_session_key || null;
     const failureClass = outcome === 'success' ? null
@@ -1816,6 +2103,19 @@ export class WorkflowStore {
     const openTasks = this.db.prepare("SELECT task_id, role, status FROM tasks WHERE job_id=? AND status IN ('pending','running')").all(jobId);
     if (openTasks.length) throw new Error(`cannot terminalize with open tasks: ${openTasks.map(t => t.task_id).join(',')}`);
 
+    const activeSessions = this.db.prepare("SELECT session_id, task_id, role, state FROM agent_sessions WHERE job_id=? AND state IN ('CREATED','ACTIVE','PAUSED')").all(jobId);
+    if (activeSessions.length) {
+      throw new Error(`cannot terminalize with active agent sessions: ${activeSessions.map(s => s.session_id).join(',')}`);
+    }
+    const runningExecutions = this.db.prepare("SELECT task_id, execution_session_id FROM tasks WHERE job_id=? AND execution_status='running'").all(jobId);
+    if (runningExecutions.length) {
+      throw new Error(`cannot terminalize with running executions: ${runningExecutions.map(e => e.execution_session_id || e.task_id).join(',')}`);
+    }
+    const activeBatches = this.db.prepare("SELECT batch_id, status FROM execution_batches WHERE job_id=? AND status IN ('RUNNING','WAITING')").all(jobId);
+    if (activeBatches.length) {
+      throw new Error(`cannot terminalize with active execution batches: ${activeBatches.map(b => b.batch_id).join(',')}`);
+    }
+
     const report = reportId
       ? this.db.prepare('SELECT * FROM reports WHERE report_id=? AND job_id=?').get(reportId, jobId)
       : this.db.prepare('SELECT * FROM reports WHERE job_id=? ORDER BY created_at DESC LIMIT 1').get(jobId);
@@ -1915,13 +2215,14 @@ export class WorkflowStore {
       tasks: this.db.prepare('SELECT COUNT(*) AS count FROM tasks').get().count
     };
   }
-  getObservability() {
+  getObservability({ eventLimit = 50 } = {}) {
     const stats = this.getStats();
     const byState = this.db.prepare('SELECT state, status, COUNT(*) AS count FROM jobs GROUP BY state, status ORDER BY state').all();
     const taskStates = this.db.prepare('SELECT status, COUNT(*) AS count FROM tasks GROUP BY status ORDER BY status').all();
     const attempts = this.db.prepare('SELECT status, COUNT(*) AS count FROM attempts GROUP BY status ORDER BY status').all();
-    const recentEvents = this.db.prepare('SELECT event_id, job_id, type, payload_json, created_at FROM events ORDER BY created_at DESC LIMIT 50').all();
-    return { dbPath: DB_PATH, stats, byState, taskStates, attempts, recentEvents };
+    const safeLimit = Math.max(1, Math.min(200, Number(eventLimit) || 50));
+    const recentEvents = this.db.prepare('SELECT event_id, job_id, type, payload_json, created_at FROM events ORDER BY created_at DESC LIMIT ?').all(safeLimit).map(sanitizeObservabilityEvent);
+    return { schema_version: 1, generated_at: now(), stats, byState, taskStates, attempts, recentEvents };
   }
   getJobTrace(jobId) {
     const job = this.getJob(jobId);
@@ -1932,13 +2233,14 @@ export class WorkflowStore {
     const results = taskIds.length ? this.db.prepare(`SELECT * FROM results WHERE task_id IN (${taskIds.map(() => '?').join(',')}) ORDER BY created_at`).all(...taskIds) : [];
     const approvals = this.db.prepare('SELECT * FROM approvals WHERE job_id = ? ORDER BY created_at').all(jobId);
     const reports = this.db.prepare('SELECT report_id, kind, content, delivered_at, created_at FROM reports WHERE job_id = ? ORDER BY created_at').all(jobId);
+    const artifacts = this.listArtifacts(jobId);
     const events = this.db.prepare('SELECT event_id, type, payload_json, created_at FROM events WHERE job_id = ? ORDER BY created_at').all(jobId);
     const sessions = this.db.prepare('SELECT * FROM agent_sessions WHERE job_id = ? ORDER BY created_at').all(jobId);
     const sessionIds = sessions.map(s => s.session_id);
     const sessionMessages = sessionIds.length
       ? this.db.prepare(`SELECT * FROM session_messages WHERE session_id IN (${sessionIds.map(() => '?').join(',')}) ORDER BY created_at`).all(...sessionIds)
       : [];
-    return { job, tasks, attempts, approvals, results, reports, events, sessions, sessionMessages };
+    return { job, tasks, attempts, approvals, results, reports, artifacts, events, sessions, sessionMessages };
   }
   listActiveJobs(limit = 50) {
     return this.db.prepare("SELECT job_id, title, state, status, active_task_id, created_at, updated_at FROM jobs WHERE status = 'active' ORDER BY updated_at DESC LIMIT ?").all(Math.min(Math.max(Number(limit) || 50, 1), 200));

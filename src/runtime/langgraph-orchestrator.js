@@ -1,7 +1,7 @@
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import { WorkflowPhase } from './workflow/phases.js';
 import { ProductionRoles } from './workflow/catalog/production.js';
-import { getWorkflowDefinition } from './workflow/definitions/index.js';
+import { getWorkflowDefinition, isStandardEngineeringWorkflow } from './workflow/definitions/index.js';
 import { validateEvidenceContract } from './workflow/evidence.js';
 
 export const LangGraphActions = Object.freeze({
@@ -22,8 +22,25 @@ export { WorkflowPhase };
 
 function workflowDefinition(job) { return getWorkflowDefinition(job); }
 function production(job) { return workflowDefinition(job)?.id === 'production'; }
+function standardEngineering(job) { return workflowDefinition(job)?.id === 'standard-engineering'; }
 function executionSpec(task) {
   try { return JSON.parse(task?.metadata_json || '{}'); } catch (_) { return {}; }
+}
+
+function latestTasksByPlanId(tasks) {
+  const latest = new Map();
+  for (const task of tasks || []) {
+    const metadata = executionSpec(task);
+    const key = metadata.workflow_plan_task_id || metadata.workflowPlanTaskId || String(task.role || '').toLowerCase();
+    const previous = latest.get(key);
+    if (!previous || String(task.created_at || '') > String(previous.created_at || '')) latest.set(key, task);
+  }
+  return latest;
+}
+
+function latestRequiredTasks(tasks, requiredSpecs) {
+  const latest = latestTasksByPlanId(tasks);
+  return requiredSpecs.map(spec => latest.get(spec.id) || latest.get(String(spec.role).toLowerCase()) || null);
 }
 
 function evidenceValid(task, result) {
@@ -37,6 +54,7 @@ const GraphState = Annotation.Root({
   plan: Annotation({ default: () => null }),
   runtime: Annotation({ default: () => null }),
   synthesisDispatched: Annotation({ default: () => false }),
+  reworkInProgress: Annotation({ default: () => false }),
   event: Annotation({ default: () => 'turn' }),
   action: Annotation({ default: () => LangGraphActions.NOOP }),
   reason: Annotation({ default: () => '' })
@@ -61,16 +79,18 @@ function classify(state) {
     : production(job)
       ? ProductionRoles.map(role => ({ role, dependencies: [] }))
       : [];
-  const required = requiredSpecs.map(spec => children.find(t => String(t.role).toLowerCase() === String(spec.role).toLowerCase()));
+  const required = latestRequiredTasks(tasks, requiredSpecs);
   const results = new Map((state.results || []).map(r => [r.task_id, r]));
 
   switch (runtime.phase) {
     case WorkflowPhase.APPROVED:
       return { action: LangGraphActions.SPAWN_CTO, reason: 'approved job requires CTO native spawn' };
     case WorkflowPhase.SPAWN_CTO:
-      return cto?.openclaw_session_key
-        ? { action: LangGraphActions.ASSIGN_CHILDREN, reason: 'CTO runtime attached; assign required children' }
-        : { action: LangGraphActions.SPAWN_CTO, reason: 'waiting for CTO native runtime attachment' };
+      return standardEngineering(job)
+        ? { action: LangGraphActions.ASSIGN_CHILDREN, reason: 'standard-engineering uses runner-owned specialists; no local CTO session required' }
+        : cto?.openclaw_session_key
+          ? { action: LangGraphActions.ASSIGN_CHILDREN, reason: 'CTO runtime attached; assign required children' }
+          : { action: LangGraphActions.SPAWN_CTO, reason: 'waiting for CTO native runtime attachment' };
     case WorkflowPhase.ASSIGN_CHILDREN: {
       const taskBySpec = new Map(requiredSpecs.map((spec, index) => [spec.id || `${spec.role}:${index}`, required[index]]));
       const completedIds = new Set(requiredSpecs.filter((spec, index) => String(required[index]?.status).toLowerCase() === 'completed').map((spec, index) => spec.id || `${spec.role}:${index}`));
@@ -136,6 +156,28 @@ function classify(state) {
         : { action: LangGraphActions.SYNTHESIZE, reason: 'required execution evidence validated' };
     }
     case WorkflowPhase.SYNTHESIZE:
+      if (state.reworkInProgress) {
+        const completedIds = new Set(requiredSpecs
+          .filter((spec, index) => String(required[index]?.status).toLowerCase() === 'completed')
+          .map(spec => spec.id));
+        const depsSatisfied = spec => (spec.dependencies || []).every(dep => completedIds.has(dep));
+        const readyMissing = requiredSpecs.some((spec, index) => {
+          const task = required[index];
+          if (!depsSatisfied(spec)) return false;
+          if (!task) return true;
+          const metadata = executionSpec(task);
+          return String(task.status).toLowerCase() === 'pending'
+            && !task.openclaw_session_key
+            && !task.openclaw_run_id
+            && metadata.executor !== 'ExecutionManager';
+        });
+        const open = required.filter(t => !t || !TERMINAL.has(String(t.status).toLowerCase()));
+        if (readyMissing) return { action: LangGraphActions.ASSIGN_CHILDREN, reason: 'rework revisions have runnable children' };
+        if (open.length) return { action: LangGraphActions.WAIT, reason: `waiting for rework revisions: ${open.map(t => t?.role || 'missing').join(', ')}` };
+      }
+      if (state.reworkInProgress && cto && String(cto.status).toLowerCase() === 'completed') {
+        return { action: LangGraphActions.SYNTHESIZE, reason: 'rework revisions complete; CTO synthesis must be re-dispatched' };
+      }
       if (cto && String(cto.status).toLowerCase() === 'completed') {
         return { action: LangGraphActions.TERMINALIZE, reason: 'CTO synthesis terminal; durable terminalization required' };
       }
@@ -166,7 +208,9 @@ const graph = new StateGraph(GraphState)
   .addEdge('classify', END)
   .compile();
 
-export async function evaluateLangGraph({ job, tasks = [], results = [], plan = null, runtime: suppliedRuntime = null, event = 'turn', persist = false, store = null, executeTask = null, spawnCto = null, assignChildren = null, synthesize = null, terminalize = null, project = null }) {
+export async function evaluateLangGraph({ job, tasks = [], results = [], plan = null, runtime: suppliedRuntime = null, event = 'turn', persist = false, store = null, executeTask = null, spawnCto = null, assignChildren = null, synthesize = null, terminalize = null, project = null, signal = null }) {
+  const throwIfAborted = () => { if (signal?.aborted) throw new Error('Request aborted by caller'); };
+  throwIfAborted();
   let runtime = store?.getWorkflowRuntimeState(job?.job_id) || suppliedRuntime;
   if (persist && store && runtime?.phase === WorkflowPhase.PROPOSED && job?.state === 'APPROVED') {
     store.transitionWorkflowPhase(job.job_id, WorkflowPhase.SPAWN_CTO, {
@@ -174,22 +218,39 @@ export async function evaluateLangGraph({ job, tasks = [], results = [], plan = 
     });
     runtime = store.getWorkflowRuntimeState(job.job_id);
   }
+  let reworkInProgress = false;
+  if (persist && store && runtime?.phase === WorkflowPhase.SYNTHESIZE) {
+    const ctoTask = (tasks || []).find(t => t.task_id === job?.active_task_id && String(t.role).toLowerCase() === 'cto');
+    if (ctoTask && String(ctoTask.status).toLowerCase() === 'completed') {
+      const decisionArtifact = store.getLatestArtifact?.(job.job_id, 'cto-decision');
+      if (decisionArtifact?.content?.decision === 'rework') {
+        store.prepareStandardEngineeringRework?.(job.job_id);
+      }
+      reworkInProgress = Boolean(store.hasEvent?.(job.job_id, 'workflow.rework.prepared') && !store.getLatestArtifact?.(job.job_id, 'cto-decision'));
+    }
+  }
   const cto = (tasks || []).find(t => t.task_id === job?.active_task_id && String(t.role).toLowerCase() === 'cto');
   const synthesisDispatched = Boolean(
     store?.hasEvent?.(job?.job_id, 'workflow.synthesis_dispatched')
       && String(cto?.status || '').toLowerCase() === 'running'
   );
-  const decision = await graph.invoke({ job, tasks, results, plan: plan || store?.getExecutionPlan?.(job?.job_id) || null, runtime, synthesisDispatched, event });
+  const decision = await graph.invoke({ job, tasks: store?.getJobTrace?.(job.job_id)?.tasks || tasks, results: store?.getJobTrace?.(job.job_id)?.results || results, plan: plan || store?.getExecutionPlan?.(job?.job_id) || null, runtime, synthesisDispatched, reworkInProgress, event });
+  throwIfAborted();
   if (!persist || !store || !runtime) return decision;
+  const currentTrace = store.getJobTrace?.(job.job_id);
+  const currentTasks = currentTrace?.tasks || tasks;
+  const currentResults = currentTrace?.results || results;
 
   const phase = runtime.phase;
   if (decision.action === LangGraphActions.SPAWN_CTO && typeof spawnCto === 'function') {
+    throwIfAborted();
     try { await spawnCto({ job, tasks, store }); }
     catch (error) { return { ...decision, action: LangGraphActions.BLOCK, reason: 'CTO spawn failed: ' + error.message }; }
   }
   if (decision.action === LangGraphActions.ASSIGN_CHILDREN && typeof assignChildren === 'function') {
+    throwIfAborted();
     try {
-      await assignChildren({ job, tasks, store });
+      await assignChildren({ job, tasks: currentTasks, store });
     } catch (error) {
       const message = String(error?.message || error);
       const waitMatch = message.match(/PROVIDER_UNAVAILABLE:.*?retry after\s+(\d+)s/i);
@@ -203,14 +264,17 @@ export async function evaluateLangGraph({ job, tasks = [], results = [], plan = 
     }
   }
   if (decision.action === LangGraphActions.SYNTHESIZE && typeof synthesize === 'function') {
-    try { await synthesize({ job, tasks, results, store }); }
+    throwIfAborted();
+    try { await synthesize({ job, tasks: currentTasks, results: currentResults, store }); }
     catch (error) { return { ...decision, action: LangGraphActions.BLOCK, reason: `synthesis dispatch failed: ${error.message}` }; }
   }
   if (decision.action === LangGraphActions.TERMINALIZE && typeof terminalize === 'function') {
-    try { await terminalize({ job, tasks, results, store }); }
+    throwIfAborted();
+    try { await terminalize({ job, tasks: currentTasks, results: currentResults, store }); }
     catch (error) { return { ...decision, action: LangGraphActions.BLOCK, reason: `terminalization failed: ${error.message}` }; }
   }
   if (decision.action === LangGraphActions.PROJECT && typeof project === 'function') {
+    throwIfAborted();
     try { await project({ job, store }); }
     catch (error) { return { ...decision, action: LangGraphActions.BLOCK, reason: `projection failed: ${error.message}` }; }
   }
@@ -232,6 +296,7 @@ export async function evaluateLangGraph({ job, tasks = [], results = [], plan = 
     catch (error) { return { ...decision, action: LangGraphActions.BLOCK, reason: error.message }; }
   }
   if (decision.action === LangGraphActions.RUN_CHILDREN && typeof executeTask === 'function') {
+    throwIfAborted();
     const cto = tasks.find(t => t.task_id === job.active_task_id && String(t.role).toLowerCase() === 'cto');
     const children = cto ? tasks.filter(t => t.parent_task_id === cto.task_id) : [];
       const deterministic = children.filter(task => {
@@ -241,8 +306,9 @@ export async function evaluateLangGraph({ job, tasks = [], results = [], plan = 
         && spec.cwd
         && !['completed'].includes(String(task.execution_status).toLowerCase());
     });
-    await Promise.all(deterministic.map(task => executeTask(task)));
+    await Promise.all(deterministic.map(task => executeTask(task, signal)));
   }
+  throwIfAborted();
   return decision;
 }
 

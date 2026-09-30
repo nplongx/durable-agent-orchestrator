@@ -13,15 +13,61 @@ function structuredCommand(executable, args = []) {
   return [executable, ...args].map(shellQuote).join(' ');
 }
 
-function run(command, args, { timeoutMs = 30000 } = {}) {
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw new Error('Request aborted by caller');
+}
+
+function delay(ms, signal = null) {
+  if (!signal) return new Promise(resolve => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(new Error('Request aborted by caller'));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(new Error('Request aborted by caller'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function run(command, args, { timeoutMs = 30000, signal = null } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = ''; let timer;
+    let settled = false;
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = () => {
+      try { child.kill('SIGKILL'); } catch {}
+      finishReject(new Error('Request aborted by caller'));
+    };
     child.stdout.on('data', chunk => { stdout += chunk; });
     child.stderr.on('data', chunk => { stderr += chunk; });
-    if (timeoutMs > 0) timer = setTimeout(() => { child.kill('SIGKILL'); reject(Object.assign(new Error(`command timeout: ${command}`), { code: 'TIMEOUT' })); }, timeoutMs);
-    child.on('error', reject);
-    child.on('close', (code, signal) => { if (timer) clearTimeout(timer); resolve({ code, signal, stdout, stderr }); });
+    if (timeoutMs > 0) timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch {}
+      finishReject(Object.assign(new Error(`command timeout: ${command}`), { code: 'TIMEOUT' }));
+    }, timeoutMs);
+    if (signal?.aborted) return onAbort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.on('error', finishReject);
+    child.on('close', (code, childSignal) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ code, signal: childSignal, stdout, stderr });
+    });
   });
 }
 
@@ -50,7 +96,8 @@ export class ExecutionManager {
     return stale.filter(name => !active.has(name.replace(/\.(stdout|stderr|exit)$/, ''))).length;
   }
 
-  async executeBatch(batchId, { timeoutMs = this.timeoutMs, cwd, env } = {}) {
+  async executeBatch(batchId, { timeoutMs = this.timeoutMs, cwd, env, signal = null } = {}) {
+    throwIfAborted(signal);
     const batch = this.store.getExecutionBatch(batchId);
     if (!batch) throw new Error(`execution batch not found: ${batchId}`);
     if (['COMPLETED', 'CANCELLED'].includes(batch.status)) return { ...batch, items: this.store.listExecutionBatchItems(batchId) };
@@ -70,7 +117,8 @@ export class ExecutionManager {
           command: item.command,
           timeoutMs: item.timeout_ms == null ? timeoutMs : Number(item.timeout_ms),
           cwd: cwd || item.cwd || process.cwd(),
-          env
+          env,
+          signal
         });
         const task = this.getTask(item.task_id);
         const status = result.timedOut ? 'TIMEOUT' : result.exitCode === 0 ? 'COMPLETED' : 'FAILED';
@@ -85,12 +133,18 @@ export class ExecutionManager {
         });
         return result;
       } catch (error) {
-        this.store.finishExecutionBatchItem(batchId, item.item_id, { status: 'FAILED', error: error.message });
+        this.store.finishExecutionBatchItem(batchId, item.item_id, { status: signal?.aborted ? 'CANCELLED' : 'FAILED', error: error.message });
+        if (signal?.aborted) throw error;
         return { exitCode: null, stdout: '', stderr: error.message, timedOut: false, failedToStart: true };
       }
     });
     this.store.markExecutionBatchWaiting(batchId);
-    await Promise.all(runs);
+    try {
+      await Promise.all(runs);
+    } catch (error) {
+      if (signal?.aborted) this.store.cancelExecutionBatch(batchId, error.message);
+      throw error;
+    }
     const finalItems = this.store.listExecutionBatchItems(batchId);
     const resultItems = finalItems.map(i => ({
       id: i.item_id,
@@ -134,7 +188,8 @@ export class ExecutionManager {
     });
   }
 
-  async executeAuthorizedTask(taskId, { timeoutMs = this.timeoutMs, cwd, env } = {}) {
+  async executeAuthorizedTask(taskId, { timeoutMs = this.timeoutMs, cwd, env, signal = null } = {}) {
+    throwIfAborted(signal);
     const task = this.getTask(taskId);
     if (!task) throw new Error(`task not found: ${taskId}`);
     const metadata = JSON.parse(task.metadata_json || '{}');
@@ -146,15 +201,17 @@ export class ExecutionManager {
         args: metadata.args,
         timeoutMs,
         cwd: cwd || metadata.cwd || process.cwd(),
-        env
+        env,
+        signal
       });
     }
     const command = String(metadata.command || task.description || '').trim();
     if (!command) throw new Error(`task ${taskId} has no execution command`);
-    return this.executeTask(taskId, { command, timeoutMs, cwd: cwd || metadata.cwd || process.cwd(), env });
+    return this.executeTask(taskId, { command, timeoutMs, cwd: cwd || metadata.cwd || process.cwd(), env, signal });
   }
 
-  async executeStructuredTask(taskId, { executable, args = [], timeoutMs = this.timeoutMs, cwd = process.cwd(), env = {} } = {}) {
+  async executeStructuredTask(taskId, { executable, args = [], timeoutMs = this.timeoutMs, cwd = process.cwd(), env = {}, signal = null } = {}) {
+    throwIfAborted(signal);
     const exactExecutable = String(executable || '').trim();
     if (!exactExecutable || !Array.isArray(args) || args.some(arg => typeof arg !== 'string')) {
       throw new Error(`invalid structured execution contract for task ${taskId}`);
@@ -176,15 +233,20 @@ export class ExecutionManager {
     this.store.prepareExecution(taskId, { executionSessionId, attempt: nextAttempt, command, cwd, startedAt, tmuxName });
     const script = `cd ${shellQuote(cwd)} && env ${Object.entries(env).map(([k,v]) => `${shellQuote(k)}=${shellQuote(v)}`).join(' ')} ${command} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}; printf '%s' $? > ${shellQuote(exitPath)}`;
     try {
-      await run(this.tmuxBin, ['new-session', '-d', '-s', tmuxName, 'bash', '-lc', script], { timeoutMs: 10000 });
-      const pid = await run(this.tmuxBin, ['display-message', '-p', '-t', `${tmuxName}:0`, '#{pane_pid}'], { timeoutMs: 5000 });
+      await run(this.tmuxBin, ['new-session', '-d', '-s', tmuxName, 'bash', '-lc', script], { timeoutMs: 10000, signal });
+      throwIfAborted(signal);
+      const pid = await run(this.tmuxBin, ['display-message', '-p', '-t', `${tmuxName}:0`, '#{pane_pid}'], { timeoutMs: 5000, signal });
       if (/^\d+$/.test(pid.stdout.trim())) this.store.setExecutionPid(taskId, Number(pid.stdout.trim()));
       const started = Date.now();
       let exitCode = null;
       while (Date.now() - started < timeoutMs) {
+        if (signal?.aborted) {
+        await run(this.tmuxBin, ['kill-session', '-t', tmuxName], { timeoutMs: 5000 }).catch(() => {});
+        throw new Error('Request aborted by caller');
+        }
         const value = await fs.readFile(exitPath, 'utf8').catch(() => '');
         if (/^-?\d+$/.test(value.trim())) { exitCode = Number(value.trim()); break; }
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await delay(100, signal);
       }
       if (exitCode === null) {
         await run(this.tmuxBin, ['kill-session', '-t', tmuxName], { timeoutMs: 5000 }).catch(() => {});
@@ -193,12 +255,18 @@ export class ExecutionManager {
       await run(this.tmuxBin, ['kill-session', '-t', tmuxName], { timeoutMs: 5000 }).catch(() => {});
       return await this.collect(taskId, { executionSessionId, attempt: nextAttempt, command, exitCode, timeout: false });
     } catch (error) {
+      if (signal?.aborted) {
+        await run(this.tmuxBin, ['kill-session', '-t', tmuxName], { timeoutMs: 5000 }).catch(() => {});
+        this.store.finishExecution(taskId, { executionSessionId, attempt: nextAttempt, command, exitCode: null, stdout: '', stderr: error.message, status: 'cancelled', error: error.message });
+        throw error;
+      }
       this.store.finishExecution(taskId, { executionSessionId, attempt: nextAttempt, command, exitCode: null, stdout: '', stderr: error.message, status: 'failed', error: error.message });
       throw error;
     }
   }
 
-  async executeTask(taskId, { command, timeoutMs = this.timeoutMs, attempt = null, cwd = process.cwd(), env = {} } = {}) {
+  async executeTask(taskId, { command, timeoutMs = this.timeoutMs, attempt = null, cwd = process.cwd(), env = {}, signal = null } = {}) {
+    throwIfAborted(signal);
     const task = this.getTask(taskId);
     if (!task) throw new Error(`task not found: ${taskId}`);
     const exactCommand = String(command || task.metadata_json && JSON.parse(task.metadata_json || '{}').command || '').trim();
@@ -218,15 +286,20 @@ export class ExecutionManager {
     this.store.prepareExecution(taskId, { executionSessionId, attempt: nextAttempt, command: exactCommand, cwd, startedAt, tmuxName });
     const script = `cd ${shellQuote(cwd)} && env ${Object.entries(env).map(([k,v]) => `${shellQuote(k)}=${shellQuote(v)}`).join(' ')} ${exactCommand} > ${shellQuote(stdoutPath)} 2> ${shellQuote(stderrPath)}; printf '%s' $? > ${shellQuote(exitPath)}`;
     try {
-      await run(this.tmuxBin, ['new-session', '-d', '-s', tmuxName, 'bash', '-lc', script], { timeoutMs: 10000 });
-      const pid = await run(this.tmuxBin, ['display-message', '-p', '-t', `${tmuxName}:0`, '#{pane_pid}'], { timeoutMs: 5000 });
+      await run(this.tmuxBin, ['new-session', '-d', '-s', tmuxName, 'bash', '-lc', script], { timeoutMs: 10000, signal });
+      throwIfAborted(signal);
+      const pid = await run(this.tmuxBin, ['display-message', '-p', '-t', `${tmuxName}:0`, '#{pane_pid}'], { timeoutMs: 5000, signal });
       if (/^\d+$/.test(pid.stdout.trim())) this.store.setExecutionPid(taskId, Number(pid.stdout.trim()));
       const started = Date.now();
       let exitCode = null;
       while (Date.now() - started < timeoutMs) {
+        if (signal?.aborted) {
+          await run(this.tmuxBin, ['kill-session', '-t', tmuxName], { timeoutMs: 5000 }).catch(() => {});
+          throw new Error('Request aborted by caller');
+        }
         const value = await fs.readFile(exitPath, 'utf8').catch(() => '');
         if (/^-?\d+$/.test(value.trim())) { exitCode = Number(value.trim()); break; }
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await delay(100, signal);
       }
       if (exitCode === null) {
         await run(this.tmuxBin, ['kill-session', '-t', tmuxName], { timeoutMs: 5000 }).catch(() => {});
@@ -236,6 +309,11 @@ export class ExecutionManager {
       await run(this.tmuxBin, ['kill-session', '-t', tmuxName], { timeoutMs: 5000 }).catch(() => {});
       return await this.collect(taskId, { executionSessionId, attempt: nextAttempt, command: exactCommand, exitCode, timeout: false });
     } catch (error) {
+      if (signal?.aborted) {
+        await run(this.tmuxBin, ['kill-session', '-t', tmuxName], { timeoutMs: 5000 }).catch(() => {});
+        this.store.finishExecution(taskId, { executionSessionId, attempt: nextAttempt, command: exactCommand, exitCode: null, stdout: '', stderr: error.message, status: 'cancelled', error: error.message });
+        throw error;
+      }
       this.store.finishExecution(taskId, { executionSessionId, attempt: nextAttempt, command: exactCommand, exitCode: null, stdout: '', stderr: error.message, status: 'failed', error: error.message });
       throw error;
     }

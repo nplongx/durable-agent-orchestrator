@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { summarizeObservability, createStructuredLogger } from '../src/runtime/observability.js';
+import { summarizeObservability, createStructuredLogger, sanitizeObservabilityEvent } from '../src/runtime/observability.js';
 
 const summary = summarizeObservability({
   events: [{ type: 'task.lease.acquired' }, { type: 'task.lease.acquired' }, { type: 'task.execution.verified' }],
@@ -12,9 +12,26 @@ assert.equal(summary.task_counts.completed, 1);
 assert.equal(summary.provider_counts['COMPLETED:success'], 1);
 assert.equal(summary.provider_latency_ms.avg, 2000);
 assert.equal(summary.lease_lifetime_ms.avg, 1000);
+assert.equal(summary.schema_version, 1);
+assert.equal(summary.task_role_counts.unknown, 2);
+assert.equal(summary.task_latency_ms.count, 0);
+const latencySummary = summarizeObservability({
+  tasks: [{ role: 'engineer', status: 'completed', execution_started_at: '2026-01-01T00:00:00.000Z', execution_finished_at: '2026-01-01T00:00:03.000Z' }]
+});
+assert.equal(latencySummary.task_latency_ms.avg, 3000);
+assert.equal(latencySummary.task_latency_by_role_ms.engineer.max, 3000);
+const safeEvent = sanitizeObservabilityEvent({
+  event_id: 'e1', job_id: 'job-1', type: 'job.failed', created_at: '2026-01-01T00:00:00.000Z',
+  payload_json: JSON.stringify({ reason: 'boom', rawText: 'secret user text', content: 'private output', taskId: 'task-1', nested: { prompt: 'private', safe: true } })
+});
+assert.equal(safeEvent.payload.rawText, '[REDACTED]');
+assert.equal(safeEvent.payload.content, '[REDACTED]');
+assert.equal(safeEvent.payload.taskId, 'task-1');
+assert.equal(safeEvent.payload.nested.prompt, '[REDACTED]');
+assert.equal(safeEvent.payload.nested.safe, true);
 const lines = [];
 const logger = createStructuredLogger({ sink: { info: line => lines.push(line) }, base: { job_id: 'job-1' } });
 const record = logger('info', 'provider dispatched', { task_id: 'task-1', provider_run_id: 'run-1' });
 assert.equal(record.job_id, 'job-1');
 assert.equal(JSON.parse(lines[0]).task_id, 'task-1');
-console.log('observability P12 PASS');
+console.log('M10 OBSERVABILITY PASS');

@@ -220,6 +220,23 @@ export class RecoveryManager {
           console.warn(`[RecoveryManager] stale Job reconciliation failed job=${job.job_id}: ${error.message}`);
         }
       }
+
+      const terminalRunningTasks = this.store.db.prepare(`
+        SELECT t.task_id, t.openclaw_session_key
+        FROM tasks t
+        JOIN jobs j ON j.job_id = t.job_id
+        WHERE t.status='running' AND j.status IN ('completed','failed','cancelled')
+      `).all();
+      for (const task of terminalRunningTasks) {
+        const runtime = task.openclaw_session_key ? runtimeMap.get(task.openclaw_session_key) : null;
+        const runtimeStatus = String(runtime?.status || '').toLowerCase();
+        if (runtime && ['active', 'running', 'working', 'queued'].includes(runtimeStatus)) continue;
+        try {
+          this.store.reconcileRunningTaskForTerminalJob(task.task_id, 'parent job is already terminal and no live runtime session remains');
+        } catch (error) {
+          console.warn(`[RecoveryManager] terminal task reconciliation failed task=${task.task_id}: ${error.message}`);
+        }
+      }
     }
     // Completion reconciliation is task-driven, not session-state-driven.
     // A session may already be STALE when OpenClaw reports it as done; that
@@ -233,9 +250,30 @@ export class RecoveryManager {
     for (const task of reconcilableTasks) {
       const runtime = runtimeMap?.get(task.openclaw_session_key);
       const runtimeStatus = String(runtime?.status || '').toLowerCase();
-      if (!runtime || !['done', 'failed', 'error'].includes(runtimeStatus)) continue;
+      if (!runtime || !['done', 'timeout', 'failed', 'error'].includes(runtimeStatus)) continue;
       try {
-          const completion = await this.exportTrajectory(task.openclaw_session_key, this.trajectoryTimeoutMs);
+        if (runtimeStatus === 'timeout') {
+          const completedTask = task.status === 'running'
+            ? this.store.completeTaskByRuntime(task.job_id, {
+              runId: task.openclaw_run_id || runtime.runId || null,
+              sessionKey: task.openclaw_session_key,
+              content: '[RECOVERY FAILURE]\nOpenClaw runtime session timed out before delivering a terminal result.',
+              outcome: 'failure'
+            })
+            : task;
+          const session = allSessions.find(s => s.task_id === task.task_id) || this.store.getSessionByOpenClawKey(task.openclaw_session_key);
+          if (session) this.store.updateAgentSession(session.session_id, { state: 'FAILED' });
+          this.store.recordEvent(task.job_id, 'session.runtime_reconciled', {
+            taskId: task.task_id,
+            sessionId: session?.session_id || null,
+            sessionKey: task.openclaw_session_key,
+            runId: task.openclaw_run_id || runtime.runId || null,
+            outcome: 'failure',
+            reason: 'openclaw_runtime_timeout'
+          }, `${task.job_id}|${task.task_id}|runtime-timeout`);
+          continue;
+        }
+        const completion = await this.exportTrajectory(task.openclaw_session_key, this.trajectoryTimeoutMs);
         if (!completion) continue;
         const outcome = runtimeStatus === 'done' ? 'success' : 'failure';
         let completedTask = task;

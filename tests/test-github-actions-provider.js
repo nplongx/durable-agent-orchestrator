@@ -60,4 +60,60 @@ assert.equal(result.output_commit, input.input_commit);
 await provider.cancel('12345');
 assert.ok(calls.some(call => call.url.endsWith('/actions/runs/12345/cancel')));
 
+// GitHub's real workflow_dispatch endpoint normally returns 204 with no run id.
+const pendingProvider = new GitHubActionsProvider({
+  token: 'test-token', owner: 'example', repo: 'repo', workflow: 'p2-provider-smoke.yml', ref: 'main',
+  fetchImpl: async (url) => {
+    assert.ok(url.endsWith('/dispatches'));
+    return new Response(null, { status: 204 });
+  }
+});
+const pending = await pendingProvider.dispatch(input);
+assert.equal(pending.provider_run_id, null);
+assert.equal(pending.pending_reconciliation, true);
+assert.equal(pending.state, 'DISPATCHING');
+
+let discoveredDispatchKey = null;
+const persistedStore = { db: { exec() {}, prepare() { return { run() {}, get() { return null; } }; } } };
+const reconciledProvider = new GitHubActionsProvider({
+  token: 'test-token', owner: 'example', repo: 'repo', workflow: 'p2-provider-smoke.yml', ref: 'main', store: persistedStore,
+  fetchImpl: async (url, options = {}) => {
+    if (url.endsWith('/dispatches')) {
+      discoveredDispatchKey = JSON.parse(options.body).inputs.dispatch_key;
+      return new Response(null, { status: 204 });
+    }
+    if (url.includes('/actions/workflows/p2-provider-smoke.yml/runs?')) {
+      return new Response(JSON.stringify({ workflow_runs: [{
+        id: 67890, display_title: `P2 provider ${discoveredDispatchKey}`, name: 'P2 GitHub Actions Provider Smoke',
+        status: 'in_progress', conclusion: null, html_url: 'https://github.com/example/run/67890', created_at: new Date().toISOString()
+      }] }), { status: 200 });
+    }
+    throw new Error(`unexpected request ${url}`);
+  }
+});
+const reconciled = await reconciledProvider.dispatch({ ...input, dispatch_key: 'd'.repeat(64) });
+assert.equal(reconciled.provider_run_id, '67890');
+assert.equal(reconciled.state, 'RUNNING');
+
+const p3Calls = [];
+const p3Provider = new GitHubActionsProvider({
+  token: 'test-token', owner: 'example', repo: 'repo', workflow: 'p3-worker.yml', ref: 'main',
+  fetchImpl: async (url, options = {}) => {
+    p3Calls.push({ url, options });
+    return new Response(JSON.stringify({ workflow_run_id: 24680, html_url: 'https://github.com/example/run/24680' }), { status: 200 });
+  }
+});
+await p3Provider.dispatch({
+  ...input,
+  role: 'architect',
+  task_payload_inline: { schema_version: 1, job_id: input.job_id, task_id: input.task_id, role: 'architect' },
+  dispatch_key: 'e'.repeat(64)
+});
+const p3Body = JSON.parse(p3Calls[0].options.body);
+assert.equal(p3Body.inputs.task_payload_ref, input.task_payload_ref);
+assert.equal(p3Body.inputs.role, 'architect');
+assert.deepEqual(JSON.parse(p3Body.inputs.task_payload_json), {
+  schema_version: 1, job_id: input.job_id, task_id: input.task_id, role: 'architect'
+});
+
 console.log('github-actions-provider P2 PASS');
