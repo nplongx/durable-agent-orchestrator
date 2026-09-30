@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { validateExecutionRequest, validateExecutionResult } from './execution-contract.js';
 import { verifyExecutionEvidence } from './execution-verifier.js';
 
@@ -31,7 +31,9 @@ async function run(command, args, { cwd } = {}) {
 
 export class GitHubActionsProvider {
   constructor({
-    token = process.env.GITHUB_ACTIONS_TOKEN || process.env.GITHUB_TOKEN,
+    token = process.env.GITHUB_ACTIONS_TOKEN || process.env.GITHUB_TOKEN || (process.env.GITHUB_ACTIONS_USE_GH_CLI === 'true'
+      ? execFileSync('gh', ['auth', 'token'], { encoding: 'utf8' }).trim()
+      : undefined),
     owner = process.env.GITHUB_REPOSITORY_OWNER,
     repo = process.env.GITHUB_REPOSITORY_NAME,
     repository = process.env.GITHUB_REPOSITORY,
