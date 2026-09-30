@@ -546,7 +546,9 @@ async function dispatchStandardEngineeringTask(task, spec, job) {
     description: task.description,
     required_evidence: ['task-payload.json', 'execution.json', 'stdout.txt', 'stderr.txt', 'git-status.txt'],
     runtime_owner: 'github-runner', execution_mode: 'agent',
-    cwd: spec.execution?.cwd || null, timeout_ms: spec.execution?.timeout_ms || 300000
+    // Runner executes in its own checkout; local absolute WORKFLOW_WORKSPACE
+    // paths must never cross the GitHub Actions boundary.
+    cwd: null, timeout_ms: spec.execution?.timeout_ms || 300000
   };
   const inputCommit = process.env.WORKFLOW_INPUT_COMMIT || null;
   if (!inputCommit) throw new Error('WORKFLOW_INPUT_COMMIT is required for runner dispatch');
