@@ -36,7 +36,7 @@ export class GitHubActionsProvider {
     repo = process.env.GITHUB_REPOSITORY_NAME,
     repository = process.env.GITHUB_REPOSITORY,
     apiBase = DEFAULT_API,
-    workflow = DEFAULT_WORKFLOW,
+    workflow = process.env.GITHUB_ACTIONS_WORKFLOW || 'p3-worker.yml',
     ref = DEFAULT_REF,
     fetchImpl = globalThis.fetch,
     store = null,

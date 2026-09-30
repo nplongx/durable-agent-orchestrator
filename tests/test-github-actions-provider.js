@@ -103,6 +103,10 @@ const p3Provider = new GitHubActionsProvider({
     return new Response(JSON.stringify({ workflow_run_id: 24680, html_url: 'https://github.com/example/run/24680' }), { status: 200 });
   }
 });
+assert.equal(new GitHubActionsProvider({
+  token: 'test-token', owner: 'example', repo: 'repo',
+  fetchImpl: async () => new Response('', { status: 204 })
+}).workflow, 'p3-worker.yml');
 await p3Provider.dispatch({
   ...input,
   role: 'architect',
