@@ -3573,12 +3573,12 @@ if (isMainModule) {
   server.listen(PORT, HTTP_HOST, () => {
     console.log(`🦞 ChatGPT Web Multi-Account Adapter listening on http://${HTTP_HOST}:${PORT}/v1`);
     console.log(`   Account Pool: ${ACCOUNT_COUNT} account(s) (Ports 9021-${9020 + ACCOUNT_COUNT})`);
-    if (process.env.M11_RUNNER_MODE !== 'mock') bridge.prewarm().catch(err => {
+    if (process.env.M11_RUNNER_MODE !== 'mock' && WORKER_PROVIDER_MODE !== 'github-actions') bridge.prewarm().catch(err => {
       console.error('[CDP] Pre-warm failed:', err.message);
     });
     // Slack is a read-only operational projection of the durable event log.
     // It never drives workflow state or task scheduling.
-    if (process.env.M11_RUNNER_MODE !== 'mock' && process.env.SLACK_PROJECTION_GLOBAL !== 'false') {
+    if (process.env.M11_RUNNER_MODE !== 'mock' && WORKER_PROVIDER_MODE !== 'github-actions' && process.env.SLACK_PROJECTION_GLOBAL !== 'false') {
       projectWorkflowEvents().catch(err => console.error('[Adapter:SlackProjection] startup:', err.message));
       setInterval(() => projectWorkflowEvents().catch(err => console.error('[Adapter:SlackProjection] loop:', err.message)), 2000).unref();
     }
