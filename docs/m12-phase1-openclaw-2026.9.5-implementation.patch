@@ -1,0 +1,264 @@
+diff --git a/src/gateway/methods/core-descriptors.ts b/src/gateway/methods/core-descriptors.ts
+index b5eb09449..fc2d479d2 100644
+--- a/src/gateway/methods/core-descriptors.ts
++++ b/src/gateway/methods/core-descriptors.ts
+@@ -116,6 +116,7 @@ export const CORE_GATEWAY_METHOD_SPECS = [
+   ["talk.mode", "talk-mode", "operator.talk", "<=2026.7"],
+   ["commands.list", "commands", "operator.read", "<=2026.7"],
+   ["models.list", "models", "operator.read", "<=2026.7", { startup: true }],
++  ["runner.admission.provision", "worker-admission", "operator.admin", "2026.9", { advertise: false }],
+   ["models.authStatus", "models-auth-status", "operator.read", "<=2026.7"],
+   ["models.authLogout", "models-auth-status", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
+   ["tools.catalog", "tools-catalog", "operator.read", "<=2026.7"],
+diff --git a/src/gateway/server-methods/environments.ts b/src/gateway/server-methods/environments.ts
+index c5fa5f79a..539dd7872 100644
+--- a/src/gateway/server-methods/environments.ts
++++ b/src/gateway/server-methods/environments.ts
+@@ -284,6 +284,40 @@ async function respondWorkerMutation(
+ }
+ 
+ export const environmentsHandlers: GatewayRequestHandlers = {
++  "runner.admission.provision": async ({ params, respond, context }) => {
++    if (!params || typeof params !== "object") {
++      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "invalid runner admission"));
++      return;
++    }
++    const request = params as Record<string, unknown>;
++    const profileId = typeof request.profileId === "string" ? request.profileId.trim() : "";
++    const idempotencyKey = typeof request.idempotencyKey === "string" ? request.idempotencyKey.trim() : "";
++    const leaseId = typeof request.leaseId === "string" ? request.leaseId.trim() : "";
++    const expiresAtMs = typeof request.expiresAtMs === "number" ? request.expiresAtMs : NaN;
++    if (!profileId || !idempotencyKey || !leaseId || !Number.isFinite(expiresAtMs)) {
++      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "invalid runner admission"));
++      return;
++    }
++    const service = context.workerEnvironmentService;
++    if (!service?.admitCloudWorker) {
++      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, "cloud worker admission unavailable"));
++      return;
++    }
++    try {
++      const result = await service.admitCloudWorker({
++        profileId,
++        idempotencyKey,
++        executionMode: request.executionMode === "remote-exec" ? "remote-exec" : "worker-turn",
++        expiresAtMs,
++        leaseId,
++      });
++      respond(true, result, undefined);
++    } catch (error) {
++      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, "runner admission failed", {
++        details: { code: error && typeof error === "object" && "code" in error ? error.code : undefined },
++      }));
++    }
++  },
+   "environments.list": async ({ params, respond, client, context }) => {
+     if (!assertValidParams(params, validateEnvironmentsListParams, "environments.list", respond)) {
+       return;
+diff --git a/src/gateway/server-worker-environment-startup.ts b/src/gateway/server-worker-environment-startup.ts
+index dab5f1358..fc4ff177b 100644
+--- a/src/gateway/server-worker-environment-startup.ts
++++ b/src/gateway/server-worker-environment-startup.ts
+@@ -5,9 +5,11 @@ import { racePromiseWithAbortSignal } from "../infra/abort-signal.js";
+ import { loadOrCreateProcessDeviceIdentity } from "../infra/device-identity.js";
+ import { getPairedDevice } from "../infra/device-pairing.js";
+ import { resolveOpenClawPackageRootSync } from "../infra/openclaw-root.js";
++import { decodePairingSetupCode } from "../pairing/setup-code.js";
+ import { getGatewayPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-state.js";
+ import type { PluginRegistry } from "../plugins/registry-types.js";
+ import type { WorkerExecutionMode, WorkerProfile } from "../plugins/types.js";
++import type { WorkerNodeEnrollment } from "../plugins/capability-provider.types.js";
+ import {
+   getActiveSecretsRuntimeConfigSnapshot,
+   getActiveSecretsRuntimeEnvState,
+@@ -374,6 +376,10 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
+       return artifact;
+     },
+   };
++  const cloudWorkerCapabilities = new Map<
++    string,
++    { record: WorkerEnvironmentRecord; enrollment: WorkerNodeEnrollment; target: string; leaseId?: string; expiresAtMs?: number }
++  >();
+   const nodeEnrollment = createWorkerNodeEnrollmentManager({
+     store: params.startup.store,
+     getConfig: getRuntimeConfig,
+@@ -382,6 +388,14 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
+     transfer: nodeBootstrapTransfer,
+     prepareArtifact: async (record, signal) =>
+       (await prepareNodeArtifact(record.profileSnapshot, signal)).artifact,
++    onBootstrapCapability: (record, enrollment) => {
++      if (!("setupCode" in enrollment) || enrollment.mode !== "connect") {
++        return;
++      }
++      const key = `${record.environmentId}:${record.nodeSetupId ?? ""}:${record.ownerEpoch}`;
++      const payload = decodePairingSetupCode(enrollment.setupCode);
++      cloudWorkerCapabilities.set(key, { record, enrollment, target: payload.url });
++    },
+   });
+   let executeSessionTool: WorkerSessionToolExecutor = async () => {
+     throw new Error("Worker session tools are unavailable");
+@@ -424,6 +438,57 @@ export async function createGatewayWorkerEnvironmentRuntime(params: {
+     prepareInstallation,
+     ensureNodeWorkerBundle: nodeWorkerBundleInstaller,
+     prepareNodeBootstrap: nodeEnrollment.prepare,
++    getCloudWorkerBootstrapCapability: (environmentId) => {
++      const record = params.startup.store.get(environmentId);
++      if (!record || !record.nodeSetupId) {
++        return undefined;
++      }
++      const key = `${environmentId}:${record.nodeSetupId}:${record.ownerEpoch}`;
++      const capability = cloudWorkerCapabilities.get(key);
++      if (!capability || capability.record.nodeSetupId !== record.nodeSetupId || capability.record.ownerEpoch !== record.ownerEpoch) {
++        return undefined;
++      }
++      if (record.destroyRequestedAtMs !== null || ["destroying", "destroyed", "failed", "orphaned"].includes(record.state)) {
++        cloudWorkerCapabilities.delete(key);
++        return undefined;
++      }
++      if (capability.expiresAtMs !== undefined && capability.expiresAtMs <= Date.now()) {
++        cloudWorkerCapabilities.delete(key);
++        return undefined;
++      }
++      if (capability.leaseId !== undefined && capability.leaseId !== record.leaseId) {
++        cloudWorkerCapabilities.delete(key);
++        return undefined;
++      }
++      if (!("setupCode" in capability.enrollment) || capability.enrollment.mode !== "connect") {
++        return undefined;
++      }
++      return {
++        setupCode: capability.enrollment.setupCode,
++        nodeSetupId: record.nodeSetupId,
++        ownerEpoch: record.ownerEpoch,
++        target: capability.target,
++      };
++    },
++    bindCloudWorkerBootstrapCapability: ({ environmentId, leaseId, expiresAtMs }) => {
++      const record = params.startup.store.get(environmentId);
++      if (!record || !record.nodeSetupId || record.leaseId === null) {
++        throw new Error("Cloud worker admission environment lease is unavailable");
++      }
++      if (record.destroyRequestedAtMs !== null) {
++        throw new Error("Cloud worker admission environment is being destroyed");
++      }
++      if (!leaseId || leaseId !== record.leaseId || expiresAtMs <= Date.now() || expiresAtMs > record.expiresAtMs) {
++        throw new Error("Cloud worker admission lease binding is invalid");
++      }
++      const key = `${environmentId}:${record.nodeSetupId}:${record.ownerEpoch}`;
++      const capability = cloudWorkerCapabilities.get(key);
++      if (!capability) {
++        throw new Error("Cloud worker admission capability is no longer current");
++      }
++      capability.leaseId = leaseId;
++      capability.expiresAtMs = expiresAtMs;
++    },
+     prepareNodeArtifacts: async (profileSnapshot, signal) => {
+       const pin = new AbortController();
+       try {
+diff --git a/src/gateway/worker-environments/node-enrollment.ts b/src/gateway/worker-environments/node-enrollment.ts
+index 4f7186ea9..a9905f88a 100644
+--- a/src/gateway/worker-environments/node-enrollment.ts
++++ b/src/gateway/worker-environments/node-enrollment.ts
+@@ -37,6 +37,7 @@ type WorkerNodeEnrollmentManagerOptions = {
+   ) => Promise<NodeBootstrapArtifact>;
+   transfer: WorkerBootstrapArtifactTransferService;
+   now?: () => number;
++  onBootstrapCapability?: (record: WorkerEnvironmentRecord, enrollment: WorkerNodeEnrollment) => void;
+ };
+ 
+ export function createWorkerNodeEnrollmentManager(options: WorkerNodeEnrollmentManagerOptions) {
+@@ -332,6 +333,7 @@ export function createWorkerNodeEnrollmentManager(options: WorkerNodeEnrollmentM
+         },
+       };
+       enrollmentClosers.set(enrollment, binding.close);
++      options.onBootstrapCapability?.(record, enrollment);
+       return enrollment;
+     } catch (error) {
+       binding.close();
+diff --git a/src/gateway/worker-environments/service.ts b/src/gateway/worker-environments/service.ts
+index 7a4c557d7..59a620e9a 100644
+--- a/src/gateway/worker-environments/service.ts
++++ b/src/gateway/worker-environments/service.ts
+@@ -92,6 +92,17 @@ type WorkerEnvironmentServiceOptions = WorkerProviderLifecycleInputOptions & {
+   inferenceStore?: WorkerInferenceStore;
+   placementStore?: WorkerSessionPlacementGate;
+   executeSessionTool?: Parameters<typeof createWorkerTurnRpc>[0]["executeSessionTool"];
++  getCloudWorkerBootstrapCapability?: (environmentId: string) => {
++    setupCode: string;
++    nodeSetupId: string;
++    ownerEpoch: number;
++    target: string;
++  } | undefined;
++  bindCloudWorkerBootstrapCapability?: (input: {
++    environmentId: string;
++    leaseId: string;
++    expiresAtMs: number;
++  }) => void;
+ };
+ 
+ export type WorkerEnvironmentReconcileCore = (
+@@ -556,6 +567,56 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
+     return profile.provider;
+   };
+ 
++  const admitCloudWorker = async (input: {
++    profileId: string;
++    idempotencyKey: string;
++    executionMode?: WorkerExecutionMode;
++    expiresAtMs: number;
++    leaseId: string;
++    signal?: AbortSignal;
++  }) => {
++    if (!Number.isSafeInteger(input.expiresAtMs) || input.expiresAtMs <= now()) {
++      throw serviceError("invalid_state", "Cloud worker admission expiry is invalid");
++    }
++    if (input.expiresAtMs > now() + 15 * 60_000) {
++      throw serviceError("invalid_state", "Cloud worker admission expiry exceeds fence");
++    }
++    const profile = options.getConfig().cloudWorkers?.profiles?.[input.profileId];
++    if (!profile) {
++      throw serviceError("profile_not_found", `Unknown worker profile: ${input.profileId}`);
++    }
++    const providerId = configuredProfileProviderId(input.profileId);
++    if (options.resolveProvider(providerId)?.requiresNodeEnrollment !== true) {
++      throw serviceError("invalid_profile", "Cloud worker admission requires node enrollment");
++    }
++    requireProviderExecutionMode(providerId, input.executionMode);
++    const result = await providerLifecycle.createWithProfile(
++      input.profileId,
++      input.idempotencyKey,
++      { executionMode: input.executionMode, signal: input.signal },
++    );
++    const capability = options.getCloudWorkerBootstrapCapability?.(result.environmentId);
++    if (!capability) {
++      throw serviceError("bootstrap_failure", "Cloud worker bootstrap capability was not retained");
++    }
++    if (capability.nodeSetupId !== result.nodeSetupId || capability.ownerEpoch !== result.ownerEpoch) {
++      throw serviceError("invalid_state", "Cloud worker bootstrap capability binding changed");
++    }
++    options.bindCloudWorkerBootstrapCapability?.({
++      environmentId: result.environmentId,
++      leaseId: input.leaseId,
++      expiresAtMs: input.expiresAtMs,
++    });
++    return {
++      environmentId: result.environmentId,
++      nodeSetupId: capability.nodeSetupId,
++      ownerEpoch: capability.ownerEpoch,
++      leaseId: input.leaseId,
++      expiresAtMs: input.expiresAtMs,
++      bootstrap: { target: capability.target, credential: capability.setupCode },
++    };
++  };
++
+   const prepareBuild = createWorkerEnvironmentBuildPreparation({
+     store,
+     getConfig: options.getConfig,
+@@ -571,6 +632,7 @@ export function createWorkerEnvironmentService(options: WorkerEnvironmentService
+   });
+ 
+   const service = {
++    admitCloudWorker,
+     prepare: (request: { profileId: string; projectPath: string }, authorize?: () => void) =>
+       trackOperation(prepareBuild(request, authorize)),
+     isStopping: () => stopping,

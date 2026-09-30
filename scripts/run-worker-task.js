@@ -2,7 +2,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 
 const required = ['JOB_ID', 'TASK_ID', 'LEASE_ID', 'ATTEMPT', 'INPUT_COMMIT', 'ROLE', 'PROVIDER_RUN_ID', 'EVIDENCE_DIR'];
 for (const key of required) {
@@ -38,6 +38,60 @@ function git(args) {
 function isoNow() { return new Date().toISOString(); }
 
 function safeJson(value) { return JSON.stringify(value, null, 2) + '\n'; }
+
+async function runExternalRunnerAgent({ payload, sessionId, evidenceDir }) {
+  const command = String(process.env.RUNNER_AGENT_COMMAND || '').trim();
+  if (!command) throw new Error('production runner agent is not configured: RUNNER_AGENT_COMMAND is required');
+  let args = [];
+  if (process.env.RUNNER_AGENT_ARGS_JSON) {
+    try { args = JSON.parse(process.env.RUNNER_AGENT_ARGS_JSON); } catch (error) {
+      throw new Error(`RUNNER_AGENT_ARGS_JSON must be a JSON array: ${error.message}`);
+    }
+  }
+  if (!Array.isArray(args) || args.some(arg => typeof arg !== 'string')) {
+    throw new Error('RUNNER_AGENT_ARGS_JSON must be an array of strings');
+  }
+  const payloadFile = path.join(evidenceDir, 'runner-agent-input.json');
+  await fs.writeFile(payloadFile, safeJson({ payload, session_id: sessionId }));
+  const timeoutMs = Math.max(1000, Number(process.env.RUNNER_AGENT_TIMEOUT_MS) || 15 * 60 * 1000);
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        RUNNER_AGENT_INPUT: payloadFile,
+        RUNNER_AGENT_SESSION_ID: sessionId
+      }
+    });
+    let stdout = ''; let stderr = ''; let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGTERM');
+      reject(new Error(`runner agent timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('error', error => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); reject(error);
+    });
+    child.on('close', code => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      if (code !== 0) return reject(new Error(`runner agent exited with status ${code}: ${stderr.slice(-2000)}`));
+      let output;
+      try { output = JSON.parse(stdout); } catch (error) {
+        return reject(new Error(`runner agent must emit one JSON object on stdout: ${error.message}`));
+      }
+      if (!output || typeof output !== 'object' || Array.isArray(output)) {
+        return reject(new Error('runner agent output must be a JSON object'));
+      }
+      resolve({ output: JSON.stringify(output), stdout, stderr });
+    });
+  });
+}
 
 const RUNNER_ROLE_OUTPUTS = Object.freeze({
   'product-owner': { scope: 'M11 runner-owned product scope', acceptance_criteria: ['runner dispatch is durable', 'no local specialist session is created'], non_goals: ['local OpenClaw child spawning'] },
@@ -168,8 +222,14 @@ try {
   let agentOutput = null;
   if (agentTask) {
     const sessionId = `runner:${process.env.ROLE}:${process.env.JOB_ID}:${process.env.TASK_ID}:attempt:${process.env.ATTEMPT}`;
-    agentOutput = payload.agent_output || buildRunnerAgentOutput(process.env.ROLE, sessionId);
-    execution = { execution_session_id: sessionId, exitCode: 0, timedOut: false, stdout: agentOutput, stderr: '', command: 'runner-agent' };
+    if (process.env.M11_RUNNER_MODE === 'mock') {
+      agentOutput = payload.agent_output || buildRunnerAgentOutput(process.env.ROLE, sessionId);
+      execution = { execution_session_id: sessionId, exitCode: 0, timedOut: false, stdout: agentOutput, stderr: '', command: 'm11-mock-agent' };
+    } else {
+      const external = await runExternalRunnerAgent({ payload, sessionId, evidenceDir });
+      agentOutput = external.output;
+      execution = { execution_session_id: sessionId, exitCode: 0, timedOut: false, stdout: external.stdout, stderr: external.stderr, command: process.env.RUNNER_AGENT_COMMAND };
+    }
   } else {
     const manager = new ExecutionManager(store, { timeoutMs: Math.max(1000, Number(payload.timeout_ms) || Number(process.env.EXECUTION_TIMEOUT_MS) || 120000) });
     const executionCwd = payload.cwd ? assertWorkspacePath(payload.cwd, 'task cwd') : process.cwd();
