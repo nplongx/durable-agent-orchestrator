@@ -98,8 +98,8 @@ try {
   };
   if (payload.job_id !== expected.job_id) throw new Error('payload correlation mismatch: job_id');
   if (payload.task_id !== expected.task_id) throw new Error('payload correlation mismatch: task_id');
-  if (!resuming && payload.lease_id !== expected.lease_id) throw new Error('payload correlation mismatch: lease_id');
-  if (!resuming && payload.attempt !== expected.attempt) throw new Error('payload correlation mismatch: attempt');
+  if (!resuming && payload.lease_id != null && payload.lease_id !== expected.lease_id) throw new Error('payload correlation mismatch: lease_id');
+  if (!resuming && payload.attempt != null && payload.attempt !== expected.attempt) throw new Error('payload correlation mismatch: attempt');
   if (resuming && checkpoint.task_id && checkpoint.task_id !== expected.task_id) throw new Error('checkpoint correlation mismatch: task_id');
   if (resuming && checkpoint.job_id && checkpoint.job_id !== expected.job_id) throw new Error('checkpoint correlation mismatch: job_id');
   if (payload.role && payload.role !== process.env.ROLE) throw new Error('payload correlation mismatch: role');
