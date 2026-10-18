@@ -52,4 +52,4 @@ jobs:
         run: npm test
 
       - name: Whitespace validation
-        run: git diff --check HEAD^ HEAD
+        run: git show --check --oneline HEAD
