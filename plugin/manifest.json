@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "chat-on-steroids-local-orchestrator",
   "display_name": "Local Agent Orchestrator",
-  "version": "1.0.8",
+  "version": "1.0.9-rc.1",
   "description": "Local-only durable agent workflow orchestration, versioned custom roles, validated custom workflows, and approval-gated custom workflow execution for Chat On Steroids. No cloud workers, remote runners, or external model APIs.",
   "long_description": "A local-only workflow plugin with durable SQLite state, separate plan and execution approvals, dependency-aware custom role task handoff, typed artifacts, immutable plans, deterministic built-in local execution, and auditable results.",
   "author": {
