@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "chat-on-steroids-local-orchestrator",
   "display_name": "Local Agent Orchestrator",
-  "version": "1.0.9-rc.1",
-  "description": "Local-only durable agent workflow orchestration, versioned custom roles, validated custom workflows, and approval-gated custom workflow execution for Chat On Steroids. No cloud workers, remote runners, or external model APIs.",
-  "long_description": "A local-only workflow plugin with durable SQLite state, separate plan and execution approvals, dependency-aware custom role task handoff, typed artifacts, immutable plans, deterministic built-in local execution, and auditable results.",
+  "version": "1.0.9-rc.2",
+  "description": "Local-only durable workflow orchestration with an immutable built-in system coordinator role, strict JSON success predicates, typed evidence, versioned roles/Skills, and approval-gated execution.",
+  "long_description": "A local-first workflow plugin with a non-user-creatable System Workflow Coordinator role, one-step lifecycle orchestration, durable SQLite state, separate plan and execution approvals, dependency-aware custom roles, optional Agent Skills snapshots, closed JSON predicates for success criteria, runtime PASS/FAIL evaluation against immutable plans and provenance-validated artifacts, deterministic built-in local execution, and auditable results.",
   "author": {
     "name": "FreeChatClaw"
   },
@@ -21,6 +21,14 @@
   },
   "tools": [
     {
+      "name": "workflow_coordinator_role",
+      "description": "Read the immutable built-in System Workflow Coordinator role used by the host assistant. It is not a custom role and cannot be created or modified through custom-role tools."
+    },
+    {
+      "name": "workflow_coordinator_step",
+      "description": "Primary high-level workflow lifecycle tool. Dispatches only approved runs, prepares tasks, advances approved deterministic local steps, returns the next specialist contract, and submits task results or synthesis without bypassing approval/evidence gates."
+    },
+    {
       "name": "orchestrator_health",
       "description": "Check local plugin and SQLite state; does not probe remote services."
     },
@@ -30,7 +38,7 @@
     },
     {
       "name": "workflow_create",
-      "description": "Create a proposal without approving or executing it."
+      "description": "Create a proposal with an optional goal and closed JSON constraint/success predicates; approval and execution remain separate."
     },
     {
       "name": "workflow_list",
@@ -57,6 +65,10 @@
       "description": "Return the next dependency-ready task with role-specific contract and typed predecessor artifact evidence. Call again after each task; blocked means findings must be resolved before synthesis."
     },
     {
+      "name": "workflow_request_reviewer_revision",
+      "description": "Request a provenance-preserving reviewer revision only when a standard-engineering v2 accepted review is blocked solely by documented evidenceIssues; never approves synthesis or weakens the immutable success contract."
+    },
+    {
       "name": "workflow_complete_task",
       "description": "Persist the actual result and typed artifact of a local specialist task."
     },
@@ -65,8 +77,12 @@
       "description": "Execute an approved structured deterministic command locally."
     },
     {
+      "name": "execute_batch",
+      "description": "Execute approved deterministic local tasks as a durable batch through the existing ExecutionManager; task commands and roles are derived from the immutable approved plan."
+    },
+    {
       "name": "workflow_complete_synthesis",
-      "description": "Validate evidence and terminalize a completed workflow."
+      "description": "Independently evaluate declared JSON success predicates against the immutable plan, durable tasks, and provenance-validated artifacts before terminalization."
     },
     {
       "name": "workflow_events",
@@ -150,7 +166,7 @@
     },
     {
       "name": "custom_workflow_run_create",
-      "description": "Create an execution proposal from an approved custom workflow plan; separate execution approval is required."
+      "description": "Create a proposal from an approved custom workflow plan with an optional goal and closed JSON success predicates; separate execution approval is required."
     }
   ],
   "compatibility": {

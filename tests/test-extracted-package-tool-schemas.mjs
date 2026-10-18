@@ -126,6 +126,17 @@ try {
   assert.equal(executeLocal.properties.timeout_ms.minimum, 1000);
   assert.equal(executeLocal.properties.timeout_ms.maximum, 600000);
 
+  const executeBatch = schemaFor('execute_batch');
+  assertRequired('execute_batch', ['job_id', 'task_ids']);
+  assert.deepEqual(Object.keys(executeBatch.properties).sort(), ['job_id', 'task_ids']);
+  assert.equal(executeBatch.additionalProperties, false);
+  assert.equal(executeBatch.properties.job_id.type, 'string');
+  assert.equal(executeBatch.properties.task_ids.type, 'array');
+  assert.equal(executeBatch.properties.task_ids.minItems, 1);
+  assert.equal(executeBatch.properties.task_ids.maxItems, 32);
+  assert.equal(executeBatch.properties.task_ids.uniqueItems, true,
+    'execute_batch must declare unique task IDs as part of its public schema');
+
   const completeTask = schemaFor('workflow_complete_task');
   assertRequired('workflow_complete_task', ['task_id', 'content', 'artifact']);
   assert.equal(completeTask.properties.content.type, 'string');

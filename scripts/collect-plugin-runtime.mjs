@@ -33,7 +33,10 @@ const queue = [
   // cannot resolve. Keep this runtime dependency explicit in the bundle.
   'src/runtime/workflow/case01-artifact-acceptance.js',
   'src/runtime/workflow/custom-roles.js',
-  'src/runtime/workflow/custom-workflows.js'
+  'src/runtime/workflow/custom-workflows.js',
+  // The immutable system coordinator is loaded through runtimePrefix in the
+  // server entry point, so keep this dynamic-import dependency explicit.
+  'src/runtime/workflow/system-coordinator.js'
 ];
 const visited = new Set();
 // Include static imports, dynamic imports, and side-effect-only imports. If a

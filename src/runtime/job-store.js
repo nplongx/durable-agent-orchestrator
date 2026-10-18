@@ -694,6 +694,108 @@ export class WorkflowStore {
       throw error;
     }
   }
+  prepareReviewerRevision(jobId, { reason } = {}) {
+    const normalizedReason = typeof reason === 'string' ? reason.trim() : '';
+    if (!normalizedReason || normalizedReason.length > 4000) {
+      throw new Error('reviewer revision requires a concise non-empty reason (max 4000 characters)');
+    }
+    this.assertApprovalCurrent(jobId);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const job = this.getJob(jobId);
+      if (!job || job.state !== 'EXECUTING' || job.status !== 'active') {
+        throw new Error(`reviewer revision requires an active executing workflow: ${jobId}`);
+      }
+      const plan = this.getExecutionPlan(jobId);
+      if (String(plan?.workflow_id || '').toLowerCase() !== 'standard-engineering' || Number(plan?.workflow_version) < 2) {
+        throw new Error('reviewer revision is only supported for standard-engineering workflow version 2 or later');
+      }
+      const parent = this.getTask(job.active_task_id);
+      if (!parent || parent.role !== 'cto' || parent.status !== 'running') {
+        throw new Error('reviewer revision requires the active running CTO coordinator task');
+      }
+
+      const pendingRevisionEvent = this.db.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='workflow.reviewer.revision_requested' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(jobId);
+      if (pendingRevisionEvent) {
+        const payload = parseStrictJson(pendingRevisionEvent.payload_json, 'reviewer revision event payload');
+        const task = this.getTask(payload.revisionTaskId);
+        const stillSameReview = this.db.prepare("SELECT 1 AS found FROM artifacts WHERE artifact_id=? AND status='invalidated' AND job_id=? AND kind='review'").get(payload.reviewArtifactId, jobId);
+        if (task && ['pending', 'running'].includes(task.status) && stillSameReview) {
+          this.db.exec('COMMIT');
+          return { prepared: true, idempotent: true, ...payload, task };
+        }
+      }
+
+      const activeReviewRow = this.db.prepare("SELECT * FROM artifacts WHERE job_id=? AND kind='review' AND status='active' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(jobId);
+      if (!activeReviewRow) throw new Error('reviewer revision requires a current active review artifact');
+      const reviewArtifact = this.hydrateArtifact(activeReviewRow);
+
+      const priorEvent = this.db.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='workflow.reviewer.revision_requested' AND json_extract(payload_json,'$.reviewArtifactId')=? LIMIT 1")
+        .get(jobId, reviewArtifact.artifact_id);
+      if (priorEvent) {
+        const payload = parseStrictJson(priorEvent.payload_json, 'reviewer revision event payload');
+        const task = this.getTask(payload.revisionTaskId);
+        if (!task || task.job_id !== jobId || task.parent_task_id !== parent.task_id || task.role !== 'reviewer') {
+          throw new Error('idempotent reviewer revision event does not bind its planned reviewer task');
+        }
+        this.db.exec('COMMIT');
+        return { prepared: true, idempotent: true, ...payload, task };
+      }
+
+      const review = reviewArtifact.content || {};
+      if (review.decision !== 'accept' ||
+          !['requirementsSatisfied', 'architectureConformant', 'securityAccepted', 'qaAccepted', 'platformAccepted', 'documentationAccepted'].every(field => review[field] === true) ||
+          !['implementationIssues', 'securityIssues', 'blockingIssues'].every(field => Array.isArray(review[field]) && review[field].length === 0) ||
+          !Array.isArray(review.evidenceIssues) || review.evidenceIssues.length === 0 ||
+          !review.evidenceIssues.every(item => typeof item === 'string')) {
+        throw new Error('reviewer revision is only allowed for an accepted review whose sole findings are documented evidence limitations');
+      }
+
+      const reviewerSpec = (plan.children || []).find(spec => String(spec.role).toLowerCase() === 'reviewer');
+      if (!reviewerSpec) throw new Error('reviewer revision requires a reviewer in the immutable plan');
+      const children = this.db.prepare('SELECT * FROM tasks WHERE job_id=? AND parent_task_id=? ORDER BY created_at ASC, rowid ASC').all(jobId, parent.task_id);
+      const unsettled = children.filter(task => task.status !== 'completed');
+      if (unsettled.length) throw new Error(`reviewer revision requires all prior workflow tasks to be completed: ${unsettled.map(task => `${task.role}:${task.status}`).join(', ')}`);
+      const currentReviewer = this.getTask(reviewArtifact.task_id);
+      if (!currentReviewer || currentReviewer.job_id !== jobId || currentReviewer.parent_task_id !== parent.task_id || currentReviewer.role !== 'reviewer' || currentReviewer.status !== 'completed') {
+        throw new Error('active review artifact is not owned by the completed reviewer task under the active CTO parent');
+      }
+      const reviewerMetadata = parseStrictJson(currentReviewer.metadata_json || '{}', 'reviewer task metadata');
+      if (reviewerMetadata.workflow_plan_task_id !== reviewerSpec.id) {
+        throw new Error('active review artifact is not bound to the immutable reviewer plan task');
+      }
+
+      this.db.prepare("UPDATE artifacts SET status=? WHERE artifact_id=? AND job_id=? AND kind='review' AND status='active'")
+        .run(ArtifactStatus.INVALIDATED, reviewArtifact.artifact_id, jobId);
+      const revisionTask = this.createChildTask(jobId, {
+        parentTaskId: parent.task_id,
+        role: reviewerSpec.role,
+        description: `Review revision for reviewer after documented evidence limitation in ${reviewArtifact.artifact_id}.`,
+        dependencies: reviewerSpec.dependencies || [],
+        metadata: {
+          rework: true,
+          rework_of_task_id: currentReviewer.task_id,
+          rework_of_artifact_id: reviewArtifact.artifact_id,
+          workflow_plan_task_id: reviewerSpec.id
+        }
+      });
+      const payload = {
+        jobId,
+        parentTaskId: parent.task_id,
+        reviewArtifactId: reviewArtifact.artifact_id,
+        previousReviewerTaskId: currentReviewer.task_id,
+        revisionTaskId: revisionTask.task_id,
+        reason: normalizedReason,
+        planHash: plan.plan_hash
+      };
+      this.recordEvent(jobId, 'workflow.reviewer.revision_requested', payload, `${jobId}|reviewer-revision|${reviewArtifact.artifact_id}`);
+      this.db.exec('COMMIT');
+      return { prepared: true, idempotent: false, ...payload, task: revisionTask };
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch (_) {}
+      throw error;
+    }
+  }
   hydrateArtifact(row) {
     const content = row.content;
     const parsed = (() => { try { return parseStrictJson(content); } catch (_) { return content; } })();
@@ -726,11 +828,13 @@ export class WorkflowStore {
     }
     return { ...plan, plan_hash: row.plan_hash, compiled_at: row.compiled_at, approved_at: row.approved_at };
   }
-  compileExecutionPlan(jobId, { workspace = process.env.WORKFLOW_WORKSPACE, customWorkflow = null } = {}) {
+  compileExecutionPlan(jobId, { workspace = process.env.WORKFLOW_WORKSPACE, customWorkflow = null, successContract = undefined } = {}) {
     const job = this.getJob(jobId);
     if (!job) throw new Error('job not found: ' + jobId);
     const existing = this.getExecutionPlan(jobId);
-    const plan = compileWorkflowPlan(job, { workspace, customWorkflow });
+    const proposalPayload = this.getCurrentProposal(jobId)?.payload || {};
+    const pinnedSuccessContract = successContract ?? proposalPayload.success_contract ?? { goal: proposalPayload.task || job.title };
+    const plan = compileWorkflowPlan(job, { workspace, customWorkflow, successContract: pinnedSuccessContract });
     const planJson = canonicalJson(Object.fromEntries(Object.entries(plan).filter(([key]) => key !== 'plan_hash')));
     if (existing) {
       const storedPlan = this.db.prepare('SELECT plan_json, plan_hash FROM workflow_plans WHERE job_id = ?').get(jobId);
@@ -2166,7 +2270,7 @@ export class WorkflowStore {
       const command = item.command === undefined || item.command === null ? metadata.command : item.command;
       if (typeof command !== 'string' || !command.trim() || command.length > MAX_EXECUTION_COMMAND_CHARS ||
           metadata.deterministic !== true || typeof metadata.command !== 'string' || !metadata.command.trim() ||
-          metadata.command !== command || (metadata.executor && metadata.executor !== 'ExecutionManager')) {
+          (metadata.executor && metadata.executor !== 'ExecutionManager')) {
         throw new Error(`batch task is not an exact deterministic task: ${item.taskId}`);
       }
       const cwdInput = item.cwd === undefined || item.cwd === null ? metadata.cwd : item.cwd;
@@ -2178,11 +2282,55 @@ export class WorkflowStore {
       if (timeoutMs !== null && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_EXECUTION_TIMEOUT_MS)) {
         throw new Error(`execution batch item timeout_ms must be a safe integer in 1..${MAX_EXECUTION_TIMEOUT_MS}: ${item.taskId}`);
       }
+      if (metadata.workflow_plan_task_id && metadata.executor === 'ExecutionManager') {
+        // Structured workflow tasks store a human-readable command before
+        // execution, while ExecutionManager requires the canonical shell-quoted
+        // command that it will bind into the durable attempt. Only the
+        // immutable-plan verifier may authorize that representation; do not
+        // accept arbitrary command substitutions for planned task IDs.
+        const approved = this.assertPreparedExecutionPlan(task, { command, cwd: cwd ?? metadata.cwd });
+        if (!approved || approved.executable !== metadata.executable ||
+            JSON.stringify(approved.args) !== JSON.stringify(metadata.args) ||
+            Number(approved.timeout_ms) !== Number(metadata.timeout_ms)) {
+          throw new Error(`batch structured execution differs from the immutable plan: ${item.taskId}`);
+        }
+      } else if (metadata.command !== command) {
+        throw new Error(`batch task is not an exact deterministic task: ${item.taskId}`);
+      }
       return { taskId: task.task_id, command, cwd, timeoutMs };
     });
+    if (new Set(normalized.map(item => item.taskId)).size !== normalized.length) {
+      throw new Error('execution batch task IDs must be unique');
+    }
     const batchId = id('batch'); const ts = now();
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      const currentJob = this.getJob(jobId);
+      if (!currentJob || currentJob.status !== 'active' || currentJob.state !== 'EXECUTING') {
+        throw new Error(`execution batch requires an active EXECUTING job at durable reservation: ${jobId}`);
+      }
+      // Planned production requests recheck the current approval under the same
+      // SQLite writer reservation as batch/item insertion. This closes the gap
+      // between MCP preflight and durable creation if an approval is revoked or
+      // the approved proposal is replaced concurrently.
+      if (this.getExecutionPlan(jobId)) this.assertApprovalCurrent(jobId);
+      // Two MCP requests can pass their read-only preflight concurrently. A
+      // second transaction must not create another batch for a task even if
+      // the first one finishes between those preflights. Recovery/retry uses
+      // the existing batch ID; a new batch is never a task replay capability.
+      const taskIds = normalized.map(item => item.taskId);
+      const placeholders = taskIds.map(() => '?').join(',');
+      const states = this.db.prepare(`SELECT task_id,status,execution_status,execution_session_id,execution_attempt
+        FROM tasks WHERE task_id IN (${placeholders})`).all(...taskIds);
+      if (states.length !== taskIds.length) throw new Error('execution batch task set changed before durable reservation');
+      const ineligible = states.find(task => task.status !== 'pending' || task.execution_status != null ||
+        task.execution_session_id != null || (task.execution_attempt != null && task.execution_attempt !== 0));
+      if (ineligible) throw new Error(`execution batch task is no longer pending and unexecuted: ${ineligible.task_id}`);
+      const previousItems = this.db.prepare(`SELECT task_id,batch_id FROM execution_batch_items
+        WHERE task_id IN (${placeholders}) LIMIT 1`).get(...taskIds);
+      if (previousItems) throw new Error(`execution batch task already belongs to durable batch history: ${previousItems.task_id}`);
+      const previousAttempts = this.db.prepare(`SELECT task_id FROM attempts WHERE task_id IN (${placeholders}) LIMIT 1`).get(...taskIds);
+      if (previousAttempts) throw new Error(`execution batch task already has execution attempt history: ${previousAttempts.task_id}`);
       this.db.prepare(`INSERT INTO execution_batches(batch_id, job_id, parent_task_id, role, status, attempt, created_at, started_at)
         VALUES(?, ?, ?, ?, 'RUNNING', ?, ?, ?)`).run(batchId, jobId, parentTaskId, role, attempt, ts, ts);
       for (const item of normalized) {
@@ -6254,7 +6402,7 @@ export class WorkflowStore {
     return this.getSlackJobView(jobId);
   }
   getSlackJobView(jobId) { return this.db.prepare('SELECT * FROM slack_job_views WHERE job_id=?').get(jobId) || null; }
-  approve(jobId, rawText, actor = 'chat-on-steroids-user', { workspace = process.env.WORKFLOW_WORKSPACE, customWorkflow = null } = {}) {
+  approve(jobId, rawText, actor = 'chat-on-steroids-user', { workspace = process.env.WORKFLOW_WORKSPACE, customWorkflow = null, successContract = undefined } = {}) {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const job = this.getJob(jobId);
@@ -6282,7 +6430,7 @@ export class WorkflowStore {
       const runtime = this.getWorkflowRuntimeState(jobId);
       if (runtime?.phase === 'PROPOSED') this.transitionWorkflowPhase(jobId, 'APPROVED', { event: 'workflow.approved', payload: { actor } });
       this.recordEvent(jobId, 'approval.approved', { actor, rawText, proposalHash: proposal.proposalHash }, hash(`${rawText}|${proposal.proposalHash}`));
-      if (isSupportedWorkflow(this.getJob(jobId))) this.compileExecutionPlan(jobId, { workspace, customWorkflow });
+      if (isSupportedWorkflow(this.getJob(jobId))) this.compileExecutionPlan(jobId, { workspace, customWorkflow, successContract: successContract ?? proposal.payload.success_contract });
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -7228,9 +7376,12 @@ export class WorkflowStore {
         .all(jobId, task.task_id, executionAttempt);
       const metadata = parseStrictJson(task.metadata_json || '{}');
       const boundaryIdentity = metadata.execution_boundary_identity || null;
-      const expectedStartPayloadKeys = boundaryIdentity
-        ? 'attempt,attemptId,command,cwd,executionBoundaryIdentity,executionSessionId,taskId,tmuxName'
-        : 'attempt,attemptId,command,cwd,executionSessionId,taskId,tmuxName';
+      const expectedStartPayloadKeys = [
+        'attempt', 'attemptId', 'command', 'cwd',
+        ...(metadata.execution_batch_claim ? ['executionBatchClaim'] : []),
+        ...(boundaryIdentity ? ['executionBoundaryIdentity'] : []),
+        'executionSessionId', 'taskId', 'tmuxName'
+      ].sort().join(',');
       const boundaryIdentityValid = !boundaryIdentity || (
         boundaryIdentity.schema_version === 1 && boundaryIdentity.task_id === task.task_id &&
         boundaryIdentity.attempt === executionAttempt && boundaryIdentity.command === completion.command &&
@@ -7276,6 +7427,9 @@ export class WorkflowStore {
         startPayload?.taskId === task.task_id && startPayload.executionSessionId === completion.executionSessionId &&
         typeof startPayload.attempt === 'number' && startPayload.attempt === executionAttempt && startPayload.attemptId === completion.attemptId &&
         startPayload.command === completion.command && (startPayload.cwd ?? null) === (metadata.cwd ?? null) &&
+        (metadata.execution_batch_claim
+          ? canonicalJson(metadata.execution_batch_claim) === canonicalJson(startPayload.executionBatchClaim)
+          : !Object.hasOwn(startPayload, 'executionBatchClaim')) &&
         Object.keys(startPayload || {}).sort().join(',') === expectedStartPayloadKeys && boundaryIdentityValid &&
         attemptRows.length === 1 && attemptRows[0].status === 'completed' && Boolean(attemptRows[0].finished_at) &&
         attemptRows[0].started_at <= startRow.created_at && terminalExecutionEvents.length === 1 &&

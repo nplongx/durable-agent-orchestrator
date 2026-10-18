@@ -1324,19 +1324,41 @@ export class ExecutionManager {
         throw new Error(`execution batch task has a malformed prior execution attempt: ${item.task_id}`);
       }
       try {
-        result = await this.executeTask(item.task_id, {
-          command: item.command,
-          timeoutMs: item.timeout_ms == null ? timeoutMs : Number(item.timeout_ms),
-          cwd: cwd || item.cwd || process.cwd(),
-          env,
-          signal,
-          batchClaim: {
-            batchId,
-            itemId: item.item_id,
-            batchAttempt: batch.attempt,
-            itemAttempt: item.attempt
-          }
-        });
+        const batchClaim = {
+          batchId,
+          itemId: item.item_id,
+          batchAttempt: batch.attempt,
+          itemAttempt: item.attempt
+        };
+        const itemTimeoutMs = item.timeout_ms == null ? timeoutMs : Number(item.timeout_ms);
+        const itemCwd = cwd || item.cwd || process.cwd();
+        const metadata = taskBeforeExecution ? parseStrictJson(taskBeforeExecution.metadata_json || '{}') : {};
+        if (metadata.deterministic === true && metadata.executor === 'ExecutionManager' &&
+            typeof metadata.workflow_plan_task_id === 'string' && metadata.workflow_plan_task_id &&
+            typeof metadata.executable === 'string' && Array.isArray(metadata.args)) {
+          // Plan-bound structured tasks must use the same immutable executable /
+          // argv path as task_execute_local. Thread the batch claim through the
+          // atomic preparation fence rather than parsing a canonical command as
+          // a legacy shell string.
+          result = await this.executeStructuredTask(item.task_id, {
+            executable: metadata.executable,
+            args: metadata.args,
+            timeoutMs: itemTimeoutMs,
+            cwd: itemCwd,
+            env,
+            signal,
+            batchClaim
+          });
+        } else {
+          result = await this.executeTask(item.task_id, {
+            command: item.command,
+            timeoutMs: itemTimeoutMs,
+            cwd: itemCwd,
+            env,
+            signal,
+            batchClaim
+          });
+        }
       } catch (error) {
         // A claim recovered or superseded during async preflight is no longer
         // this caller's property. Never write a failure over the newer owner's
@@ -1533,7 +1555,7 @@ export class ExecutionManager {
     return this.executeTask(taskId, { command, timeoutMs, cwd: cwd || metadata.cwd || process.cwd(), env, signal, executionLease });
   }
 
-  async executeStructuredTask(taskId, { executable, args = [], timeoutMs = this.timeoutMs, cwd = process.cwd(), env = {}, signal = null, executionLease = null } = {}) {
+  async executeStructuredTask(taskId, { executable, args = [], timeoutMs = this.timeoutMs, cwd = process.cwd(), env = {}, signal = null, executionLease = null, batchClaim = null } = {}) {
     throwIfAborted(signal);
     const exactExecutable = String(executable || '').trim();
     if (!exactExecutable || !Array.isArray(args) || args.some(arg => typeof arg !== 'string' || arg.includes('\0') || arg.length > MAX_EXECUTION_COMMAND_CHARS)) {
@@ -1555,7 +1577,7 @@ export class ExecutionManager {
       throw new Error(`task has a malformed durable execution attempt: ${taskId}`);
     }
     if (task.execution_status === 'running') {
-      const recovered = await this._collectExistingExecutionFromExitMarker(task, { command });
+      const recovered = await this._collectExistingExecutionFromExitMarker(task, { command, batchClaim });
       if (recovered) return recovered;
       const error = new Error(`task already executing or prior attempt unresolved; no exit marker proves completion, automatic replay refused: ${taskId}`);
       error.code = 'ERR_EXECUTION_ATTEMPT_UNRESOLVED';
@@ -1596,7 +1618,15 @@ export class ExecutionManager {
     };
     const supervisorCommand = structuredCommand(boundaryIdentity.supervisor.realpath,
       ['-e', EXECUTION_OUTPUT_SUPERVISOR_SOURCE, JSON.stringify(supervisorSpec)]);
-    this.store.prepareExecution(taskId, { executionSessionId, attempt: nextAttempt, command, cwd, startedAt, tmuxName, boundaryIdentity });
+    const preparedExecution = { executionSessionId, attempt: nextAttempt, command, cwd, startedAt, tmuxName, boundaryIdentity };
+    if (batchClaim) {
+      if (typeof this.store.prepareExecutionForBatchClaim !== 'function') {
+        throw new Error('batch execution requires the atomic store claim/preparation fence');
+      }
+      this.store.prepareExecutionForBatchClaim(taskId, preparedExecution, batchClaim);
+    } else {
+      this.store.prepareExecution(taskId, preparedExecution);
+    }
     const script = `exec ${supervisorCommand}`;
     let spawnAccepted = false;
     let executionExitObserved = false;

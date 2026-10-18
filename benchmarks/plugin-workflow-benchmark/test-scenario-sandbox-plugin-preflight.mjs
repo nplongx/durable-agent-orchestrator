@@ -85,7 +85,7 @@ try {
   const listing = await rpc('tools/list');
   const tools = listing.result?.tools;
   assert.ok(Array.isArray(tools), `MCP tools/list failed: ${JSON.stringify(listing.error)}`);
-  assert.equal(tools.length, 33);
+  assert.equal(tools.length, 37);
   assert.ok(tools.some(tool => tool.name === 'orchestrator_health'));
   const healthCall = await rpc('tools/call', { name: 'orchestrator_health', arguments: {} });
   assert.ok(!healthCall.error && !healthCall.result?.isError, `read-only health call failed: ${JSON.stringify(healthCall)}`);

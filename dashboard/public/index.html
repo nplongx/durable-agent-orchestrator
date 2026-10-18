@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f2f4f3">
+  <title>ORBIT / OPS — Local Workflow Monitor</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/ux-overrides.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">O</div>
+        <div><div class="brand-name">ORBIT<span> / </span>OPS</div><div class="brand-caption">LOCAL ORCHESTRATOR</div></div>
+      </div>
+      <div class="workspace-label">WORKSPACE <span class="mini-live"><b></b> LOCAL</span></div>
+      <nav class="primary-nav" aria-label="Primary navigation">
+        <button class="nav-item active" data-view="overview"><span class="nav-symbol">◈</span><span>Overview</span><span class="nav-arrow">↗</span></button>
+        <button class="nav-item" data-view="workflows"><span class="nav-symbol">⌘</span><span>Workflows</span><span class="nav-count" id="nav-jobs-count">—</span></button>
+        <button class="nav-item" data-view="roles"><span class="nav-symbol">◎</span><span>Roles &amp; skills</span><span class="nav-count" id="nav-roles-count">—</span></button>
+        <button class="nav-item" data-view="batches"><span class="nav-symbol">▤</span><span>Batch execution</span><span class="nav-count" id="nav-batches-count">—</span></button>
+        <button class="nav-item" data-view="events"><span class="nav-symbol">≋</span><span>Event stream</span><span class="nav-count" id="nav-events-count">—</span></button>
+        <button class="nav-item" data-view="artifacts"><span class="nav-symbol">▧</span><span>Artifacts</span></button>
+        <button class="nav-item" data-view="files"><span class="nav-symbol">▤</span><span>File explorer</span></button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="secure-card"><div class="secure-icon">⌑</div><div><strong>LOCAL-FIRST</strong><span>Read-only inspection</span></div><span class="secure-check">✓</span></div>
+        <div class="source-foot"><span class="source-dot"></span><span>SQLITE SOURCE OF TRUTH</span></div>
+        <div class="sidebar-version">ORBIT DASHBOARD <span>v1.0</span></div>
+      </div>
+    </aside>
+
+    <main class="main-column">
+      <header class="topbar">
+        <div class="breadcrumb"><span>ORBIT</span><b>/</b><strong id="crumb-current">Overview</strong></div>
+        <div class="top-actions">
+          <label class="global-search"><span>⌕</span><input id="global-search" type="search" placeholder="Search workflows…" aria-label="Search workflows (press Enter to open registry)" autocomplete="off"><kbd>↵</kbd></label>
+          <button class="icon-button" id="refresh-button" title="Refresh dashboard" aria-label="Refresh dashboard">↻</button>
+          <div class="user-chip"><span class="user-avatar">LO</span><div><strong>LOCAL OPERATOR</strong><span id="top-health">Connecting…</span></div><span class="chevron">⌄</span></div>
+        </div>
+      </header>
+
+      <div class="content-wrap">
+        <section class="hero-row">
+          <div>
+            <div class="eyebrow"><span id="last-updated">SYNCING SNAPSHOT</span></div>
+            <h1 id="page-title">Operations <em>Overview</em></h1>
+            <p id="page-subtitle">Workflow status, recent activity and exceptions.</p>
+          </div>
+          <div class="hero-controls"><div class="read-only-badge"><span>◉</span> OBSERVE ONLY</div><button id="hero-refresh" class="primary-button"><span>↻</span> Refresh snapshot</button></div>
+        </section>
+
+        <div id="connection-banner" class="connection-banner hidden" role="status"></div>
+        <section id="overview-view" class="view-panel">
+          <section class="panel attention-panel" aria-labelledby="attention-title">
+            <div class="attention-head"><div><div class="panel-kicker">PRIORITY QUEUE</div><h2 id="attention-title">Needs attention <span id="attention-count" class="attention-count">0</span></h2></div><div class="attention-tools"><button class="quick-filter" data-attention-filter="failed">Failures</button><button class="quick-filter" data-attention-filter="stale">Quiet &gt;15m</button><button class="quick-filter" data-attention-filter="pinned">Pinned</button></div></div>
+            <div id="attention-list" class="attention-list"><div class="attention-empty">Checking for workflow exceptions…</div></div>
+            <div class="attention-foot"><span class="attention-dot"></span><span id="attention-summary"></span><span>“Quiet &gt;15m” is a timestamp-based heuristic, not a confirmed failure.</span></div>
+          </section>
+          <div class="metric-grid">
+            <article class="metric-card metric-cyan"><div class="metric-head"><span>WORKFLOWS</span><span class="metric-glyph">◈</span></div><div class="metric-value" id="metric-jobs">—</div><div class="metric-foot"><span class="metric-indicator"></span><span id="metric-jobs-foot">Recorded jobs</span><span class="metric-spark" id="spark-jobs"></span></div></article>
+            <article class="metric-card metric-lime"><div class="metric-head"><span>RUNNING TASKS</span><span class="metric-glyph">⌘</span></div><div class="metric-value" id="metric-active">—</div><div class="metric-foot"><span class="metric-indicator"></span><span id="metric-active-foot">In progress</span><span class="metric-spark" id="spark-tasks"></span></div></article>
+            <article class="metric-card metric-violet"><div class="metric-head"><span>EVENTS</span><span class="metric-glyph">≋</span></div><div class="metric-value" id="metric-events">—</div><div class="metric-foot"><span class="metric-indicator"></span><span>Recorded signals</span><span class="metric-spark" id="spark-events"></span></div></article>
+            <article class="metric-card metric-amber"><div class="metric-head"><span>ARTIFACTS</span><span class="metric-glyph">▧</span></div><div class="metric-value" id="metric-artifacts">—</div><div class="metric-foot"><span class="metric-indicator"></span><span id="metric-artifact-foot">Evidence objects</span><span class="metric-spark" id="spark-artifacts"></span></div></article>
+          </div>
+
+          <div class="dashboard-grid">
+            <article class="panel activity-panel">
+              <div class="panel-head"><div><h2>Workflow activity</h2><p>Recently updated workflows.</p></div><button class="text-button" data-open-view="workflows">All workflows <span>↗</span></button></div>
+              <div class="chart-strip"><div class="chart-label"><span class="chart-legend-dot"></span>Event volume <strong id="events-seven-days">—</strong><span>· last 14 days</span></div><div id="activity-chart" class="activity-chart" aria-label="Event volume over the last 14 days"></div><div class="chart-days"><span>14D AGO</span><span>7D AGO</span><span>TODAY</span></div></div>
+              <div class="table-wrap"><table class="data-table"><thead><tr><th>WORKFLOW</th><th>PHASE</th><th>TASKS</th><th>STATUS</th><th>UPDATED</th></tr></thead><tbody id="recent-jobs"><tr><td colspan="5" class="table-empty">Loading workflow snapshot…</td></tr></tbody></table></div>
+            </article>
+            <article class="panel runtime-panel">
+              <div class="panel-head"><div><h2>Runtime status</h2></div><span class="health-orbit"><i></i><b></b></span></div>
+              <div class="runtime-status"><span class="big-status-dot"></span><div><strong id="runtime-status-title">Checking local database</strong><span id="runtime-status-caption">Read-only connection check</span></div><span class="status-pill status-live" id="runtime-mode">LOCAL</span></div>
+              <div class="status-breakdown" id="status-breakdown"></div>
+              <div class="phase-section"><div class="subsection-title">PHASE DISTRIBUTION <span>NOW</span></div><div id="phase-bars" class="phase-bars"></div></div>
+              <div class="runtime-foot"><span class="tiny-lock">⌑</span><span>LOCAL SQLITE</span><span class="runtime-foot-line"></span><span>NO CLOUD EXECUTION</span></div>
+            </article>
+          </div>
+
+          <div class="bottom-grid">
+            <article class="panel event-panel"><div class="panel-head"><div><h2>Latest events</h2></div><button class="text-button" data-open-view="events">All events <span>↗</span></button></div><div id="latest-events" class="event-list"><div class="table-empty">Waiting for events…</div></div></article>
+            <article class="panel insight-panel"><div class="panel-head"><div><h2>Stored records</h2></div></div><div class="inventory-list" id="inventory-list"></div><div class="inventory-note"><span>i</span> Read-only records from the local database.</div></article>
+          </div>
+        </section>
+
+        <section id="workflows-view" class="view-panel hidden">
+          <div class="section-toolbar"><div><h2>Workflows</h2><p>Find the job, scan its status, open details when needed.</p></div><div class="toolbar-fields"><select id="workflow-status-filter" aria-label="Filter workflow status"><option value="">All statuses</option><option value="active">Active</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option></select><select id="workflow-phase-filter" aria-label="Filter workflow phase"><option value="">All phases</option></select></div></div>
+          <div class="filter-rail" aria-label="Quick workflow filters"><button class="quick-filter" data-quick-status="failed">Failures</button><button class="quick-filter" data-quick-status="active">Active</button><button class="quick-filter" data-quick-status="completed">Completed</button><button id="clear-workflow-filters" class="small-button">Clear filters</button><span id="workflow-results-meta" class="filter-meta"></span></div>
+          <div class="panel table-panel"><div class="table-wrap"><table class="data-table"><thead><tr><th>WORKFLOW</th><th>STATUS</th><th>PHASE</th><th>PROGRESS</th><th>EVENTS</th><th>UPDATED</th><th aria-label="Workflow actions"></th></tr></thead><tbody id="all-jobs"><tr><td colspan="7" class="table-empty">Loading workflows…</td></tr></tbody></table></div><div class="pagination" id="jobs-pagination"></div></div>
+        </section>
+
+        <section id="roles-view" class="view-panel hidden">
+          <div class="section-toolbar"><div><h2>Role profiles and workflow pins</h2><p>Built-in runtime roles, saved custom profiles, skill snapshots, and exact role-version references.</p></div><div class="toolbar-fields"><input id="role-search" type="search" placeholder="Find role or workflow…" aria-label="Search roles and workflows"><select id="role-version-filter" aria-label="Role versions"><option value="latest">Latest versions</option><option value="all">All stored versions</option></select></div></div>
+          <div id="role-summary" class="registry-summary"><div class="table-empty">Loading role registry…</div></div>
+          <div class="role-layout">
+            <article class="panel role-list-panel"><div class="panel-head"><div><h2>Custom roles</h2><p id="role-list-caption">Saved immutable role profiles</p></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>PROFILE</th><th>VERSION</th><th>OUTPUT</th><th>SKILLS</th></tr></thead><tbody id="role-list"><tr><td colspan="4" class="table-empty">Loading roles…</td></tr></tbody></table></div></article>
+            <aside class="panel role-inspector"><h3 id="role-inspector-title">Select a role</h3><p id="role-inspector-subtitle">Inspect pinned prompt, contracts, permissions and skill hashes.</p><div id="role-inspector-body" class="inspector-placeholder"><span>Choose a custom role to inspect its attached skills.</span></div></aside>
+          </div>
+          <article class="panel registry-section"><div class="panel-head"><div><h2>Built-in runtime roles</h2><p>Fixed system contracts observed in the durable task ledger.</p></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>ROLE ID</th><th>TASK RECORDS</th><th>WORKFLOWS USED</th></tr></thead><tbody id="builtin-role-list"><tr><td colspan="3" class="table-empty">Loading built-in roles…</td></tr></tbody></table></div></article>
+          <article class="panel registry-section"><div class="panel-head"><div><h2>Custom workflow role pins</h2><p>Each row shows the exact custom role version assigned to a saved workflow task.</p></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>WORKFLOW</th><th>TASK</th><th>PINNED ROLE</th><th>OUTPUT</th><th>SKILLS</th></tr></thead><tbody id="role-workflow-list"><tr><td colspan="5" class="table-empty">Loading custom workflows…</td></tr></tbody></table></div></article>
+          <p class="registry-footnote" id="role-edit-note">This registry is read-only. Use custom-role tools to create new immutable role versions; workflow execution still needs explicit approval.</p>
+        </section>
+
+        <section id="batches-view" class="view-panel hidden">
+          <div class="section-toolbar"><div><h2>Execution records</h2><p>Durable command batches and individual task runs, shown as separate record types.</p></div><div class="toolbar-fields"><input id="batch-search" type="search" placeholder="Find batch, role or workflow…" aria-label="Search execution batches"><select id="batch-status-filter" aria-label="Filter batch status"><option value="">All statuses</option><option value="PENDING">Pending</option><option value="RUNNING">Running</option><option value="WAITING">Waiting</option><option value="COMPLETED">Completed</option><option value="FAILED">Failed</option><option value="CANCELLED">Cancelled</option></select></div></div>
+          <div id="batch-summary" class="registry-summary batch-summary-grid"><div class="table-empty">Loading batch records…</div></div>
+          <div class="batch-layout"><article class="panel batch-list-panel"><div class="panel-head"><div><h2>Recorded batches</h2><p id="batch-list-caption">Durable batch ledger</p></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>WORKFLOW</th><th>ROLE</th><th>STATUS</th><th>ITEMS</th><th>ATTEMPT</th><th>CREATED</th></tr></thead><tbody id="batch-list"><tr><td colspan="6" class="table-empty">Loading batches…</td></tr></tbody></table></div><div class="pagination" id="batches-pagination"></div></article><aside class="panel batch-inspector"><h3 id="batch-inspector-title">Batch details</h3><p id="batch-inspector-subtitle">Commands, status, exit codes and captured output.</p><div id="batch-inspector-body" class="inspector-placeholder"><span>Select a recorded batch to inspect its items.</span></div></aside></div>
+          <article class="panel registry-section individual-executions-panel"><div class="panel-head"><div><h2>Individual task executions</h2><p id="individual-executions-caption">Recorded by ExecutionManager, but not grouped into batches.</p></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>WORKFLOW</th><th>ROLE / PROFILE</th><th>RESULT</th><th>EXIT</th><th>SESSION</th><th>FINISHED</th></tr></thead><tbody id="individual-execution-list"><tr><td colspan="6" class="table-empty">Loading individual executions…</td></tr></tbody></table></div><div class="pagination" id="individual-executions-pagination"></div></article>
+          <p class="registry-footnote" id="batch-empty-explanation">Batch records are created only when the durable execute_batch path groups approved deterministic local task IDs. Ordinary specialist tasks are persisted as individual workflow tasks.</p>
+        </section>
+
+        <section id="events-view" class="view-panel hidden">
+          <div class="section-toolbar"><div><h2>Event stream</h2><p>Recent events across workflow runs.</p></div><div class="toolbar-fields"><input id="event-search" type="search" placeholder="Filter events…"><select id="event-type-filter"><option value="">All event types</option></select></div></div>
+          <div class="stream-layout"><div class="panel stream-panel"><div class="stream-toolbar"><span class="stream-total" id="event-total">— records</span></div><div id="event-stream" class="event-stream"><div class="table-empty">Loading events…</div></div><div class="pagination" id="events-pagination"></div></div><aside class="panel stream-aside"><h3>Event details</h3><div id="event-inspector" class="inspector-placeholder"><span>Choose an event to inspect its payload and source workflow.</span></div></aside></div>
+        </section>
+
+        <section id="artifacts-view" class="view-panel hidden">
+          <div class="section-toolbar"><div><h2>Artifacts</h2><p>Stored results, reports and evidence.</p></div><div class="toolbar-fields"><input id="artifact-search" type="search" placeholder="Find artifacts…"><select id="artifact-type-filter"><option value="">All artifact types</option></select></div></div>
+          <div class="artifact-layout"><div class="panel artifact-panel"><div id="artifact-grid" class="artifact-grid"><div class="table-empty">Loading artifacts…</div></div><div class="pagination" id="artifacts-pagination"></div></div><aside class="panel artifact-inspector"><h3 id="artifact-inspector-title">Select an artifact</h3><p id="artifact-inspector-subtitle">Type, source and content details.</p><div id="artifact-inspector-body" class="inspector-placeholder"><span>Artifact details appear here.</span></div></aside></div>
+        </section>
+
+        <section id="files-view" class="view-panel hidden">
+          <div class="section-toolbar"><div><h2>Local files</h2><p>Read-only text and log previews from the local data directory.</p></div><div class="read-only-badge"><span>◉</span> READ-ONLY</div></div>
+          <div class="file-layout"><article class="panel file-browser"><div class="file-pathbar"><span class="path-icon">▤</span><span id="file-breadcrumb">/</span><button id="file-up" class="small-button" disabled>↑ Up</button><button id="file-refresh" class="small-button">↻ Refresh</button></div><div id="file-list" class="file-list"><div class="table-empty">Loading local directory…</div></div><div class="file-footnote"><span>⌑</span> Files are never modified or served as downloads. Database and binary files are excluded.</div></article><article class="panel file-preview-panel"><div class="preview-head"><div><div class="panel-kicker">TEXT PREVIEW</div><h3 id="file-preview-title">No file selected</h3></div><span class="preview-limit">MAX 64 KB</span></div><div class="preview-meta" id="file-preview-meta">Choose a log or text file to inspect it.</div><pre id="file-preview-content" class="file-code"><span class="code-placeholder">// Your selected file will appear here.</span></pre></article></div>
+        </section>
+
+        <footer class="page-footer"><div>ORBIT <span class="footer-separator">/</span> LOCAL WORKFLOW MONITOR</div><div><span class="footer-lock">⌑</span> READ-ONLY <span class="footer-separator">·</span> LOOPBACK ONLY <span class="footer-separator">·</span> <span id="footer-clock">—</span></div></footer>
+      </div>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="application/json" id="runtime-contract">{"mode":"local-read-only","remote_access":false}</script>
+</body>
+</html>

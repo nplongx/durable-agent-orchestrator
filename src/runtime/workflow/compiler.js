@@ -5,13 +5,15 @@ import { engineeringTaskSpec, engineeringTaskSpecs } from './catalog/engineering
 import { standardEngineeringTaskSpec, standardEngineeringTaskSpecs } from './catalog/standard-engineering.js';
 import { validateWorkflowDefinition } from './schema.js';
 import { canonicalJson, validateExecutionPlan } from './plan.js';
+import { normalizeSuccessContract } from './success-contract.js';
 
 function hash(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-export function compileWorkflowPlan(job, { workspace = process.env.WORKFLOW_WORKSPACE, customWorkflow = null } = {}) {
+export function compileWorkflowPlan(job, { workspace = process.env.WORKFLOW_WORKSPACE, customWorkflow = null, successContract = null } = {}) {
   if (!job?.job_id) throw new Error('job is required to compile execution plan');
+  const pinnedSuccessContract = normalizeSuccessContract(successContract || {}, job.title || job.job_id);
   if (customWorkflow) {
     const { workflow, tasks, plan: approvedPreview } = customWorkflow;
     if (!workflow?.workflow_id || !Number.isInteger(workflow.version) || !Array.isArray(tasks) || tasks.length !== workflow.tasks.length) {
@@ -29,6 +31,7 @@ export function compileWorkflowPlan(job, { workspace = process.env.WORKFLOW_WORK
         custom_role_name: task.role.name,
         custom_role_description: task.role.description,
         custom_role_system_prompt: task.role.system_prompt,
+        custom_role_skills: task.role.skills || [],
         custom_role_capabilities: task.role.allowed_capabilities,
         custom_role_permissions: task.role.permissions,
         custom_role_allowed_tools: task.role.allowed_tools,
@@ -45,6 +48,7 @@ export function compileWorkflowPlan(job, { workspace = process.env.WORKFLOW_WORK
       workflow_id: `custom-${workflow.workflow_id}`,
       workflow_version: workflow.version,
       job_id: job.job_id,
+      success_contract: pinnedSuccessContract,
       phases: ['PROPOSED', 'APPROVED', 'SPAWN_CTO', 'ASSIGN_CHILDREN', 'RUN_CHILDREN', 'SYNTHESIZE', 'TERMINALIZE', 'COMPLETED', 'FAILED'],
       required_children: children.map(item => item.role),
       children,
@@ -76,6 +80,7 @@ export function compileWorkflowPlan(job, { workspace = process.env.WORKFLOW_WORK
     workflow_id: definition.id,
     workflow_version: definition.version,
     job_id: job.job_id,
+    success_contract: pinnedSuccessContract,
     phases: [...definition.phases],
     required_children: [...definition.requiredChildren],
     children,

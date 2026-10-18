@@ -1,5 +1,6 @@
 import { parseStrictJson } from '../strict-json.js';
 import { getAgentContract } from './agent-contracts.js';
+import { validateSuccessContract } from './success-contract.js';
 
 export function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -53,6 +54,10 @@ export function validateExecutionPlan(plan) {
     throw new Error('execution plan required_children must contain unique non-empty string identities');
   }
   if (!plan.synthesis) throw new Error('execution plan synthesis is required');
+  if (plan.success_contract != null) {
+    try { validateSuccessContract(plan.success_contract); }
+    catch (error) { throw new Error(`execution plan success_contract is invalid: ${error.message}`); }
+  }
   const ids = new Set();
   for (const task of [...plan.children, plan.synthesis]) {
     if (!task?.id || ids.has(task.id)) throw new Error('invalid or duplicate execution plan task: ' + task?.id);
