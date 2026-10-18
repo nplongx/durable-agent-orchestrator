@@ -1,0 +1,167 @@
+{
+  "manifest_version": "0.3",
+  "name": "chat-on-steroids-local-orchestrator",
+  "display_name": "Local Agent Orchestrator",
+  "version": "1.0.8",
+  "description": "Local-only durable agent workflow orchestration, versioned custom roles, validated custom workflows, and approval-gated custom workflow execution for Chat On Steroids. No cloud workers, remote runners, or external model APIs.",
+  "long_description": "A local-only workflow plugin with durable SQLite state, separate plan and execution approvals, dependency-aware custom role task handoff, typed artifacts, immutable plans, deterministic built-in local execution, and auditable results.",
+  "author": {
+    "name": "FreeChatClaw"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/index.js"
+      ],
+      "env": {}
+    }
+  },
+  "tools": [
+    {
+      "name": "orchestrator_health",
+      "description": "Check local plugin and SQLite state; does not probe remote services."
+    },
+    {
+      "name": "workflow_catalog",
+      "description": "List supported local workflow templates."
+    },
+    {
+      "name": "workflow_create",
+      "description": "Create a proposal without approving or executing it."
+    },
+    {
+      "name": "workflow_list",
+      "description": "List active workflows from local SQLite."
+    },
+    {
+      "name": "workflow_get",
+      "description": "Inspect workflow plan, tasks, approvals, and evidence metadata."
+    },
+    {
+      "name": "workflow_approve",
+      "description": "Explicitly approve a proposal and compile its immutable plan."
+    },
+    {
+      "name": "workflow_dispatch",
+      "description": "Start the approved workflow locally."
+    },
+    {
+      "name": "workflow_prepare_tasks",
+      "description": "Create or recover planned child tasks."
+    },
+    {
+      "name": "workflow_next_task",
+      "description": "Return the next dependency-ready task with role-specific contract and typed predecessor artifact evidence. Call again after each task; blocked means findings must be resolved before synthesis."
+    },
+    {
+      "name": "workflow_complete_task",
+      "description": "Persist the actual result and typed artifact of a local specialist task."
+    },
+    {
+      "name": "task_execute_local",
+      "description": "Execute an approved structured deterministic command locally."
+    },
+    {
+      "name": "workflow_complete_synthesis",
+      "description": "Validate evidence and terminalize a completed workflow."
+    },
+    {
+      "name": "workflow_events",
+      "description": "Read the durable workflow event history."
+    },
+    {
+      "name": "workflow_artifacts",
+      "description": "List durable typed artifacts."
+    },
+    {
+      "name": "workflow_e2e_run",
+      "description": "Advance approved workflows through safe deterministic tasks only."
+    },
+    {
+      "name": "workflow_recovery_verify",
+      "description": "Verify durable workflow invariants and fresh-process SQLite readback."
+    },
+    {
+      "name": "workflow_record_intervention",
+      "description": "Record manual interventions and proposed automation."
+    },
+    {
+      "name": "workflow_interventions",
+      "description": "List recorded manual interventions."
+    },
+    {
+      "name": "workflow_validate_artifact",
+      "description": "Validate typed artifact required fields and optional role matching."
+    },
+    {
+      "name": "workflow_access_diagnostics",
+      "description": "Read-only diagnostics for trust/config errors; never bypasses trust policy."
+    },
+    {
+      "name": "custom_role_create",
+      "description": "Create a validated, durable custom role definition. Does not enable execution."
+    },
+    {
+      "name": "custom_role_update",
+      "description": "Create a new immutable version of a custom role definition."
+    },
+    {
+      "name": "custom_role_get",
+      "description": "Read the latest or a specific version of a custom role."
+    },
+    {
+      "name": "custom_role_list",
+      "description": "List custom roles and optionally their stored versions."
+    },
+    {
+      "name": "custom_role_clone",
+      "description": "Clone an existing custom role into a new role ID."
+    },
+    {
+      "name": "custom_workflow_create",
+      "description": "Create a validated custom workflow definition without executing it."
+    },
+    {
+      "name": "custom_workflow_update",
+      "description": "Create a new immutable custom workflow definition version."
+    },
+    {
+      "name": "custom_workflow_get",
+      "description": "Read a custom workflow definition version."
+    },
+    {
+      "name": "custom_workflow_list",
+      "description": "List custom workflow definitions and versions."
+    },
+    {
+      "name": "custom_workflow_clone",
+      "description": "Clone a custom workflow definition."
+    },
+    {
+      "name": "custom_workflow_preview",
+      "description": "Create an immutable custom workflow plan preview with pinned role versions."
+    },
+    {
+      "name": "custom_workflow_approve",
+      "description": "Approve a specific custom workflow plan preview before execution can be proposed."
+    },
+    {
+      "name": "custom_workflow_run_create",
+      "description": "Create an execution proposal from an approved custom workflow plan; separate execution approval is required."
+    }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": [
+      "linux",
+      "darwin",
+      "win32"
+    ],
+    "runtimes": {
+      "node": ">=22.13.0"
+    }
+  }
+}

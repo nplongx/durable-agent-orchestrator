@@ -14,7 +14,7 @@ const canonicalRoles = [
 for (const role of canonicalRoles) {
   const contract = getRoleContract(role);
   assert.equal(contract.role, role);
-  assert.equal(contract.executor, 'OpenClaw');
+  assert.equal(contract.executor, 'ChatOnSteroids');
   assert.ok(contract.capability);
   assert.ok(Array.isArray(contract.permissions));
 }
@@ -27,23 +27,29 @@ assert.equal(getWorkflowDefinition({ title: 'engineering m4 acceptance' }).id, '
 assert.equal(getWorkflowDefinition({ title: 'Software Delivery: payments' }).id, 'standard-engineering');
 
 assert.equal(ProductionWorkflow.version, 1);
-assert.equal(EngineeringWorkflow.version, 1);
-assert.equal(StandardEngineeringWorkflow.version, 1);
+assert.equal(EngineeringWorkflow.version, 2);
+assert.equal(StandardEngineeringWorkflow.version, 2);
 
 assert.deepEqual(EngineeringWorkflow.requiredChildren, [
+  'engineering-product-owner',
+  'engineering-researcher',
   'engineering-architect',
   'engineering-engineer',
+  'engineering-security',
   'engineering-qa',
+  'engineering-platform',
+  'engineering-writer',
   'engineering-reviewer'
 ]);
 assert.equal(EngineeringWorkflow.synthesisTask, 'engineering-cto-synthesis');
 
 const m4Plan = compileWorkflowPlan({ job_id: 'm0-m4', title: 'Engineering M4 acceptance' }, { workspace: '/tmp' });
 assert.equal(m4Plan.workflow_id, 'engineering');
-assert.deepEqual(m4Plan.children.map(task => task.role), ['architect', 'engineer', 'qa', 'reviewer']);
+assert.deepEqual(m4Plan.children.map(task => task.role), ['product-owner', 'researcher', 'architect', 'engineer', 'security', 'qa', 'platform', 'writer', 'reviewer']);
+assert.deepEqual(m4Plan.children.find(task => task.role === 'architect').dependencies, ['engineering-product-owner', 'engineering-researcher']);
 assert.deepEqual(m4Plan.children.find(task => task.role === 'engineer').dependencies, ['engineering-architect']);
 assert.deepEqual(m4Plan.children.find(task => task.role === 'qa').dependencies, ['engineering-engineer']);
-assert.deepEqual(m4Plan.children.find(task => task.role === 'reviewer').dependencies, ['engineering-qa']);
+assert.deepEqual(m4Plan.children.find(task => task.role === 'reviewer').dependencies, ['engineering-security', 'engineering-qa', 'engineering-platform', 'engineering-writer']);
 assert.equal(m4Plan.synthesis.dependencies[0], 'engineering-reviewer');
 assert.match(m4Plan.plan_hash, /^[a-f0-9]{64}$/);
 

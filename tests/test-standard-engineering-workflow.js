@@ -6,7 +6,7 @@ import { compileWorkflowPlan } from '../src/runtime/workflow/compiler.js';
 
 assert.equal(isStandardEngineeringWorkflow({ title: 'Engineering Standard delivery' }), true);
 assert.equal(validateStandardEngineeringWorkflow('/tmp'), true);
-assert.equal(StandardEngineeringWorkflow.version, 1);
+assert.equal(StandardEngineeringWorkflow.version, 2);
 assert.deepEqual(standardEngineeringTaskSpecs('/tmp').map(x => x.role), [
   'product-owner', 'researcher', 'architect', 'engineer', 'security', 'qa', 'platform', 'writer', 'reviewer'
 ]);

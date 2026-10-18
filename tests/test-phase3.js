@@ -1,9 +1,11 @@
 import assert from 'node:assert';
 import fs from 'node:fs';
-import crypto from 'node:crypto';
+import path from 'node:path';
+import { tempDir } from './test-temp-dir.js';
 
-const dbPath = `/home/long/work/chatgpt-adapter/data/test-phase3-${crypto.randomUUID()}.db`;
+const dbPath = path.join(tempDir('test-phase3-'), 'workflow.db');
 process.env.WORKFLOW_DB = dbPath;
+process.env.WORKFLOW_DATA_DIR = path.dirname(dbPath);
 const { WorkflowStore } = await import('../job-store.js');
 const store = new WorkflowStore();
 
@@ -39,7 +41,22 @@ store.db.prepare("UPDATE attempts SET started_at = ? WHERE attempt_id = ?").run(
 assert.strictEqual(store.reconcileStaleAttempts(60_000), 1);
 assert.strictEqual(store.db.prepare('SELECT status FROM attempts WHERE attempt_id = ?').get(staleAttempt.attempt_id).status, 'timeout');
 
+const terminalStatusJob = store.createJob({ conversationKey: 'stale-terminal-status', title: 'legacy terminal status fencing' });
+const terminalStatusTask = store.dispatch(terminalStatusJob.job_id, { role: 'cto', description: 'legacy terminal status fencing' });
+const terminalStatusAttempt = store.startAttempt(terminalStatusJob.job_id);
+store.db.prepare("UPDATE attempts SET started_at=? WHERE attempt_id=?")
+  .run(new Date(Date.now() - 3600_000).toISOString(), terminalStatusAttempt.attempt_id);
+store.db.prepare("UPDATE jobs SET state='IDLE',status='failed' WHERE job_id=?").run(terminalStatusJob.job_id);
+assert.strictEqual(store.reconcileStaleAttempts(60_000), 1);
+assert.strictEqual(store.db.prepare('SELECT status FROM attempts WHERE attempt_id=?').get(terminalStatusAttempt.attempt_id).status, 'started',
+  'stale-attempt recovery must not mutate an attempt belonging to a legacy terminal-status job');
+assert.strictEqual(store.getTask(terminalStatusTask.task_id).status, 'running');
+assert.strictEqual(store.complete(terminalStatusJob.job_id, 'late stale success', 'success').idempotent, true,
+  'legacy terminal status must also fence a late complete() callback');
+assert.strictEqual(store.db.prepare('SELECT COUNT(*) AS n FROM results WHERE task_id=?').get(terminalStatusTask.task_id).n, 0);
+
 fs.rmSync(dbPath, { force: true });
 fs.rmSync(`${dbPath}-wal`, { force: true });
 fs.rmSync(`${dbPath}-shm`, { force: true });
+fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
 console.log('PASS: Phase 3 idempotency, runtime reconciliation, stale-attempt recovery and delivery claims');

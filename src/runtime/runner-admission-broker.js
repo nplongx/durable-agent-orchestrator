@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { parseStrictJson } from './strict-json.js';
 
 const DEFAULT_ISSUER = 'https://token.actions.githubusercontent.com';
 const DEFAULT_MAX_ADMISSION_MS = 15 * 60 * 1000;
@@ -42,8 +43,8 @@ function decodeJwt(token) {
   let header;
   let payload;
   try {
-    header = JSON.parse(base64urlDecode(parts[0]).toString('utf8'));
-    payload = JSON.parse(base64urlDecode(parts[1]).toString('utf8'));
+    header = parseStrictJson(base64urlDecode(parts[0]), 'runner admission token header');
+    payload = parseStrictJson(base64urlDecode(parts[1]), 'runner admission token payload');
   } catch {
     throw fail('invalid JWT encoding', 401, 'OIDC_INVALID');
   }
@@ -308,7 +309,7 @@ export class RunnerAdmissionBroker {
         if (Buffer.byteLength(raw, 'utf8') > this.maxBodyBytes) throw fail('request body too large', 413, 'BODY_TOO_LARGE');
       }
       let body;
-      try { body = JSON.parse(raw || '{}'); } catch { throw fail('request body must be valid JSON'); }
+      try { body = parseStrictJson(raw || '{}', 'runner admission request body'); } catch { throw fail('request body must be valid strict JSON'); }
       const result = await this.admit({ token: match[1], request: body });
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       response.end(JSON.stringify(result));

@@ -41,11 +41,19 @@ process.env.OPENCLAW_BIN = fakeOpenClaw;
 
 const { WorkflowStore } = await import('../job-store.js');
 const { RecoveryManager } = await import('../recovery-manager.js');
+const { ExecutionManager } = await import('../src/runtime/execution-manager.js');
 const store = new WorkflowStore();
+const executionManager = new ExecutionManager(store, {
+  timeoutMs: 5000,
+  executionTmpDir: path.join(dir, 'runtime')
+});
 
 function makeFailedChild({ sessionKey, runId, title }) {
   const job = store.createJob({ conversationKey: 'phase5e:' + title, title });
-  store.approve(job.job_id, 'approved', 'phase5e-test');
+  store.recordEvent(job.job_id, 'job.proposal_requested', {
+    task: title, workspace: process.cwd(), workflowId: 'production', executionTarget: 'local'
+  }, job.job_id);
+  store.approve(job.job_id, 'approved', 'phase5e-test', { workspace: process.cwd() });
   store.dispatch(job.job_id, { role: 'cto', description: 'Delegate specialist work via sessions_spawn' });
   const ctoTask = store.getTask(store.getJob(job.job_id).active_task_id);
   const child = store.createChildTask(job.job_id, {
@@ -57,7 +65,8 @@ function makeFailedChild({ sessionKey, runId, title }) {
   store.completeTaskByRuntime(job.job_id, { runId, sessionKey, content: 'runtime path failed before actual evidence was recorded', outcome: 'success' });
   assert.equal(store.getTask(child.task_id).status, 'failed');
   const session = store.getSessionByTask(child.task_id);
-  store.updateAgentSession(session.session_id, { state: 'STALE' });
+  assert.equal(session.state, 'FAILED',
+    'the failed runtime result and its session must remain internally consistent before recovery reads later trajectory evidence');
   return { job, child, session };
 }
 
@@ -68,7 +77,9 @@ const repair = makeFailedChild({
 });
 const beforeTaskCount = store.db.prepare('SELECT COUNT(*) n FROM tasks WHERE job_id = ?').get(repair.job.job_id).n;
 const beforeSessionCount = store.db.prepare('SELECT COUNT(*) n FROM agent_sessions WHERE job_id = ?').get(repair.job.job_id).n;
-const recovery = new RecoveryManager(store, { sessionStaleMs: 1, trajectoryTimeoutMs: 1500 });
+const recovery = new RecoveryManager(store, {
+  sessionStaleMs: 1, trajectoryTimeoutMs: 1500, executionManager
+});
 await recovery.reconcile({ jobId: repair.job.job_id });
 assert.equal(store.getTask(repair.child.task_id).status, 'completed');
 assert.equal(store.getSession(repair.session.session_id).state, 'TERMINATED');
@@ -92,7 +103,11 @@ const timeoutTaskBefore = store.getTask(timeoutCase.child.task_id);
 const timeoutSessionBefore = store.getSession(timeoutCase.session.session_id);
 const timeoutTaskCount = store.db.prepare('SELECT COUNT(*) n FROM tasks WHERE job_id = ?').get(timeoutCase.job.job_id).n;
 const timeoutSessionCount = store.db.prepare('SELECT COUNT(*) n FROM agent_sessions WHERE job_id = ?').get(timeoutCase.job.job_id).n;
-await recovery.reconcile({ jobId: timeoutCase.job.job_id });
+// This instance intentionally has no ExecutionManager. A timed-out trajectory
+// export therefore cannot be replaced by a transcript-only success, nor can
+// the test silently run the deterministic command through a different path.
+const timeoutRecovery = new RecoveryManager(store, { sessionStaleMs: 1, trajectoryTimeoutMs: 1500 });
+await timeoutRecovery.reconcile({ jobId: timeoutCase.job.job_id });
 assert.equal(store.getTask(timeoutCase.child.task_id).status, timeoutTaskBefore.status);
 assert.equal(store.getSession(timeoutCase.session.session_id).state, timeoutSessionBefore.state);
 assert.equal(store.db.prepare('SELECT COUNT(*) n FROM tasks WHERE job_id = ?').get(timeoutCase.job.job_id).n, timeoutTaskCount);

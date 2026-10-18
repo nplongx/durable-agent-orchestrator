@@ -1,5 +1,6 @@
 // cdp.js — Multi-Tab Chrome DevTools Protocol client for ChatGPT Web
 import { spawn } from 'node:child_process';
+import { parseStrictJson } from './strict-json.js';
 
 function abortableDelay(ms, signal) {
   if (signal?.aborted) return Promise.reject(new Error('Request aborted by caller'));
@@ -202,7 +203,7 @@ export class TabWorker {
 
           ws.onmessage = (event) => {
           try {
-            const msg = JSON.parse(event.data);
+            const msg = parseStrictJson(event.data, 'CDP websocket message');
             if (msg.id) {
               console.log(`[CDP:${this.role}] <- recv id=${msg.id} hasCallback=${this.pendingCallbacks.has(msg.id)}`);
             }
@@ -791,7 +792,7 @@ export class TabWorker {
                   sel.addRange(range);
                   return true;
                 })()`, 2500);
-                await this.sendRaw('Input.insertText', { text: prompt }, 3000);
+                await this.sendRaw('Input.insertText', { text: prompt }, 10000);
                 const replaced = await this.evaluate(`(() => {
                   const ta = document.querySelector('#prompt-textarea, div[contenteditable="true"]');
                   return ta ? (ta.innerText || ta.textContent || '').trim() : '';
@@ -821,7 +822,7 @@ export class TabWorker {
             await abortableDelay(250, signal);
           }
           try {
-            await this.sendRaw('Input.insertText', { text: prompt }, 3000);
+            await this.sendRaw('Input.insertText', { text: prompt }, 10000);
             await this.evaluate(`(() => {
               const ta = document.querySelector('#prompt-textarea');
               if (ta) {

@@ -8,7 +8,7 @@ const store = {
     if (sql.includes('UPDATE task_leases')) return { run: () => ({ changes: 1 }) };
     throw new Error(`unexpected query: ${sql}`);
   } },
-  acquireTaskLease(taskId, options) { return { lease_id: options.leaseId, task_id: taskId, attempt: 2 }; },
+  acquireTaskLease(taskId, options) { return { lease_id: options.leaseId, task_id: taskId, attempt: 2, owner_epoch: 9 }; },
   recordEvent() {},
   expireTaskLease() {}
 };

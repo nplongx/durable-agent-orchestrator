@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { tempDir } from './test-temp-dir.js';
 
 const tempRoot = tempDir('workflow-plan-m2-');
@@ -33,8 +34,12 @@ assert.deepEqual(plan.children.map(t => t.role), ['architect', 'qa']);
 assert.deepEqual(plan.children.map(t => t.execution.executable), ['node', 'node']);
 assert.deepEqual(plan.children.map(t => t.execution.args), [
   ['--check', path.join(workspace, 'server.js')],
-  ['--check', path.join(workspace, 'test-tool-turn.js')]
+  [path.join(path.dirname(fileURLToPath(import.meta.url)), 'test-production-behavioral-qa.js')]
 ]);
+assert.equal(plan.children[1].execution.trusted_plugin_e2e, true);
+assert.match(plan.children[1].execution.trusted_plugin_e2e_sha256, /^[a-f0-9]{64}$/);
+assert.equal(plan.children[1].execution.cwd, path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
+assert.equal(plan.children[1].execution.required_success_markers.length, 3);
 assert.match(plan.plan_hash, /^[a-f0-9]{64}$/);
 const rowBefore = store.db.prepare('SELECT plan_hash, plan_json, compiled_at, approved_at FROM workflow_plans WHERE job_id=?').get(job.job_id);
 assert.equal(rowBefore.plan_hash, plan.plan_hash);

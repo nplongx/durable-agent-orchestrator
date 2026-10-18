@@ -1,0 +1,32 @@
+#!/usr/bin/env node
+// Offline-only static regression for the third remediation candidate.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+const here=path.dirname(fileURLToPath(import.meta.url));
+const v32=JSON.parse(fs.readFileSync(path.join(here,'scenario-execution-spec-v3.2-draft.json'),'utf8'));
+const bytes=fs.readFileSync(path.join(here,'scenario-execution-spec-v3.6-draft.json'));
+const v33=JSON.parse(bytes.toString('utf8'));
+assert.deepEqual(v33.cases,v32.cases,'all frozen prompts and per-case grants must remain unchanged');
+assert.equal(v33.cases.length,10);
+assert.equal(v33.status,'draft-not-authorized');
+assert.equal(v33.execution_gate.status,'blocked');
+assert.deepEqual(v33.execution_gate.authorized_case_ids,[]);
+assert.equal(v33.execution_gate.authorization_record,null);
+assert.equal(v33.model.max_elapsed_seconds_per_condition,3600);
+assert.equal(v33.model.model_request_timeout_ms,480000);
+assert.match(v33.system_context,/make at most one tool call per assistant response/i);
+assert.match(v33.system_context,/one-line raw JSON content/);
+assert.match(v33.system_context,/Do NOT put backslashes, escaped quotes, literal/);
+assert.match(v33.system_context,/custom_role_create; custom_workflow_create; custom_workflow_preview/);
+assert.match(v33.system_context,/Do not write any file before workflow_next_task returns an active task/);
+assert.match(v33.system_context,/deterministically canonicalizes the persisted workflow/);
+assert.match(v33.system_context,/do not substitute a host absolute path/);
+assert.match(v33.system_context,/evidence_refs including the exact task artifact ID/);
+assert.match(v33.system_context,/CASE-06 is proposal-only/);
+assert.match(v33.system_context,/CASE-09 and CASE-10 are read-only/);
+console.log(`PASS: v3.6 draft ${createHash('sha256').update(bytes).digest('hex')} preserves all ten prompts/policies and adds staged workflow-first and raw-JSON instructions`);
+console.log('PASS: bounded 3600-second condition budget with 480-second per-request timeout and blocked execution gate remain explicit');
+console.log('PASS: static-only test; no scenario, plugin process, or model inference executed');

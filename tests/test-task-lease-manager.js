@@ -8,6 +8,12 @@ process.env.WORKFLOW_DATA_DIR = dataDir;
 process.env.WORKFLOW_DB = path.join(dataDir, 'workflow.db');
 const { WorkflowStore } = await import('../src/runtime/job-store.js');
 const store = new WorkflowStore();
+assert.throws(() => new TaskLeaseManager(store, { workerId: 'worker-invalid-ttl', ttlMs: '5000' }),
+  /ttlMs must be a positive safe integer/, 'lease manager must not coerce a string TTL');
+assert.throws(() => new TaskLeaseManager(store, { workerId: 'worker-infinite-ttl', ttlMs: Infinity }),
+  /ttlMs must be a positive safe integer/, 'lease manager must reject non-finite TTL values');
+assert.throws(() => new TaskLeaseManager(store, { workerId: '', ttlMs: 5000 }),
+  /workerId must be a non-empty string/, 'lease manager must not accept an empty owner identity');
 const job = store.createJob({ conversationKey: 'p5-test', title: 'P5' });
 const task = store.ensureTask(job.job_id, { role: 'executor', description: 'p5 lease' });
 
@@ -31,9 +37,9 @@ assert.equal(store.reapExpiredTaskLeases(), 1);
 assert.equal(store.getTaskLease(old.lease_id).state, 'EXPIRED');
 assert.equal(store.getTask(task.task_id).status, 'pending');
 
-const next = b.acquire(task.task_id, { attempt: 2 });
+const next = b.acquire(task.task_id, { attempt: 3 });
 assert.equal(next.state, 'ACTIVE');
-assert.equal(next.attempt, 2);
+assert.equal(next.attempt, 3);
 assert.equal(b.complete(next.lease_id, { success: true }).ok, true);
 assert.equal(store.getTaskLease(next.lease_id).state, 'COMPLETED');
 console.log('task-lease-manager P5 PASS');

@@ -1,0 +1,54 @@
+{
+  "protocol": {
+    "name": "Chat On Steroids Local Agent Orchestrator workflow benchmark",
+    "revision": "phase1-freeze-2026-10-10",
+    "case_id": "CASE-NN",
+    "condition": "plugin-or-basic-tools",
+    "run_id": "REPLACE-WITH-UNIQUE-RUN-ID",
+    "status": "not-started"
+  },
+  "target": {
+    "plugin_version": "1.0.8",
+    "bundle_path": "dist/chat-on-steroids-local-orchestrator-1.0.8.mcpb",
+    "bundle_sha256": "413cd1045d17a2779ca9fca4607a01faea62377fde416d039c288131b0dbc4aa",
+    "manifest_tool_count": 33
+  },
+  "environment": {
+    "timestamp_started": null,
+    "timestamp_finished": null,
+    "node_version": "v24.21.0",
+    "npm_version": "11.19.0",
+    "os": null,
+    "workspace_path": null,
+    "data_directory": null,
+    "database_path": null,
+    "execution_tmp_directory": null,
+    "external_provider_credentials_removed": null,
+    "initial_fixture_sha256": {},
+    "permission_snapshot_path": null
+  },
+  "execution": {
+    "exact_input_path": null,
+    "tool_trace_path": null,
+    "event_trace_path": null,
+    "artifact_directory": null,
+    "independent_verification_path": null,
+    "manual_intervention_log_path": null,
+    "artifact_sha256": {},
+    "elapsed_seconds": null,
+    "manual_intervention_count": null
+  },
+  "assessment": {
+    "planning_orchestration_score_20": null,
+    "failure_recovery_score_25": null,
+    "safety_permissions_score_25": null,
+    "verification_score_15": null,
+    "reporting_traceability_score_15": null,
+    "total_score_100": null,
+    "hard_fail": null,
+    "hard_fail_reason": null,
+    "unverified_criteria": [],
+    "final_status": "not-started",
+    "reviewer_notes": null
+  }
+}

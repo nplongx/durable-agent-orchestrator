@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { tempDir } from './test-temp-dir.js';
-import { validateArtifactContent } from '../src/runtime/workflow/artifacts.js';
+import { createArtifactRecord, validateArtifactContent } from '../src/runtime/workflow/artifacts.js';
 
 const accepted = {
   requirementsSatisfied: true, architectureConformant: true, securityAccepted: true,
@@ -10,6 +10,14 @@ const accepted = {
 };
 assert.equal(validateArtifactContent('review', accepted), true);
 assert.equal(validateArtifactContent('review', { ...accepted, decision: 'needs_changes', blockingIssues: ['QA evidence missing'] }), true);
+for (const invalid of [null, undefined, 'approved', 0, true, [], ['accept']]) {
+  assert.throws(() => validateArtifactContent('review', invalid), /review artifact content must be an object/,
+    `review artifact content must reject non-object value ${String(invalid)}`);
+  assert.throws(() => createArtifactRecord({
+    artifact_id: `invalid-review-${String(invalid)}`, job_id: 'job', task_id: 'task', type: 'review',
+    producer_role: 'reviewer', content: invalid,
+  }), /non-JSON value|content is required|review artifact content must be an object/, 'durable review record creation must enforce the same content schema');
+}
 for (const field of ['requirementsSatisfied', 'architectureConformant', 'securityAccepted', 'qaAccepted', 'platformAccepted', 'documentationAccepted']) {
   assert.throws(() => validateArtifactContent('review', { ...accepted, [field]: undefined }), /review artifact content has invalid fields/);
 }
@@ -24,12 +32,19 @@ const job = store.createJob({ conversationKey: `m6-${process.pid}-${Date.now()}`
 store.transition(job.job_id, 'PROPOSED');
 store.approve(job.job_id, 'Duyet');
 const cto = store.dispatch(job.job_id, { role: 'cto', description: 'M6 reviewer integration' });
+const immutablePlan = store.getExecutionPlan(job.job_id);
+const plannedTaskFor = role => immutablePlan?.children?.find(item => String(item.role).toLowerCase() === role);
 const roleTypes = [
   ['product-owner', 'requirements'], ['architect', 'architecture'], ['engineer', 'implementation'],
   ['security', 'security-review'], ['qa', 'qa-report'], ['platform', 'platform-review'], ['writer', 'documentation']
 ];
 for (const [role, type] of roleTypes) {
-  const task = store.createChildTask(job.job_id, { parentTaskId: cto.task_id, role, description: `M6 ${role}` });
+  const planned = plannedTaskFor(role);
+  const task = store.createChildTask(job.job_id, {
+    parentTaskId: cto.task_id, role, description: `M6 ${role}`,
+    dependencies: planned?.dependencies || [],
+    metadata: planned ? { ...(planned.execution || {}), workflow_plan_task_id: planned.id } : {}
+  });
   const content = {
     requirements: { scope: 'scope', acceptance_criteria: [], non_goals: [] },
     architecture: { components: [], interfaces: [], failure_modes: [], implementation_boundary: 'boundary' },
@@ -41,7 +56,12 @@ for (const [role, type] of roleTypes) {
   }[type];
   store.createArtifact({ artifact_id: `${type}-m6-${task.task_id}`, job_id: job.job_id, task_id: task.task_id, type, producer_role: role, content, evidence: [] });
 }
-const reviewer = store.createChildTask(job.job_id, { parentTaskId: cto.task_id, role: 'reviewer', description: 'M6 reviewer' });
+const reviewerPlan = plannedTaskFor('reviewer');
+const reviewer = store.createChildTask(job.job_id, {
+  parentTaskId: cto.task_id, role: 'reviewer', description: 'M6 reviewer',
+  dependencies: reviewerPlan?.dependencies || [],
+  metadata: reviewerPlan ? { ...(reviewerPlan.execution || {}), workflow_plan_task_id: reviewerPlan.id } : {}
+});
 store.attachTaskRuntime(reviewer.task_id, { runId: 'm6-review-run', sessionKey: 'agent:reviewer:subagent:m6' });
 store.completeTaskByRuntime(job.job_id, { runId: 'm6-review-run', content: JSON.stringify({ review: accepted }), outcome: 'success' });
 const durableReview = store.getLatestArtifact(job.job_id, 'review');

@@ -1,3 +1,4 @@
+import { parseStrictJson } from '../strict-json.js';
 export function normalizeReviewerArtifact(rawContent) {
   const queue = [String(rawContent ?? '')];
   const seen = new Set();
@@ -8,7 +9,7 @@ export function normalizeReviewerArtifact(rawContent) {
     seen.add(value);
     candidates.push(value);
     try {
-      const parsed = JSON.parse(value);
+      const parsed = parseStrictJson(value);
       if (typeof parsed === 'string') queue.push(parsed);
       else if (Array.isArray(parsed)) {
         for (const item of parsed) {
@@ -54,7 +55,7 @@ export function normalizeReviewerArtifact(rawContent) {
           depth -= 1;
           if (depth === 0) {
             try {
-              const parsed = JSON.parse(text.slice(marker, i + 1));
+              const parsed = parseStrictJson(text.slice(marker, i + 1));
               if (valid(parsed)) return JSON.stringify(parsed);
             } catch {}
             break;
@@ -68,5 +69,5 @@ export function normalizeReviewerArtifact(rawContent) {
 
 export function parseReviewerArtifact(rawContent) {
   const normalized = normalizeReviewerArtifact(rawContent);
-  return normalized ? JSON.parse(normalized) : null;
+  return normalized ? parseStrictJson(normalized) : null;
 }

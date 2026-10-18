@@ -9,7 +9,9 @@ process.env.WORKFLOW_WORKSPACE = root;
 
 const { WorkflowStore } = await import('../src/runtime/job-store.js');
 const { DistributedScheduler } = await import('../src/runtime/distributed-scheduler.js');
+const { GitHubActionsProvider } = await import('../src/runtime/github-actions-provider.js');
 const { verifyWorkflowCompletion } = await import('../src/runtime/workflow/verifier.js');
+const { canonicalProviderDispatchRequest, createProviderDispatchIdentity, providerDispatchKey, providerDispatchConfig } = await import('../src/runtime/provider-dispatch-identity.js');
 
 const store = new WorkflowStore();
 
@@ -50,19 +52,74 @@ assert.equal(pendingIntent.state, 'DISPATCHING');
 assert.equal(pendingIntent.provider_run_id, null);
 assert.equal(store.getTask(pendingTask.task_id).status, 'running');
 
-const recoveryKey = 'b'.repeat(64);
+const recoveryIdentity = createProviderDispatchIdentity({
+  job_id: intentJob.job_id, task_id: task.task_id, lease_id: 'lease-recovery', attempt: 2, owner_epoch: 2, input_commit: 'b'.repeat(40)
+}, providerDispatchConfig({}));
+const recoveryKey = providerDispatchKey(recoveryIdentity);
 store.db.prepare(`INSERT INTO provider_dispatch_intents
-  (dispatch_key,job_id,task_id,lease_id,attempt,provider,input_commit,state,created_at,updated_at)
-  VALUES(?,?,?,?,?,?,?,'DISPATCHING',?,?)`)
-  .run(recoveryKey, intentJob.job_id, task.task_id, 'lease-recovery', 2, 'github-actions', 'b'.repeat(40), new Date().toISOString(), new Date().toISOString());
+  (dispatch_key,job_id,task_id,lease_id,attempt,owner_epoch,provider,input_commit,request_sha256,request_json,api_base,workflow,repository,event,ref,state,dispatch_claim_id,created_at,updated_at)
+  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'DISPATCHING','test-existing-send-claim',?,?)`)
+  .run(recoveryKey, recoveryIdentity.job_id, recoveryIdentity.task_id, recoveryIdentity.lease_id, recoveryIdentity.attempt, recoveryIdentity.owner_epoch,
+    recoveryIdentity.provider, recoveryIdentity.input_commit, recoveryIdentity.request_sha256, canonicalProviderDispatchRequest({
+      job_id: recoveryIdentity.job_id, task_id: recoveryIdentity.task_id, lease_id: recoveryIdentity.lease_id,
+      attempt: recoveryIdentity.attempt, owner_epoch: recoveryIdentity.owner_epoch, input_commit: recoveryIdentity.input_commit
+    }), recoveryIdentity.api_base, recoveryIdentity.workflow, recoveryIdentity.repository,
+    recoveryIdentity.event, recoveryIdentity.ref, new Date().toISOString(), new Date().toISOString());
 const recoveryScheduler = new DistributedScheduler({
   store,
-  provider: { async reconcileDispatchIntent() { return { provider_run_id: 'gha-recovered', state: 'RUNNING' }; } },
+  provider: { async reconcileDispatchIntent() { return {
+    provider_run_id: 'gha-recovered', job_id: recoveryIdentity.job_id, task_id: recoveryIdentity.task_id,
+    lease_id: recoveryIdentity.lease_id, attempt: recoveryIdentity.attempt, owner_epoch: recoveryIdentity.owner_epoch, input_commit: recoveryIdentity.input_commit,
+    workflow: recoveryIdentity.workflow, ref: recoveryIdentity.ref, state: 'RUNNING'
+  }; } },
   workerId: 'p1-recovery'
 });
 const reconciled = await recoveryScheduler.reconcileProviderDispatches();
 assert.equal(reconciled.some(item => item.dispatchKey === recoveryKey && item.status === 'RECONCILED'), true);
 assert.equal(store.db.prepare('SELECT state,provider_run_id FROM provider_dispatch_intents WHERE dispatch_key=?').get(recoveryKey).provider_run_id, 'gha-recovered');
+
+// A dispatch reconciliation can race with another process that already bound
+// the intent. The late result must not overwrite the winner or leave an orphan
+// provider_runs row. This uses the real SQLite store and a mock GitHub API only.
+const raceCreatedAt = new Date().toISOString();
+const raceInputCommit = 'c'.repeat(40);
+const raceIdentity = createProviderDispatchIdentity({
+  job_id: intentJob.job_id, task_id: task.task_id, lease_id: 'lease-race-reconcile', attempt: 3, owner_epoch: 3, input_commit: raceInputCommit
+}, { provider: 'github-actions', workflow: 'p3-worker.yml', repository: 'example/repo', event: 'workflow_dispatch', ref: 'main' });
+const raceKey = providerDispatchKey(raceIdentity);
+store.db.prepare(`INSERT INTO provider_dispatch_intents
+  (dispatch_key,job_id,task_id,lease_id,attempt,owner_epoch,provider,input_commit,request_sha256,request_json,api_base,workflow,repository,event,ref,state,provider_run_id,created_at,updated_at)
+  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'DISPATCHING',NULL,?,?)`)
+  .run(raceKey, raceIdentity.job_id, raceIdentity.task_id, raceIdentity.lease_id, raceIdentity.attempt, raceIdentity.owner_epoch,
+    raceIdentity.provider, raceIdentity.input_commit, raceIdentity.request_sha256, canonicalProviderDispatchRequest({
+      job_id: raceIdentity.job_id, task_id: raceIdentity.task_id, lease_id: raceIdentity.lease_id,
+      attempt: raceIdentity.attempt, owner_epoch: raceIdentity.owner_epoch, input_commit: raceIdentity.input_commit
+    }), raceIdentity.api_base, raceIdentity.workflow, raceIdentity.repository,
+    raceIdentity.event, raceIdentity.ref, raceCreatedAt, raceCreatedAt);
+const racingProvider = new GitHubActionsProvider({
+  token: 'test-token', owner: 'example', repo: 'repo', workflow: 'p3-worker.yml', ref: 'main', store,
+  fetchImpl: async url => {
+    assert.match(url, /actions\/workflows\/p3-worker\.yml\/runs\?/);
+    store.db.prepare(`INSERT INTO provider_runs
+      (provider_run_id,provider,job_id,task_id,lease_id,attempt,owner_epoch,input_commit,dispatch_key,request_sha256,workflow,ref,state,conclusion,html_url,artifact_id,output_commit,run_attempt,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'RUNNING',NULL,NULL,NULL,NULL,1,?,?)`)
+      .run('99999', 'github-actions', intentJob.job_id, task.task_id, 'lease-race-reconcile', 3, raceIdentity.owner_epoch, raceInputCommit, raceKey, raceIdentity.request_sha256, 'p3-worker.yml', 'main', raceCreatedAt, raceCreatedAt);
+    store.db.prepare(`UPDATE provider_dispatch_intents SET state='DISPATCHED',provider_run_id='99999',updated_at=? WHERE dispatch_key=?`)
+      .run(new Date().toISOString(), raceKey);
+    return new Response(JSON.stringify({ workflow_runs: [{
+      id: 88888, display_title: `P3 worker ${raceKey}`, name: 'P3 Distributed Worker', status: 'in_progress',
+      conclusion: null, html_url: 'https://github.com/example/repo/actions/runs/88888', created_at: raceCreatedAt,
+      path: '.github/workflows/p3-worker.yml@refs/heads/main', event: 'workflow_dispatch', head_branch: 'main',
+      repository: { full_name: 'example/repo' }, head_sha: raceInputCommit, run_attempt: 1
+    }] }), { status: 200 });
+  }
+});
+await assert.rejects(() => racingProvider.reconcileDispatchIntent({
+  ...store.db.prepare('SELECT * FROM provider_dispatch_intents WHERE dispatch_key=?').get(raceKey), created_at: raceCreatedAt
+}), /dispatch intent changed identity before result binding|concurrently bound to a different provider run/);
+assert.equal(store.db.prepare('SELECT provider_run_id FROM provider_dispatch_intents WHERE dispatch_key=?').get(raceKey).provider_run_id, '99999');
+assert.equal(store.db.prepare('SELECT provider_run_id FROM provider_runs WHERE provider_run_id=?').get('88888'), undefined,
+  'late reconciliation must not leave an orphan run record after losing the intent CAS race');
 
 const plan = {
   schema_version: 1,

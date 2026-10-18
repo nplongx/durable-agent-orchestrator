@@ -17,67 +17,67 @@ const ROLE_CONTRACTS = Object.freeze({
   productowner: Object.freeze({
     role: 'productowner',
     capability: TaskCapability.PRODUCT_REQUIREMENTS,
-    executor: 'OpenClaw',
+    executor: 'ChatOnSteroids',
     permissions: Object.freeze(['workspace.read', 'artifact.create'])
   }),
   'product-owner': Object.freeze({
     role: 'product-owner',
     capability: TaskCapability.PRODUCT_REQUIREMENTS,
-    executor: 'OpenClaw',
+    executor: 'ChatOnSteroids',
     permissions: Object.freeze(['workspace.read', 'artifact.create'])
   }),
   researcher: Object.freeze({
     role: 'researcher',
     capability: TaskCapability.RESEARCH_COLLECT,
-    executor: 'OpenClaw',
+    executor: 'ChatOnSteroids',
     permissions: Object.freeze(['workspace.read', 'artifact.create'])
   }),
   architect: Object.freeze({
     role: 'architect',
     capability: TaskCapability.ARCHITECTURE_DESIGN,
-    executor: 'OpenClaw',
+    executor: 'ChatOnSteroids',
     permissions: Object.freeze(['workspace.read', 'artifact.create'])
   }),
   engineer: Object.freeze({
     role: 'engineer',
     capability: TaskCapability.CODE_MODIFY,
-    executor: 'OpenClaw',
+    executor: 'ChatOnSteroids',
     permissions: Object.freeze(['workspace.read', 'workspace.write', 'execution.request', 'artifact.create'])
   }),
   qa: Object.freeze({
     role: 'qa',
     capability: TaskCapability.CODE_VERIFY,
-    executor: 'OpenClaw',
+    executor: 'ChatOnSteroids',
     permissions: Object.freeze(['workspace.read', 'execution.request', 'artifact.create'])
   }),
   reviewer: Object.freeze({
     role: 'reviewer',
     capability: TaskCapability.CHANGE_REVIEW,
-    executor: 'OpenClaw',
+    executor: 'ChatOnSteroids',
     permissions: Object.freeze(['workspace.read', 'artifact.create'])
   }),
   security: Object.freeze({
     role: 'security',
     capability: TaskCapability.SECURITY_AUDIT,
-    executor: 'OpenClaw',
+    executor: 'ChatOnSteroids',
     permissions: Object.freeze(['workspace.read', 'artifact.create'])
   }),
   platform: Object.freeze({
     role: 'platform',
     capability: TaskCapability.INFRASTRUCTURE_VERIFY,
-    executor: 'OpenClaw',
+    executor: 'ChatOnSteroids',
     permissions: Object.freeze(['workspace.read', 'artifact.create'])
   }),
   writer: Object.freeze({
     role: 'writer',
     capability: TaskCapability.DOCUMENTATION_WRITE,
-    executor: 'OpenClaw',
+    executor: 'ChatOnSteroids',
     permissions: Object.freeze(['workspace.read', 'artifact.create'])
   }),
   cto: Object.freeze({
     role: 'cto',
     capability: TaskCapability.SYNTHESIS_APPROVE,
-    executor: 'OpenClaw',
+    executor: 'ChatOnSteroids',
     permissions: Object.freeze(['workspace.read', 'artifact.create'])
   })
 });

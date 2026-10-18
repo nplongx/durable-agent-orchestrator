@@ -4,8 +4,12 @@ const id = () => `lease_${crypto.randomUUID()}`;
 
 export class TaskLeaseManager {
   constructor(store, { ttlMs = 60000, workerId = process.env.WORKER_ID || `worker-${process.pid}` } = {}) {
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > 2_147_483_647) {
+      throw new Error('TaskLeaseManager ttlMs must be a positive safe integer no greater than 2147483647');
+    }
+    if (typeof workerId !== 'string' || !workerId.trim()) throw new Error('TaskLeaseManager workerId must be a non-empty string');
     this.store = store;
-    this.ttlMs = Math.max(1000, Number(ttlMs) || 60000);
+    this.ttlMs = Math.max(1000, ttlMs);
     this.workerId = workerId;
   }
 

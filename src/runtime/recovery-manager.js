@@ -7,6 +7,8 @@ import { deliverSessionMessage } from './session-transport.js';
 import { isProductionWorkflow } from './workflow/definitions/production.js';
 import { isSupportedWorkflow } from './workflow/definitions/index.js';
 import { ProductionRoles } from './workflow/catalog/production.js';
+import { parseStrictJson } from './strict-json.js';
+import { isVerifiedSuccessfulLocalExecution } from './execution-manager.js';
 
 const execFileAsync = promisify(execFile);
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || 'openclaw';
@@ -22,7 +24,7 @@ async function cli(command, args, timeout = 30000) {
 async function listOpenClawSessions() {
   try {
     const raw = await cli(OPENCLAW_BIN, ['sessions', '--all-agents', '--json', '--limit', 'all'], 45000);
-    const parsed = JSON.parse(raw);
+    const parsed = parseStrictJson(raw);
     return Array.isArray(parsed.sessions) ? parsed.sessions : [];
   } catch (error) {
     return { error };
@@ -47,7 +49,7 @@ async function exportCompletedTrajectory(sessionKey, timeoutMs = 45000) {
     ], timeoutMs);
     const eventsPath = path.join(TRAJECTORY_ROOT, output, 'events.jsonl');
     const raw = await fs.readFile(eventsPath, 'utf8');
-    const events = raw.split('\n').filter(Boolean).map(line => JSON.parse(line));
+    const events = raw.split('\n').filter(Boolean).map(line => parseStrictJson(line));
     const executionEvidence = extractTrajectoryExecutionEvidence(raw);
     const assistantTexts = [];
     for (const event of events) {
@@ -90,7 +92,7 @@ async function exportCompletedTrajectory(sessionKey, timeoutMs = 45000) {
 }
 
 function extractTrajectoryExecutionEvidence(raw) {
-  const events = String(raw || '').split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const events = String(raw || '').split('\n').filter(Boolean).map(line => parseStrictJson(line));
   const calls = new Map();
   const evidence = [];
   for (const event of events) {
@@ -109,7 +111,8 @@ function extractTrajectoryExecutionEvidence(raw) {
       command,
       stdout: details.aggregated || stdout || '',
       stderr: details.stderr || '',
-      exitCode: Number.isInteger(details.exitCode) ? details.exitCode : null,
+      exitCode: Number.isSafeInteger(details.exitCode) && details.exitCode >= 0 && !Object.is(details.exitCode, -0)
+        ? details.exitCode : null,
       success: data.success === true || data.message?.isError === false
     });
   }
@@ -124,12 +127,18 @@ function normalizeCommand(command) {
 
 function expectedCommandFromTask(task) {
   try {
-    const metadata = JSON.parse(task?.metadata_json || '{}');
+    const metadata = parseStrictJson(task?.metadata_json || '{}');
     if (metadata.executor !== 'ExecutionManager') return '';
     return normalizeCommand(metadata.command || '');
   } catch (_) {
     return '';
   }
+}
+
+function hasCanonicalSuccessfulExitMarker(content) {
+  const markers = String(content || '').split(/\r?\n/)
+    .filter(line => /^[ \t]*exit[ \t]+(?:status(?:\/code)?|code)\b/i.test(line));
+  return markers.length === 1 && /^[ \t]*exit[ \t]+(?:status(?:\/code)?|code)[ \t]*[:=][ \t]*0[ \t]*$/i.test(markers[0]);
 }
 
 function hasVerifiedSuccessfulRuntimeEvidence(task, content) {
@@ -138,8 +147,38 @@ function hasVerifiedSuccessfulRuntimeEvidence(task, content) {
   if (!expected || !/\[ACTUAL TOOL RESULT EVIDENCE\]/i.test(text)) return false;
   const normalized = normalizeCommand(text);
   return normalized.includes(expected)
-    && /exit status(?:\/code)?\s*:\s*0/i.test(text)
+    && hasCanonicalSuccessfulExitMarker(text)
     && /execution status\s*:\s*completed/i.test(text);
+}
+
+function hasUnresolvedDurableExecution(store, jobId) {
+  // OpenClaw's session inventory is not authoritative for provider-backed work.
+  // A GitHub Actions worker can be active with no OpenClaw session key at all,
+  // and a claimed dispatch with no bound run ID is an ambiguous remote outcome
+  // even after its local lease expires. Never use the missing OpenClaw session
+  // as a reason to terminalize such a Job.
+  const db = store?.db;
+  if (!db?.prepare) return true;
+  try {
+    if (db.prepare("SELECT 1 FROM task_leases WHERE job_id=? AND state='ACTIVE' LIMIT 1").get(jobId)) return true;
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('provider_runs','provider_dispatch_intents')")
+      .all().map(row => row.name));
+    if (tables.has('provider_dispatch_intents')) {
+      const uncertainClaim = db.prepare(`SELECT 1 FROM provider_dispatch_intents
+        WHERE job_id=? AND state='DISPATCHING' AND provider_run_id IS NULL AND dispatch_claim_id IS NOT NULL LIMIT 1`).get(jobId);
+      if (uncertainClaim) return true;
+    }
+    if (tables.has('provider_runs')) {
+      const activeProviderRun = db.prepare(`SELECT 1 FROM provider_runs r
+        WHERE r.job_id=? AND UPPER(COALESCE(r.state,'')) NOT IN ('COMPLETED','FAILED','CANCELLED') LIMIT 1`).get(jobId);
+      if (activeProviderRun) return true;
+    }
+    return false;
+  } catch {
+    // If the durable ownership ledger cannot be inspected, stale-job recovery
+    // is not allowed to turn uncertainty into a terminal failure.
+    return true;
+  }
 }
 
 export class RecoveryManager {
@@ -165,6 +204,11 @@ export class RecoveryManager {
   }
 
   async reconcile({ jobId = null } = {}) {
+    const recoveredUnstartedBatchClaims = typeof this.store.recoverUnstartedExecutionBatchClaims === 'function'
+      ? this.store.recoverUnstartedExecutionBatchClaims({
+        staleBefore: new Date(Date.now() - this.executionStaleMs).toISOString(), jobId
+      })
+      : [];
     const allSessions = this.store.listAgentSessions({ jobId, limit: 500 });
     const sessions = allSessions.filter(s => ['ACTIVE', 'CREATED'].includes(s.state));
     const runtimeSessions = await this.listSessions();
@@ -191,21 +235,47 @@ export class RecoveryManager {
     // well past the normal execution window, and none of its task sessions is
     // alive. Never mutate a fresh/active Job or one whose runtime is merely
     // temporarily unavailable.
+    const staleJobsDeferred = [];
     if (runtimeMap) {
       const staleJobs = (jobId
         ? [this.store.getJob(jobId)].filter(Boolean)
         : this.store.db.prepare("SELECT * FROM jobs WHERE state='EXECUTING'").all())
         .filter(job => Date.now() - Date.parse(job.updated_at || 0) > this.jobStaleMs);
       for (const job of staleJobs) {
-        const tasks = this.store.db.prepare('SELECT * FROM tasks WHERE job_id=?').all(job.job_id);
-        const liveRuntime = tasks.some(task => {
-          if (!task.openclaw_session_key) return false;
-          const runtime = runtimeMap.get(task.openclaw_session_key);
-          const status = String(runtime?.status || '').toLowerCase();
-          return ['active', 'running', 'working', 'queued'].includes(status);
-        });
-        if (liveRuntime) continue;
+        // Hold a SQLite writer reservation across the stale-state check and
+        // terminalization. Otherwise a scheduler could acquire a lease after
+        // the check but before complete() writes the failure state.
+        this.store.db.exec('SAVEPOINT recover_stale_job_transition');
         try {
+          const reservation = this.store.db.prepare(`UPDATE jobs SET updated_at=updated_at
+            WHERE job_id=? AND state='EXECUTING' AND status='active'`).run(job.job_id);
+          if (reservation.changes !== 1) {
+            this.store.db.exec('RELEASE SAVEPOINT recover_stale_job_transition');
+            continue;
+          }
+          const currentJob = this.store.getJob(job.job_id);
+          if (!currentJob || currentJob.state !== 'EXECUTING' || currentJob.status !== 'active' ||
+              Date.now() - Date.parse(currentJob.updated_at || 0) <= this.jobStaleMs) {
+            this.store.db.exec('RELEASE SAVEPOINT recover_stale_job_transition');
+            continue;
+          }
+          const tasks = this.store.db.prepare('SELECT * FROM tasks WHERE job_id=?').all(job.job_id);
+          const liveRuntime = tasks.some(task => {
+            if (!task.openclaw_session_key) return false;
+            const runtime = runtimeMap.get(task.openclaw_session_key);
+            const status = String(runtime?.status || '').toLowerCase();
+            return ['active', 'running', 'working', 'queued'].includes(status);
+          });
+          if (liveRuntime) {
+            staleJobsDeferred.push({ jobId: job.job_id, reason: 'live_openclaw_runtime' });
+            this.store.db.exec('RELEASE SAVEPOINT recover_stale_job_transition');
+            continue;
+          }
+          if (hasUnresolvedDurableExecution(this.store, job.job_id)) {
+            staleJobsDeferred.push({ jobId: job.job_id, reason: 'durable_lease_or_provider_outcome_unresolved' });
+            this.store.db.exec('RELEASE SAVEPOINT recover_stale_job_transition');
+            continue;
+          }
           this.store.complete(job.job_id, [
             '[RECOVERY FAILURE]',
             `Job was EXECUTING for more than ${Math.round(this.jobStaleMs / 60000)} minutes, but no corresponding live OpenClaw runtime session remains.`,
@@ -214,15 +284,18 @@ export class RecoveryManager {
           this.store.recordEvent(job.job_id, 'job.runtime_reconciled', {
             outcome: 'failure',
             reason: 'stale_job_without_live_runtime',
-            staleMs: Date.now() - Date.parse(job.updated_at || 0)
+            staleMs: Date.now() - Date.parse(currentJob.updated_at || 0)
           }, `${job.job_id}|stale-job-without-live-runtime`);
+          this.store.db.exec('RELEASE SAVEPOINT recover_stale_job_transition');
         } catch (error) {
+          try { this.store.db.exec('ROLLBACK TO SAVEPOINT recover_stale_job_transition'); } catch {}
+          try { this.store.db.exec('RELEASE SAVEPOINT recover_stale_job_transition'); } catch {}
           console.warn(`[RecoveryManager] stale Job reconciliation failed job=${job.job_id}: ${error.message}`);
         }
       }
 
       const terminalRunningTasks = this.store.db.prepare(`
-        SELECT t.task_id, t.openclaw_session_key
+        SELECT t.task_id, t.job_id, t.openclaw_session_key
         FROM tasks t
         JOIN jobs j ON j.job_id = t.job_id
         WHERE t.status='running' AND j.status IN ('completed','failed','cancelled')
@@ -231,6 +304,10 @@ export class RecoveryManager {
         const runtime = task.openclaw_session_key ? runtimeMap.get(task.openclaw_session_key) : null;
         const runtimeStatus = String(runtime?.status || '').toLowerCase();
         if (runtime && ['active', 'running', 'working', 'queued'].includes(runtimeStatus)) continue;
+        // The store method repeats this check atomically before mutating rows.
+        // Skip the reconciliation call too when durable provider ownership is
+        // unresolved; OpenClaw inventory cannot establish remote cancellation.
+        if (hasUnresolvedDurableExecution(this.store, task.job_id)) continue;
         try {
           this.store.reconcileRunningTaskForTerminalJob(task.task_id, 'parent job is already terminal and no live runtime session remains');
         } catch (error) {
@@ -246,7 +323,7 @@ export class RecoveryManager {
       : this.store.db.prepare("SELECT * FROM tasks WHERE status = 'running' AND openclaw_session_key IS NOT NULL").all())
       .filter(t => ['running', 'failed'].includes(String(t.status).toLowerCase())
         && t.openclaw_session_key
-        && isSupportedWorkflow(this.store.getJob(t.job_id)));
+        && (isSupportedWorkflow(this.store.getJob(t.job_id)) || isProductionWorkflow(this.store.getJob(t.job_id))));
     for (const task of reconcilableTasks) {
       const runtime = runtimeMap?.get(task.openclaw_session_key);
       const runtimeStatus = String(runtime?.status || '').toLowerCase();
@@ -284,18 +361,13 @@ export class RecoveryManager {
             content: completion,
             outcome
           });
-        } else if (task.status === 'failed' && outcome === 'success'
-          && ProductionRoles.includes(String(task.role || '').toLowerCase())
-          && /\[ACTUAL TOOL RESULT EVIDENCE\]/i.test(completion)
-          && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/(?:server\.js|test-tool-turn\.js)/i.test(completion)
-          && hasVerifiedSuccessfulRuntimeEvidence(task, completion)) {
-            completedTask = this.store.reconcileFailedTaskByRuntime(task.task_id, {
-              content: completion,
-              runId: task.openclaw_run_id || runtime.runId || null,
-              sessionKey: task.openclaw_session_key
-            }) || task;
         }
         if (completedTask?.status === 'completed' || completedTask?.status === 'failed') {
+          // A transcript that says a deterministic production command succeeded
+          // cannot promote a previously failed task. Only ExecutionManager's
+          // durable session/attempt/exit ledger may recover that task; the
+          // supervisor path below handles it when available.
+          const reconciledOutcome = completedTask.status === 'completed' ? outcome : 'failure';
           const session = allSessions.find(s => s.task_id === task.task_id) || this.store.getSessionByOpenClawKey(task.openclaw_session_key);
           if (session) this.store.updateAgentSession(session.session_id, { state: completedTask.status === 'completed' ? 'TERMINATED' : 'FAILED' });
           this.store.recordEvent(task.job_id, 'session.runtime_reconciled', {
@@ -303,8 +375,10 @@ export class RecoveryManager {
             sessionId: session?.session_id || null,
             sessionKey: task.openclaw_session_key,
             runId: task.openclaw_run_id || runtime.runId || null,
-            outcome
-          }, `${task.task_id}|runtime-reconciled|${outcome}`);
+            outcome: reconciledOutcome,
+            ...(completedTask.status === 'failed' && outcome === 'success'
+              ? { reason: 'runtime transcript cannot replace durable deterministic execution evidence' } : {})
+          }, `${task.task_id}|runtime-reconciled|${reconciledOutcome}`);
         }
       } catch (error) {
         console.warn(`[RecoveryManager] task trajectory reconciliation failed task=${task.task_id}: ${error.message}`);
@@ -317,23 +391,45 @@ export class RecoveryManager {
     // evidence is still absent. Never create a replacement task/session.
     if (this.executionManager) {
       const trace = jobId ? this.store.getJobTrace(jobId) : null;
-      const terminalDeterministicTasks = (trace?.tasks || this.store.db.prepare("SELECT t.* FROM tasks t JOIN jobs j ON j.job_id=t.job_id WHERE t.status IN ('completed','failed') AND t.role IN ('architect','qa') AND j.state='EXECUTING'").all())
+      const terminalDeterministicTasks = (trace?.tasks || this.store.db.prepare("SELECT t.* FROM tasks t JOIN jobs j ON j.job_id=t.job_id WHERE t.status='failed' AND t.role IN ('architect','qa') AND j.state='EXECUTING'").all())
         .filter(task => ProductionRoles.includes(String(task.role || '').toLowerCase())
-          && ['completed', 'failed'].includes(String(task.status).toLowerCase())
+          && String(task.status).toLowerCase() === 'failed'
           && isProductionWorkflow(this.store.getJob(task.job_id))
           && !task.execution_session_id
           && !task.execution_status);
+      // A task already marked completed but lacking deterministic execution
+      // identity is inconsistent evidence, not permission to execute it again.
+      // Replaying a successfully completed task could duplicate its side effect;
+      // leave it terminal and make the missing provenance explicit for workflow
+      // verification/review instead of reopening it through prepareExecution().
+      const completedWithoutExecutionIdentity = (trace?.tasks || this.store.db.prepare("SELECT t.* FROM tasks t JOIN jobs j ON j.job_id=t.job_id WHERE t.status='completed' AND t.role IN ('architect','qa') AND j.state='EXECUTING'").all())
+        .filter(task => String(task.status || '').toLowerCase() === 'completed' &&
+          ProductionRoles.includes(String(task.role || '').toLowerCase()) &&
+          isProductionWorkflow(this.store.getJob(task.job_id)) &&
+          !task.execution_session_id && !task.execution_status);
+      for (const task of completedWithoutExecutionIdentity) {
+        this.store.recordEvent(task.job_id, 'execution.evidence_recovery_blocked', {
+          taskId: task.task_id,
+          role: task.role,
+          reason: 'completed deterministic task lacks durable execution identity; automatic reopen/replay refused'
+        }, `${task.task_id}|completed-task-missing-execution-identity`);
+      }
       for (const task of terminalDeterministicTasks) {
         try {
-          const latest = this.store.db.prepare('SELECT content FROM results WHERE task_id=? ORDER BY created_at DESC LIMIT 1').get(task.task_id);
-          const latestContent = String(latest?.content || '');
-          if (/\[ACTUAL EXECUTION EVIDENCE\]/i.test(latestContent)
-            && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/(?:server\.js|test-tool-turn\.js)/i.test(latestContent)
-            && /exit status\/code\s*:\s*0/i.test(latestContent)
-            && /execution status\s*:\s*completed/i.test(latestContent)) continue;
-          const command = expectedCommandFromTask(task) || String(JSON.parse(task.metadata_json || '{}').command || '').trim();
+          // Text markers cannot substitute for the task's durable session,
+          // numeric attempt, result outcome, and canonical terminal event. This
+          // loop is specifically for terminal rows missing ExecutionManager
+          // fields, so a regex over old result content must never turn that
+          // absence into a successful recovery skip.
+          const command = expectedCommandFromTask(task) || String(parseStrictJson(task.metadata_json || '{}').command || '').trim();
           if (!command) continue;
-          const result = await this.executionManager.executeTask(task.task_id, { command });
+          // Supported deterministic workflows are bound to an immutable
+          // structured command and approved workspace. Re-enter through the
+          // authorization-aware API instead of raw shell execution, which would
+          // either fail the structured plan contract or risk drifting from its
+          // pinned executable/argv/cwd.
+          const result = await this.executionManager.executeAuthorizedTask(task.task_id);
+          const executionSucceeded = isVerifiedSuccessfulLocalExecution(result, task.task_id);
           const evidence = [
             '<prompt-data>',
             '[ACTUAL TOOL RESULT EVIDENCE]',
@@ -343,18 +439,36 @@ export class RecoveryManager {
             `attempt: ${result.execution_attempt || this.store.getTask(task.task_id)?.execution_attempt || 'N/A'}`,
             `exact command: ${result.command || command}`,
             `exit status/code: ${result.exitCode == null ? 'N/A' : result.exitCode}`,
-            `execution status: ${result.timedOut ? 'timeout' : result.exitCode === 0 ? 'completed' : 'failed'}`,
+            `execution status: ${result.timedOut ? 'timeout' : executionSucceeded ? 'completed' : 'failed'}`,
             `stdout:\n${result.stdout || ''}`,
             `stderr:\n${result.stderr || ''}`,
             '</prompt-data>'
           ].join('\n');
-          this.store.repairResultEvidence(task.task_id, evidence);
-          if (this.store.getTask(task.task_id)?.status === 'failed') {
+          this.store.repairResultEvidence(task.task_id, evidence, { outcome: executionSucceeded ? 'success' : 'failure' });
+          if (executionSucceeded && this.store.getTask(task.task_id)?.status === 'failed') {
             this.store.reconcileFailedTaskByRuntime(task.task_id, {
               content: evidence,
               runId: task.openclaw_run_id || null,
               sessionKey: task.openclaw_session_key || null
             });
+          }
+          const verifiedTask = this.store.getTask(task.task_id);
+          if (executionSucceeded && verifiedTask?.status === 'completed') {
+            const registeredSession = allSessions.find(session => session.task_id === task.task_id) ||
+              this.store.getSessionByTask(task.task_id);
+            if (registeredSession && registeredSession.state !== 'TERMINATED') {
+              this.store.updateAgentSession(registeredSession.session_id, { state: 'TERMINATED' });
+              this.store.recordEvent(task.job_id, 'session.runtime_reconciled', {
+                taskId: task.task_id,
+                sessionId: registeredSession.session_id,
+                sessionKey: task.openclaw_session_key || null,
+                runId: task.openclaw_run_id || null,
+                outcome: 'success',
+                authority: 'durable_execution_manager_result',
+                executionSessionId: verifiedTask.execution_session_id,
+                attempt: verifiedTask.execution_attempt
+              }, `${task.task_id}|execution-manager-runtime-reconciled|${verifiedTask.execution_session_id}|${verifiedTask.execution_attempt}`);
+            }
           }
           this.store.recordEvent(task.job_id, 'execution.evidence_recovered', {
             taskId: task.task_id, role: task.role, command, exitCode: result.exitCode,
@@ -408,11 +522,11 @@ export class RecoveryManager {
             const required = ProductionRoles.map(role => children.find(t => String(t.role).toLowerCase() === role));
             const childEvidenceValid = required.every(child => {
               if (!child || child.status !== 'completed') return false;
-              const result = this.store.db.prepare('SELECT outcome, content FROM results WHERE task_id = ? ORDER BY created_at DESC LIMIT 1').get(child.task_id);
+              const result = this.store.db.prepare('SELECT outcome, content FROM results WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1').get(child.task_id);
               return result?.outcome === 'success'
                 && /\[ACTUAL TOOL RESULT EVIDENCE\]/i.test(String(result.content || ''))
                 && /node\s+--check\s+\/home\/long\/work\/chatgpt-adapter\/(?:server\.js|test-tool-turn\.js)/i.test(String(result.content || ''))
-                && /exit\s+(?:status|code)(?:\/code)?\s*(?::|=)?\s*(?:was\s+successful\s*\()?\s*0/i.test(String(result.content || ''));
+                && hasCanonicalSuccessfulExitMarker(result.content);
             });
             const synthesisValid = childEvidenceValid && Boolean(String(completion || '').trim());
             if (childEvidenceValid && synthesisValid) {
@@ -510,20 +624,57 @@ export class RecoveryManager {
     const tasks = (jobId ? this.store.getJobTrace(jobId)?.tasks : this.store.db.prepare("SELECT * FROM tasks WHERE execution_status = 'running'").all()) || [];
     const execution = [];
     for (const task of tasks.filter(t => t.execution_status === 'running')) {
-      const metadata = JSON.parse(task.metadata_json || '{}');
+      const metadata = parseStrictJson(task.metadata_json || '{}');
       const alive = await tmuxExists(metadata.tmuxName);
       const age = Date.now() - new Date(task.execution_started_at || task.updated_at).getTime();
       if (!alive && age > this.executionStaleMs) {
-        const ts = new Date().toISOString();
-        this.store.db.prepare("UPDATE tasks SET execution_status = 'stale', execution_finished_at = ?, execution_stderr = ?, updated_at = ? WHERE task_id = ? AND execution_status = 'running'")
-          .run(ts, 'execution supervisor/session missing; recovery required', ts, task.task_id);
-        this.store.recordEvent(task.job_id, 'execution.stale', {
-          taskId: task.task_id, executionSessionId: task.execution_session_id, attempt: task.execution_attempt, reason: 'tmux execution session missing'
-        }, `${task.task_id}|execution-stale|${task.execution_attempt}`);
-        execution.push(this.store.getTask(task.task_id));
+        if (typeof task.execution_attempt !== 'number' || !Number.isSafeInteger(task.execution_attempt) || task.execution_attempt < 1 ||
+            typeof task.execution_session_id !== 'string' || !task.execution_session_id ||
+            typeof metadata.command !== 'string' || !metadata.command.trim()) {
+          throw new Error(`cannot terminalize stale execution with malformed durable task/session/attempt/command identity: ${task.task_id}`);
+        }
+        const reason = 'execution supervisor/session missing; recovery terminalized the orphaned attempt as failed';
+        // Task/result/attempt rows and any associated batch item are one
+        // recovery unit. If recovery crashes between those writes, a failed
+        // task paired with a RUNNING batch item would otherwise be invisible
+        // to the next stale-execution scan and strand the batch indefinitely.
+        this.store.db.exec('SAVEPOINT recover_stale_execution_transition');
+        try {
+          // Do not update only tasks.execution_status: prepareExecution also
+          // checks the attempts ledger, and a remaining status='started' row
+          // would permanently block a monotonic retry after recovery. Route
+          // the orphan through the canonical terminalization ledger.
+          const terminal = this.store.finishExecution(task.task_id, {
+            executionSessionId: task.execution_session_id,
+            attempt: task.execution_attempt,
+            command: metadata.command,
+            exitCode: null,
+            stdout: '',
+            stderr: reason,
+            status: 'failed',
+            error: reason
+          });
+          const recoveredBatchItem = this.store.recoverStaleExecutionBatchItem(task.task_id, {
+            expectedAttempt: task.execution_attempt, reason
+          });
+          this.store.recordEvent(task.job_id, 'execution.stale', {
+            taskId: task.task_id, executionSessionId: task.execution_session_id,
+            attempt: task.execution_attempt, reason: 'tmux execution session missing',
+            terminalStatus: terminal.execution_status,
+            batchId: recoveredBatchItem?.batch.batch_id || null,
+            batchItemId: recoveredBatchItem?.item.item_id || null
+          }, `${task.task_id}|execution-stale|${task.execution_attempt}`);
+          this.store.db.exec('RELEASE SAVEPOINT recover_stale_execution_transition');
+          execution.push(terminal);
+        } catch (error) {
+          try { this.store.db.exec('ROLLBACK TO SAVEPOINT recover_stale_execution_transition'); } catch {}
+          try { this.store.db.exec('RELEASE SAVEPOINT recover_stale_execution_transition'); } catch {}
+          throw error;
+        }
       }
     }
-    return { staleSessions: stale.filter(Boolean), staleExecutions: execution, openclawInventoryAvailable: !runtimeSessions.error };
+    return { staleSessions: stale.filter(Boolean), staleExecutions: execution, recoveredUnstartedBatchClaims, staleJobsDeferred,
+      openclawInventoryAvailable: !runtimeSessions.error };
   }
 
 }

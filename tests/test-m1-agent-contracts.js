@@ -10,7 +10,7 @@ for (const role of roles) {
   assert.equal(contract.role, role);
   assert.match(contract.id, /^agent\./);
   assert.equal(contract.version, 1);
-  assert.equal(contract.executor, 'OpenClaw');
+  assert.equal(contract.executor, 'ChatOnSteroids');
   assert.ok(contract.capability);
   for (const field of ['inputs', 'outputs', 'permissions', 'allowedTools', 'completionCriteria']) assert.ok(Array.isArray(contract[field]));
   assert.equal(validateAgentContract(contract), true);

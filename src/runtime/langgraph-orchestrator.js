@@ -3,6 +3,7 @@ import { WorkflowPhase } from './workflow/phases.js';
 import { ProductionRoles } from './workflow/catalog/production.js';
 import { getWorkflowDefinition, isStandardEngineeringWorkflow } from './workflow/definitions/index.js';
 import { validateEvidenceContract } from './workflow/evidence.js';
+import { parseStrictJson } from './strict-json.js';
 
 export const LangGraphActions = Object.freeze({
   NOOP: 'NOOP',
@@ -24,7 +25,7 @@ function workflowDefinition(job) { return getWorkflowDefinition(job); }
 function production(job) { return workflowDefinition(job)?.id === 'production'; }
 function standardEngineering(job) { return workflowDefinition(job)?.id === 'standard-engineering'; }
 function executionSpec(task) {
-  try { return JSON.parse(task?.metadata_json || '{}'); } catch (_) { return {}; }
+  try { return parseStrictJson(task?.metadata_json || '{}'); } catch (_) { return {}; }
 }
 
 function latestTasksByPlanId(tasks) {
@@ -33,7 +34,10 @@ function latestTasksByPlanId(tasks) {
     const metadata = executionSpec(task);
     const key = metadata.workflow_plan_task_id || metadata.workflowPlanTaskId || String(task.role || '').toLowerCase();
     const previous = latest.get(key);
-    if (!previous || String(task.created_at || '') > String(previous.created_at || '')) latest.set(key, task);
+    // JobStore trace rows are ordered by created_at then rowid. Let a later
+    // row win when timestamps tie at millisecond resolution; otherwise a stale
+    // completed revision can shadow the latest failed/incomplete revision.
+    if (!previous || String(task.created_at || '') >= String(previous.created_at || '')) latest.set(key, task);
   }
   return latest;
 }
@@ -43,8 +47,8 @@ function latestRequiredTasks(tasks, requiredSpecs) {
   return requiredSpecs.map(spec => latest.get(spec.id) || latest.get(String(spec.role).toLowerCase()) || null);
 }
 
-function evidenceValid(task, result) {
-  return validateEvidenceContract(task, result).valid;
+function evidenceValid(task, result, planTask) {
+  return validateEvidenceContract(task, result, planTask?.execution || null).valid;
 }
 
 const GraphState = Annotation.Root({
@@ -150,7 +154,7 @@ function classify(state) {
     }
     case WorkflowPhase.VALIDATE_EVIDENCE: {
       if (!production(job)) return { action: LangGraphActions.SYNTHESIZE, reason: 'non-E2E evidence gate delegated to workflow policy' };
-      const invalid = required.filter(t => !evidenceValid(t, results.get(t?.task_id)));
+      const invalid = required.filter((task, index) => !evidenceValid(task, results.get(task?.task_id), requiredSpecs[index]));
       return invalid.length
         ? { action: LangGraphActions.BLOCK, reason: `invalid execution evidence: ${invalid.map(t => t?.role || 'missing').join(', ')}` }
         : { action: LangGraphActions.SYNTHESIZE, reason: 'required execution evidence validated' };

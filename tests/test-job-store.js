@@ -1,9 +1,12 @@
 import assert from 'node:assert';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-const testDb = `/home/long/work/chatgpt-adapter/data/test-workflow-${crypto.randomUUID()}.db`;
+const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'test-job-store-private-'));
+fs.chmodSync(testDataDir, 0o700);
+const testDb = path.join(testDataDir, `test-workflow-${crypto.randomUUID()}.db`);
 process.env.WORKFLOW_DB = testDb;
 process.env.WORKFLOW_DATA_DIR = path.dirname(testDb);
 
@@ -73,12 +76,26 @@ const queuedMessage = store.enqueueSessionMessage(ctoSession.session_id, {
 });
 assert.strictEqual(queuedMessage.status, 'QUEUED');
 assert.strictEqual(store.enqueueSessionMessage(ctoSession.session_id, {
-  senderRole: 'cto', recipientRole: 'architect', payload: { duplicate: true }, dedupeKey: 'phase3-command-1'
+  senderRole: 'cto', recipientRole: 'architect',
+  payload: { command: 'node --check /home/long/work/chatgpt-adapter/server.js' },
+  correlationId: 'turn-phase3-1', dedupeKey: 'phase3-command-1'
 }).message_id, queuedMessage.message_id);
+assert.throws(() => store.enqueueSessionMessage(ctoSession.session_id, {
+  senderRole: 'cto', recipientRole: 'architect', payload: { command: 'unreviewed substituted command' },
+  correlationId: 'substituted-correlation', dedupeKey: 'phase3-command-1'
+}), /dedupe key conflicts with existing durable message payload/,
+'reusing a queue dedupe key with changed command/correlation must not silently return the prior message');
 const deliveredMessage = store.claimNextSessionMessage(ctoSession.session_id, { recipientRole: 'architect', leaseMs: 60_000 });
 assert.strictEqual(deliveredMessage.status, 'DELIVERED');
 assert.strictEqual(deliveredMessage.attempt, 1);
 assert.throws(() => store.ackSessionMessage(queuedMessage.message_id, { recipientRole: 'qa' }), /Session access denied|Message recipient mismatch/);
+store.recordSessionDeliveryStarted(queuedMessage.message_id, {
+  attempt: deliveredMessage.attempt, leaseUntil: deliveredMessage.lease_until
+});
+store.recordSessionDeliveryReceipt(queuedMessage.message_id, {
+  attempt: deliveredMessage.attempt, status: 'OK', runId: 'job-store-ack-proof-run',
+  sessionKey: ctoSession.openclaw_session_key, response: { accepted: true }, error: null
+});
 assert.strictEqual(store.ackSessionMessage(queuedMessage.message_id, { recipientRole: 'architect' }).status, 'ACKED');
 assert.strictEqual(store.claimNextSessionMessage(ctoSession.session_id, { recipientRole: 'architect' }), null);
 
@@ -106,7 +123,7 @@ assert.strictEqual(transportResult.status, 'ACKED');
 assert.strictEqual(store.getSessionMessage(transportMessage.message_id).status, 'ACKED');
 assert.ok(store.getJobTrace(job.job_id).events.some(e => e.type === 'session.message_receipt'));
 assert.strictEqual(parseOpenClawAgentReceipt('{"runId":"r1","sessionKey":"agent:architect:subagent:test","result":"ok"}').runId, 'r1');
-assert.strictEqual(parseOpenClawAgentReceipt('plain reply').status, 'NON_JSON');
+assert.strictEqual(parseOpenClawAgentReceipt('plain reply').status, 'ERROR');
 
 // Phase 3.6: lease recovery, exponential backoff, dead-letter and restart reconciliation.
 const backoffMessage = store.enqueueSessionMessage(ctoSession.session_id, {
@@ -151,7 +168,19 @@ store.complete(job.job_id, 'E2E PASS 100%', 'success');
 const completed = store.getJob(job.job_id);
 assert.strictEqual(completed.status, 'completed');
 assert.strictEqual(completed.state, 'COMPLETED');
+assert.strictEqual(store.complete(job.job_id, 'idempotent legacy success', 'success').idempotent, true,
+  'legacy completed Job success replay remains idempotent');
 assert.strictEqual(store.getActiveJob(conversationKey), null);
+
+const legacyFailedJob = store.getOrCreateJob({
+  conversationKey: `${conversationKey}:legacy-idle-failed`, title: 'Preserve legacy IDLE/failed completion semantics'
+});
+store.transition(legacyFailedJob.job_id, 'IDLE', 'failed');
+assert.strictEqual(store.complete(legacyFailedJob.job_id, 'legacy failure replay', 'failure').idempotent, true,
+  'legacy IDLE/failed Job state must remain an idempotent failure replay');
+assert.strictEqual(store.complete(legacyFailedJob.job_id, 'late success callback', 'success').idempotent, true,
+  'legacy IDLE/failed late callbacks remain no-op idempotent for compatibility');
+assert.equal(store.getJob(legacyFailedJob.job_id).status, 'failed', 'legacy late success must not rewrite failed Job status');
 
 const afterRestart = new WorkflowStore();
 assert.strictEqual(afterRestart.getJob(job.job_id).status, 'completed');
@@ -165,10 +194,55 @@ const noChildJob = store.getOrCreateJob({
 });
 store.transition(noChildJob.job_id, 'PROPOSED');
 store.approve(noChildJob.job_id, 'Duyệt');
-store.dispatch(noChildJob.job_id, { role: 'cto', description: 'Delegate specialist work with sessions_spawn' });
+const noChildTask = store.dispatch(noChildJob.job_id, { role: 'cto', description: 'Delegate specialist work with sessions_spawn' });
 const noChildResult = store.complete(noChildJob.job_id, 'CTO says done', 'success');
 assert.strictEqual(noChildResult.status, 'failed');
 assert.strictEqual(noChildResult.state, 'IDLE');
+const noChildResultCount = store.db.prepare('SELECT COUNT(*) AS n FROM results WHERE task_id=?').get(noChildTask.task_id).n;
+const noChildTerminalEventCount = store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE job_id=? AND type IN ('job.completed','job.failed')")
+  .get(noChildJob.job_id).n;
+const lateLegacySuccess = store.complete(noChildJob.job_id, 'late stale CTO success', 'success');
+assert.equal(lateLegacySuccess.idempotent, true,
+  'legacy IDLE/failed state must be treated as terminal based on status as well as state');
+assert.equal(store.getJob(noChildJob.job_id).state, 'IDLE');
+assert.equal(store.getJob(noChildJob.job_id).status, 'failed');
+assert.throws(() => store.transition(noChildJob.job_id, 'EXECUTING', 'active'), /cannot transition terminal Job/,
+  'direct state-transition callers must not reopen a legacy IDLE/failed terminal Job');
+assert.equal(store.getJob(noChildJob.job_id).state, 'IDLE');
+assert.equal(store.getJob(noChildJob.job_id).status, 'failed');
+assert.throws(() => store.approve(noChildJob.job_id, 'late approval'), /cannot approve terminal\/inactive Job/,
+  'approval writer must not reopen a legacy IDLE/failed terminal Job');
+assert.throws(() => store.dispatch(noChildJob.job_id, { role: 'cto', description: 'late dispatch' }), /dispatch requires an active approved Job/,
+  'direct dispatch writer must not reopen a terminal Job');
+assert.throws(() => store.createChildTask(noChildJob.job_id, { role: 'qa', description: 'late replayed child' }), /cannot create child task for terminal\/inactive Job/,
+  'transcript replay must not create child tasks after the Job is terminal');
+assert.throws(() => store.ensureTask(noChildJob.job_id, { role: 'qa', description: 'late replayed task' }), /cannot create task for terminal\/inactive Job/,
+  'direct ensureTask writer must not add runnable tasks after the Job is terminal');
+assert.throws(() => store.beginRuntimeAttempt(noChildTask.task_id, { runId: 'late-runtime-attempt' }), /runtime attempt requires an active executing Job and nonterminal task/,
+  'a direct runtime-attempt writer must not resurrect a terminal Job/task');
+assert.throws(() => store.rearmTaskRuntime(noChildTask.task_id, { runId: 'late-runtime-rearm' }), /runtime rearm requires an active executing Job and nonterminal task/,
+  'runtime rearm must not resurrect a terminal Job/task');
+assert.equal(store.getJob(noChildJob.job_id).state, 'IDLE');
+assert.equal(store.getJob(noChildJob.job_id).status, 'failed');
+assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM results WHERE task_id=?').get(noChildTask.task_id).n, noChildResultCount,
+  'a late success must not append a result to a legacy job whose durable status is failed');
+assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE job_id=? AND type IN ('job.completed','job.failed')")
+  .get(noChildJob.job_id).n, noChildTerminalEventCount,
+  'a late success must not add terminal events to a legacy failed job');
+
+const staleAttachJob = store.createJob({ conversationKey: `${conversationKey}:stale-attach`, title: 'Fence runtime attachment to terminal parent' });
+const staleAttachTask = store.ensureTask(staleAttachJob.job_id, { role: 'qa', description: 'must remain pending after terminal parent' });
+store.db.prepare("UPDATE jobs SET state='FAILED', status='failed' WHERE job_id=?").run(staleAttachJob.job_id);
+assert.throws(() => store.attachTaskRuntime(staleAttachTask.task_id, { runId: 'late-attach-run', sessionKey: 'agent:qa:late-attach' }),
+  /runtime attach requires an active nonterminal parent Job/);
+assert.equal(store.getTask(staleAttachTask.task_id).status, 'pending');
+assert.equal(store.getTask(staleAttachTask.task_id).openclaw_run_id, null);
+assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM attempts WHERE task_id=? AND status='started'").get(staleAttachTask.task_id).n, 0);
+const staleSpawnTaskCount = store.db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE job_id=?').get(staleAttachJob.job_id).n;
+assert.throws(() => store.recordSpawn(staleAttachJob.job_id, {
+  role: 'qa', description: 'must not partially create a child after parent terminalization', runId: 'late-spawn-run'
+}), /cannot create child task for terminal\/inactive Job/);
+assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE job_id=?').get(staleAttachJob.job_id).n, staleSpawnTaskCount);
 
 // CTO completion with a completed specialist child may complete the Job.
 const childJob = store.getOrCreateJob({
@@ -264,7 +338,72 @@ assert.strictEqual(rejected.status, 'failed');
 assert.strictEqual(store.getJob(evidenceJob.job_id).state, 'EXECUTING');
 console.log('PASS: specialist refusal/prose-only result is rejected as failed');
 
+// Restart reconciliation must not infer task completion from a result row,
+// especially when created_at ties make multiple rows share one timestamp.
+const lineageJob = store.getOrCreateJob({
+  conversationKey: conversationKey + ':result-reconciliation-lineage',
+  title: 'result reconciliation requires exact terminal lineage'
+});
+store.transition(lineageJob.job_id, 'PROPOSED');
+store.approve(lineageJob.job_id, 'Duyệt');
+const lineageTask = store.dispatch(lineageJob.job_id, { role: 'architect', description: 'lineage reconciliation fixture' });
+const lineageAttempt = store.startAttempt(lineageJob.job_id);
+store.db.prepare("UPDATE attempts SET status='completed',finished_at=? WHERE attempt_id=? AND status='started'")
+  .run(new Date().toISOString(), lineageAttempt.attempt_id);
+const tiedTimestamp = new Date().toISOString();
+store.db.prepare('INSERT INTO results(result_id,task_id,outcome,content,created_at) VALUES(?,?,?,?,?)')
+  .run('lineage-result-older', lineageTask.task_id, 'success', 'older success', tiedTimestamp);
+store.db.prepare('INSERT INTO results(result_id,task_id,outcome,content,created_at) VALUES(?,?,?,?,?)')
+  .run('lineage-result-latest', lineageTask.task_id, 'success', 'latest success', tiedTimestamp);
+store.reconcileRuntimeRefs(lineageJob.job_id, []);
+assert.equal(store.getTask(lineageTask.task_id).status, 'running',
+  'an isolated result and settled attempt cannot terminalize a task without its exact completion event');
+assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE job_id=? AND type='task.result_reconciliation_blocked' AND json_extract(payload_json,'$.resultId')='lineage-result-latest'")
+  .get(lineageJob.job_id).n, 1, 'missing terminal lineage must be explicitly quarantined');
+store.recordEvent(lineageJob.job_id, 'task.completed', {
+  taskId: lineageTask.task_id,
+  resultId: 'lineage-result-latest',
+  attemptId: lineageAttempt.attempt_id,
+  outcome: 'success'
+}, `${lineageTask.task_id}|success|lineage-result-latest`);
+store.reconcileRuntimeRefs(lineageJob.job_id, []);
+assert.equal(store.getTask(lineageTask.task_id).status, 'completed',
+  'reconciliation may terminalize only after the latest tied-timestamp result has exactly matching attempt/event lineage');
+assert.throws(() => store.transition(lineageJob.job_id, 'PROPOSED'), /illegal active Job state transition/,
+  'a stale coordinator turn must not move an executing Job back into proposal state');
+assert.equal(store.getJob(lineageJob.job_id).state, 'EXECUTING');
+
+const terminalTaskJob = store.getOrCreateJob({
+  conversationKey: conversationKey + ':terminal-task-no-job-promotion',
+  title: 'terminal task cannot promote active job'
+});
+store.transition(terminalTaskJob.job_id, 'PROPOSED');
+store.approve(terminalTaskJob.job_id, 'Duyệt');
+const terminalTask = store.dispatch(terminalTaskJob.job_id, { role: 'architect', description: 'failed terminal task fixture' });
+const terminalTaskAttempt = store.startAttempt(terminalTaskJob.job_id);
+const terminalTaskResultId = 'terminal-task-failure-result';
+const terminalTaskTs = new Date().toISOString();
+store.db.prepare("UPDATE tasks SET status='failed' WHERE task_id=?").run(terminalTask.task_id);
+store.db.prepare("UPDATE attempts SET status='failed',finished_at=? WHERE attempt_id=? AND status='started'")
+  .run(terminalTaskTs, terminalTaskAttempt.attempt_id);
+store.db.prepare('INSERT INTO results(result_id,task_id,outcome,content,created_at) VALUES(?,?,?,?,?)')
+  .run(terminalTaskResultId, terminalTask.task_id, 'failure', 'durable task failure', terminalTaskTs);
+store.recordEvent(terminalTaskJob.job_id, 'task.failed', {
+  taskId: terminalTask.task_id,
+  resultId: terminalTaskResultId,
+  attemptId: terminalTaskAttempt.attempt_id,
+  outcome: 'failure'
+}, `${terminalTask.task_id}|failure|${terminalTaskResultId}`);
+assert.throws(() => store.complete(terminalTaskJob.job_id, 'late success-shaped synthesis', 'success'),
+  /contradictory already-terminal task outcome/,
+  'a failed task with valid failure lineage must not be promoted to a completed Job by a late success callback');
+assert.equal(store.getJob(terminalTaskJob.job_id).state, 'EXECUTING');
+assert.equal(store.getJob(terminalTaskJob.job_id).status, 'active');
+assert.equal(store.getTask(terminalTask.task_id).status, 'failed');
+assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM results WHERE task_id=?').get(terminalTask.task_id).n, 1);
+
 fs.rmSync(testDb, { force: true });
 fs.rmSync(`${testDb}-wal`, { force: true });
 fs.rmSync(`${testDb}-shm`, { force: true });
+fs.rmSync(testDataDir, { recursive: true, force: true });
 console.log('PASS: Phase 2 Job/Task/Approval/Event store, idempotency, completion and restart persistence');

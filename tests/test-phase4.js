@@ -1,9 +1,11 @@
 import assert from 'node:assert';
 import fs from 'node:fs';
-import crypto from 'node:crypto';
+import path from 'node:path';
+import { tempDir } from './test-temp-dir.js';
 
-const dbPath = `/home/long/work/chatgpt-adapter/data/test-phase4-${crypto.randomUUID()}.db`;
+const dbPath = path.join(tempDir('test-phase4-'), 'workflow.db');
 process.env.WORKFLOW_DB = dbPath;
+process.env.WORKFLOW_DATA_DIR = path.dirname(dbPath);
 const { WorkflowStore } = await import('../job-store.js');
 const store = new WorkflowStore();
 
@@ -38,4 +40,5 @@ assert.ok(!('dbPath' in overview));
 fs.rmSync(dbPath, { force: true });
 fs.rmSync(`${dbPath}-wal`, { force: true });
 fs.rmSync(`${dbPath}-shm`, { force: true });
+fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
 console.log('PASS: Phase 4 trace, metrics and workflow observability');

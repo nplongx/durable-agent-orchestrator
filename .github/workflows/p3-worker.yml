@@ -12,6 +12,8 @@ on:
         required: true
       attempt:
         required: true
+      owner_epoch:
+        required: true
       input_commit:
         required: true
       task_payload_ref:
@@ -26,8 +28,7 @@ on:
         default: ''
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   worker:
@@ -38,6 +39,7 @@ jobs:
       TASK_ID: ${{ inputs.task_id }}
       LEASE_ID: ${{ inputs.lease_id }}
       ATTEMPT: ${{ inputs.attempt }}
+      OWNER_EPOCH: ${{ inputs.owner_epoch }}
       INPUT_COMMIT: ${{ inputs.input_commit }}
       TASK_PAYLOAD_REF: ${{ inputs.task_payload_ref }}
       TASK_PAYLOAD_JSON: ${{ inputs.task_payload_json }}
@@ -50,6 +52,7 @@ jobs:
         with:
           ref: ${{ inputs.input_commit }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Validate worker correlation
         run: |
@@ -60,9 +63,15 @@ jobs:
           test "$TASK_ID" != ""
           test "$LEASE_ID" != ""
           test "$ATTEMPT" -ge 1
+          [[ "$OWNER_EPOCH" =~ ^[1-9][0-9]*$ ]]
           test "$TASK_PAYLOAD_REF" != ""
           test "$ROLE" != ""
-          if [ -n "$TASK_PAYLOAD_JSON" ]; then printf '%s' "$TASK_PAYLOAD_JSON" | node -e "JSON.parse(require('fs').readFileSync(0,'utf8'));"; else test -f "$TASK_PAYLOAD_REF"; fi
+          if [ -n "$TASK_PAYLOAD_JSON" ]; then
+            printf '%s' "$TASK_PAYLOAD_JSON" | node --input-type=module -e "import('node:fs').then(fs=>import('./src/runtime/strict-json.js').then(({parseStrictJson})=>parseStrictJson(fs.readFileSync(0,'utf8'),'task payload')));"
+          else
+            test -f "$TASK_PAYLOAD_REF"
+            TASK_PAYLOAD_REF="$TASK_PAYLOAD_REF" node --input-type=module -e "import('node:fs').then(fs=>import('./src/runtime/strict-json.js').then(({parseStrictJson})=>parseStrictJson(fs.readFileSync(process.env.TASK_PAYLOAD_REF,'utf8'),'task payload')));"
+          fi
 
       - name: Validate runtime dependencies
         run: |
@@ -82,7 +91,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           test -f .p3-worker/result.json
-          node -e "import('./src/runtime/execution-contract.js').then(({validateExecutionResult}) => validateExecutionResult(JSON.parse(require('node:fs').readFileSync('.p3-worker/result.json', 'utf8'))))"
+          node --input-type=module -e "import('node:fs').then(fs=>import('./src/runtime/strict-json.js').then(({parseStrictJson})=>import('./src/runtime/execution-contract.js').then(({validateExecutionResult})=>validateExecutionResult(parseStrictJson(fs.readFileSync('.p3-worker/result.json','utf8'),'worker result')))));"
 
       - name: Upload worker evidence
         if: always()

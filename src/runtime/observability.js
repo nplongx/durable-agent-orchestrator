@@ -1,3 +1,4 @@
+import { parseStrictJson } from './strict-json.js';
 const safeMs = (a, b) => {
   const x = Date.parse(a); const y = Date.parse(b);
   return Number.isFinite(x) && Number.isFinite(y) && y >= x ? y - x : null;
@@ -7,7 +8,7 @@ const REDACT_KEYS = /(?:token|secret|password|authorization|cookie|rawtext|conte
 
 function safeEvent(event) {
   let payload = {};
-  try { payload = JSON.parse(event?.payload_json || '{}'); } catch (_) {}
+  try { payload = parseStrictJson(event?.payload_json || '{}'); } catch (_) {}
   const redact = (value, key = '', depth = 0) => {
     if (REDACT_KEYS.test(key)) return '[REDACTED]';
     if (depth > 5) return '[TRUNCATED]';

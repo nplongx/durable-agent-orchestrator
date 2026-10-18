@@ -1,0 +1,16 @@
+{
+  "protocol": "cos-paired-host-v1",
+  "timeout_ms": 30000,
+  "conditions": {
+    "plugin": {
+      "command": "/absolute/path/to/host-adapter",
+      "base_args": [],
+      "args": ["--condition", "plugin"]
+    },
+    "control": {
+      "command": "/absolute/path/to/host-adapter",
+      "base_args": [],
+      "args": ["--condition", "control"]
+    }
+  }
+}

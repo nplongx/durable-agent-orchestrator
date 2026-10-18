@@ -14,7 +14,7 @@ const store = {
   } },
   leases: [],
   acquireTaskLease(taskId, opts) {
-    const lease = { lease_id: opts.leaseId, task_id: taskId, attempt: 1, state: 'ACTIVE' };
+    const lease = { lease_id: opts.leaseId, task_id: taskId, attempt: 1, owner_epoch: 1, state: 'ACTIVE' };
     this.leases.push(lease); return lease;
   },
   listRunnableTasks() { return [
@@ -25,6 +25,17 @@ const store = {
   expireTaskLease() {}
 };
 
+assert.throws(() => new DistributedScheduler({ store, provider, maxParallel: '2' }),
+  /maxParallel must be a positive safe integer/, 'scheduler must not coerce concurrency limits');
+assert.throws(() => new DistributedScheduler({ store, provider, maxParallel: Infinity }),
+  /maxParallel must be a positive safe integer/, 'scheduler must reject non-finite concurrency limits');
+assert.throws(() => new DistributedScheduler({ store, provider, leaseTtlMs: '120000' }),
+  /leaseTtlMs must be a positive safe integer/, 'scheduler must not coerce lease TTL');
+assert.throws(() => new DistributedScheduler({ store, provider, leaseTtlMs: Infinity }),
+  /leaseTtlMs must be a positive safe integer/, 'scheduler must reject non-finite lease TTL');
+assert.throws(() => new DistributedScheduler({ store, provider: {}, maxParallel: 2 }),
+  /provider must expose dispatch\(request\) or reconcileDispatchIntent\(intent\)/,
+  'scheduler must validate at least one supported provider entry point');
 const scheduler = new DistributedScheduler({ store, provider, maxParallel: 2, workerId: 'scheduler-test' });
 const results = await scheduler.dispatchPending({ inputCommit: 'a'.repeat(40) });
 assert.equal(results.length, 2);

@@ -13,7 +13,7 @@ const store = {
     if (sql.includes('UPDATE task_leases')) return { run: () => ({ changes: 1 }) };
     throw new Error(sql);
   } },
-  acquireTaskLease(taskId, opts) { const l = { lease_id: opts.leaseId, task_id: taskId, attempt: 1, state: 'ACTIVE' }; leases.set(taskId, l); return l; },
+  acquireTaskLease(taskId, opts) { const l = { lease_id: opts.leaseId, task_id: taskId, attempt: 1, owner_epoch: 1, state: 'ACTIVE' }; leases.set(taskId, l); return l; },
   listRunnableTasks({ limit }) { return [...Array(total)].map((_, i) => ({ task_id: `t-${i}`, job_id: 'j', role: 'executor' })).filter(t => !leases.get(t.task_id) || leases.get(t.task_id).state !== 'COMPLETED').slice(0, limit); },
   recordEvent() {},
   expireTaskLease() {},

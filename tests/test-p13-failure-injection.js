@@ -48,10 +48,12 @@ if (requested.includes('duplicate-result')) await run('duplicate-result', () => 
   const { job, task } = makeTask('duplicate');
   const lease = store.acquireTaskLease(task.task_id, { leaseId: 'p13-dup', workerId: 'a', attempt: 1 });
   const base = { schema_version: 1, job_id: job.job_id, task_id: task.task_id, lease_id: lease.lease_id, attempt: 1, status: 'SUCCEEDED', input_commit: 'a'.repeat(40), output_commit: 'b'.repeat(40), exit_code: 0, provider_run_id: 'p13-dup-run', evidence_artifact: 'artifact', evidence_refs: ['task-payload.json', 'execution.json', 'stdout.txt', 'stderr.txt', 'git-status.txt'], started_at: new Date().toISOString(), finished_at: new Date().toISOString() };
-  const evidence = { 'task-payload.json': { schema_version: 1, job_id: job.job_id, task_id: task.task_id, lease_id: lease.lease_id, attempt: 1 }, 'execution.json': { task_id: task.task_id, exit_code: 0, timed_out: false }, 'stdout.txt': 'ok', 'stderr.txt': '', 'git-status.txt': '' };
-  assert.equal(verifyExecutionEvidence({ result: base, evidence }).valid, true);
-  assert.equal(store.applyVerifiedExecutionResult(base).status, 'VERIFIED');
-  assert.equal(store.applyVerifiedExecutionResult(base).status, 'REJECTED');
+  const evidence = { 'task-payload.json': { schema_version: 1, job_id: job.job_id, task_id: task.task_id, lease_id: lease.lease_id, attempt: 1, required_evidence: base.evidence_refs }, 'execution.json': { task_id: task.task_id, exit_code: 0, timed_out: false }, 'stdout.txt': 'ok', 'stderr.txt': '', 'git-status.txt': '' };
+  const verification = verifyExecutionEvidence({ result: base, evidence });
+  assert.equal(verification.valid, true);
+  const verifiedResult = { ...base, evidence_verification: verification };
+  assert.equal(store.applyVerifiedExecutionResult(verifiedResult).status, 'VERIFIED');
+  assert.equal(store.applyVerifiedExecutionResult(verifiedResult).reason, 'duplicate_provider_result');
 });
 
 if (requested.includes('provider-failure')) await run('provider-failure', async () => {
@@ -66,14 +68,19 @@ if (requested.includes('provider-failure')) await run('provider-failure', async 
   };
   const provider = { dispatch: async () => { throw new Error('injected provider outage'); } };
   const scheduler = new DistributedScheduler({ store: store2, provider, maxParallel: 1, workerId: 'p13' });
-  await assert.rejects(() => scheduler.dispatchTask(task, { inputCommit: 'a'.repeat(40), role: 'executor', requiredEvidence: ['execution.json'] }), /injected provider outage/);
-  assert.equal(store.getTaskLease(store.db.prepare('SELECT lease_id FROM task_leases WHERE task_id=? ORDER BY issued_at DESC LIMIT 1').get(task.task_id).lease_id).state, 'EXPIRED');
+  const outcome = await scheduler.dispatchTask(task, { inputCommit: 'a'.repeat(40), role: 'executor', requiredEvidence: ['execution.json'] });
+  assert.equal(outcome.pending_reconciliation, true,
+    'an exception after durable intent reservation is an uncertain remote outcome, not proof that dispatch was not sent');
+  assert.match(outcome.dispatch_error, /injected provider outage/);
+  const leaseId = store.db.prepare('SELECT lease_id FROM task_leases WHERE task_id=? ORDER BY issued_at DESC LIMIT 1').get(task.task_id).lease_id;
+  assert.equal(store.getTaskLease(leaseId).state, 'ACTIVE', 'ambiguous remote outcome must retain the lease and prevent unsafe duplicate dispatch');
+  assert.equal(store.db.prepare('SELECT state FROM provider_dispatch_intents WHERE lease_id=?').get(leaseId).state, 'DISPATCHING');
 });
 
 if (requested.includes('corrupt-evidence')) await run('corrupt-evidence', () => {
   const ts = new Date().toISOString();
   const result = { schema_version: 1, job_id: 'j', task_id: 't', lease_id: 'l', attempt: 1, status: 'SUCCEEDED', input_commit: 'a'.repeat(40), output_commit: 'b'.repeat(40), exit_code: 0, provider_run_id: 'r', evidence_artifact: 'artifact.zip', evidence_refs: ['task-payload.json', 'execution.json', 'stdout.txt', 'git-status.txt'], started_at: ts, finished_at: ts };
-  const evidence = { 'task-payload.json': { schema_version: 1, job_id: 'j', task_id: 't', lease_id: 'WRONG', attempt: 1 }, 'execution.json': { task_id: 't', exit_code: 0, timed_out: false }, 'stdout.txt': 'ok', 'git-status.txt': '' };
+  const evidence = { 'task-payload.json': { schema_version: 1, job_id: 'j', task_id: 't', lease_id: 'WRONG', attempt: 1, required_evidence: result.evidence_refs }, 'execution.json': { task_id: 't', exit_code: 0, timed_out: false }, 'stdout.txt': 'ok', 'git-status.txt': '' };
   const verification = verifyExecutionEvidence({ result, evidence });
   assert.equal(verification.valid, false);
   assert.ok(verification.errors.some(x => x.includes('payload correlation mismatch')));
@@ -82,7 +89,7 @@ if (requested.includes('corrupt-evidence')) await run('corrupt-evidence', () => 
 if (requested.includes('checkpoint-timeout')) await run('checkpoint-timeout', () => {
   const ts = new Date().toISOString();
   const result = { schema_version: 1, job_id: 'j', task_id: 't', lease_id: 'l', attempt: 2, status: 'TIMED_OUT', input_commit: 'a'.repeat(40), exit_code: 124, provider_run_id: 'r', evidence_artifact: 'artifact.zip', checkpoint_commit: 'c'.repeat(40), checkpoint_ref: 'p9-checkpoint/t/r', evidence_refs: ['task-payload.json', 'execution.json', 'checkpoint.json'], started_at: ts, finished_at: ts };
-  const evidence = { 'task-payload.json': { schema_version: 1, job_id: 'j', task_id: 't', lease_id: 'l', attempt: 2 }, 'execution.json': { task_id: 't', exit_code: 124, timed_out: true }, 'checkpoint.json': { checkpoint_commit: 'c'.repeat(40) } };
+  const evidence = { 'task-payload.json': { schema_version: 1, job_id: 'j', task_id: 't', lease_id: 'l', attempt: 2, required_evidence: result.evidence_refs }, 'execution.json': { task_id: 't', exit_code: 124, timed_out: true }, 'checkpoint.json': { checkpoint_commit: 'c'.repeat(40) } };
   assert.equal(verifyExecutionEvidence({ result, evidence }).valid, true);
   evidence['checkpoint.json'].checkpoint_commit = 'd'.repeat(40);
   assert.equal(verifyExecutionEvidence({ result, evidence }).valid, false);

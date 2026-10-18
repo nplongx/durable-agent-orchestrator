@@ -1,0 +1,32 @@
+#!/usr/bin/env node
+// Offline-only static regression for the third remediation candidate.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+const here=path.dirname(fileURLToPath(import.meta.url));
+const v32=JSON.parse(fs.readFileSync(path.join(here,'scenario-execution-spec-v3.2-draft.json'),'utf8'));
+const bytes=fs.readFileSync(path.join(here,'scenario-execution-spec-v3.7-draft.json'));
+const v33=JSON.parse(bytes.toString('utf8'));
+assert.deepEqual(v33.cases,v32.cases,'all frozen prompts and per-case grants must remain unchanged');
+assert.equal(v33.cases.length,10);
+assert.equal(v33.status,'draft-not-authorized');
+assert.equal(v33.execution_gate.status,'blocked');
+assert.deepEqual(v33.execution_gate.authorized_case_ids,[]);
+assert.equal(v33.execution_gate.authorization_record,null);
+assert.equal(v33.model.max_elapsed_seconds_per_condition,5400);
+assert.equal(v33.model.model_request_timeout_ms,600000);
+assert.equal(v33.model.context_tokens,8192);
+assert.equal(v33.model.max_predict_tokens,1024);
+assert.match(v33.system_context,/expected_values/);
+assert.match(v33.system_context,/workflow_complete_synthesis/);
+assert.match(v33.system_context,/Use one tool call per response/);
+assert.match(v33.system_context,/exactly one line/);
+assert.match(v33.system_context,/expected_values/);
+assert.match(v33.system_context,/workflow_complete_task/);
+assert.match(v33.system_context,/workflow_complete_synthesis/);
+assert.match(v33.system_context,/system instructions and the user prompt are byte-identical across paired conditions/);
+console.log(`PASS: v3.7 draft ${createHash('sha256').update(bytes).digest('hex')} preserves all ten prompts/policies and adds staged workflow-first and raw-JSON instructions`);
+console.log('PASS: bounded 5400-second condition budget with 600-second per-request timeout and 8192-token context and blocked execution gate remain explicit');
+console.log('PASS: static-only test; no scenario, plugin process, or model inference executed');

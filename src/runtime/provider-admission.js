@@ -107,7 +107,7 @@ export class ProviderAdmissionController {
     for (const lease of active) {
       const task = lease.task_id ? this.store.getTask(lease.task_id) : null;
       const childTask = lease.role && lease.job_id
-        ? this.store.db.prepare("SELECT * FROM tasks WHERE job_id = ? AND parent_task_id = ? AND lower(role) = lower(?) ORDER BY created_at DESC LIMIT 1")
+        ? this.store.db.prepare("SELECT * FROM tasks WHERE job_id = ? AND parent_task_id = ? AND lower(role) = lower(?) ORDER BY created_at DESC, rowid DESC LIMIT 1")
           .get(lease.job_id, lease.task_id || '', lease.role)
         : null;
       const effectiveTask = childTask || task;

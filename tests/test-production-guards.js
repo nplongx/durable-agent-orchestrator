@@ -30,7 +30,7 @@ if (args[0] === 'sessions' && args[1] === 'export-trajectory') {
     {type:'tool.call',data:{toolCallId:'fake-call',name:'exec',args:{command}}},
     {type:'tool.result',data:{toolCallId:'fake-call',success:true,result:{content:[{type:'text',text:'(no output)'}]},details:{status:'completed',exitCode:0,aggregated:''}}}
   ];
-  await fs.writeFile(path.join(dir,'events.jsonl'), events.map(x=>JSON.stringify(x)).join('\\n')+'\\n');
+  await fs.writeFile(path.join(dir,'events.jsonl'), events.map(x=>JSON.stringify(x)).join(String.fromCharCode(10))+String.fromCharCode(10));
   process.stdout.write(JSON.stringify({outputDir:dir,eventCount:2}));
   process.exit(0);
 }
@@ -44,7 +44,7 @@ await fsPromises.chmod(fakeOpenClaw, 0o755);
 
 const { WorkflowStore } = await import('../job-store.js');
 const { RecoveryManager } = await import('../recovery-manager.js');
-const { formatMessagesToPrompt, toolsForSpecialistPrompt } = await import('../server.js');
+const { formatMessagesToPrompt, toolsForSpecialistPrompt, recoverNativeWorkerReadToolCall } = await import('../server.js');
 const store = new WorkflowStore();
 
 const specialistTools = toolsForSpecialistPrompt([
@@ -58,6 +58,29 @@ const specialistPrompt = formatMessagesToPrompt([
 ], specialistTools, 'chatgpt-free');
 assert.equal(specialistPrompt.agentRole,'qa');
 assert.match(specialistPrompt.prompt,/Run immediately: node --check \/home\/long\/work\/chatgpt-adapter\/test-tool-turn\.js/);
+
+const nativeWorkerTools = [
+  'read', 'write', 'edit', 'apply_patch', 'exec', 'process',
+  'sessions_spawn', 'sessions_send', 'portal',
+].map(name => ({type:'function',function:{name,parameters:{}}}));
+const nativeWorkerPrompt = formatMessagesToPrompt([
+  {role:'user',content:'Inspect the repository and execute the requested worker workload.'}
+], nativeWorkerTools, 'chatgpt-free');
+assert.equal(nativeWorkerPrompt.agentRole,'engineer',
+  'native worker tool surface must not be misclassified as Coordinator merely because sessions_spawn is exposed');
+assert.match(nativeWorkerPrompt.prompt,/SENIOR SOFTWARE ENGINEER/);
+const recoveredRead = recoverNativeWorkerReadToolCall(
+  'Searching Files for Relevant Information',
+  nativeWorkerTools,
+  [{role:'user',content:'Inspect the actual repository at /home/long/freechatclaw-fullstack-stress-fixture and report findings.'}],
+  'engineer',
+);
+assert.deepEqual(recoveredRead, {
+  name: 'read',
+  arguments: JSON.stringify({path:'/home/long/freechatclaw-fullstack-stress-fixture/README.md'}),
+  accompanyingText: null,
+  recovered: true,
+});
 
 function makeProductionJob(suffix) {
   const sessionKey = `agent:architect:subagent:test-${crypto.randomUUID()}`;
@@ -90,10 +113,11 @@ const beforeTaskCount = store.getJobTrace(staleJob.jobId).tasks.length;
 const beforeSessionCount = store.getJobTrace(staleJob.jobId).sessions.length;
 const recovery = new RecoveryManager(store,{trajectoryTimeoutMs:2000});
 await recovery.reconcile({jobId:staleJob.jobId});
-assert.equal(store.getTask(staleJob.childId).status,'completed');
+assert.equal(store.getTask(staleJob.childId).status,'failed', 'runtime transcript without durable ExecutionManager identity must not complete a deterministic production task');
 assert.equal(store.getJobTrace(staleJob.jobId).tasks.length,beforeTaskCount);
 assert.equal(store.getJobTrace(staleJob.jobId).sessions.length,beforeSessionCount);
-assert.equal(store.getSession(staleJob.sessionId).state,'TERMINATED');
+assert.equal(store.getSession(staleJob.sessionId).state,'FAILED');
+assert.ok(store.getJobTrace(staleJob.jobId).events.some(event => event.type === 'session.runtime_reconciled' && JSON.parse(event.payload_json).outcome === 'failure'));
 
 const failedJob = makeProductionJob('failed-repair');
 process.env.FAKE_OPENCLAW_SESSION = failedJob.sessionKey;
@@ -108,14 +132,12 @@ await recovery.reconcile({jobId:failedJob.jobId});
 assert.equal(store.getTask(failedJob.childId).status,'failed');
 process.env.FAKE_OPENCLAW_COMMAND = '';
 await recovery.reconcile({jobId:failedJob.jobId});
-assert.equal(store.getTask(failedJob.childId).status,'completed');
+assert.equal(store.getTask(failedJob.childId).status,'failed', 'a later success-shaped transcript must not overwrite durable failure without a new exact execution attempt');
 assert.equal(store.getJobTrace(failedJob.jobId).tasks.length,failedTaskCount);
 assert.equal(store.getJobTrace(failedJob.jobId).sessions.length,failedSessionCount);
 const repaired = store.db.prepare('SELECT outcome,content FROM results WHERE task_id=? ORDER BY created_at DESC LIMIT 1').get(failedJob.childId);
-assert.equal(repaired.outcome,'success');
-assert.match(repaired.content,/\[ACTUAL TOOL RESULT EVIDENCE\]/i);
-assert.match(repaired.content,/node --check \/home\/long\/work\/chatgpt-adapter\/server\.js/);
-assert.match(repaired.content,/exit status\/code: 0/);
+assert.equal(repaired.outcome,'failure');
+assert.equal(repaired.content,'provider timeout', 'recovery must retain the original durable failure evidence rather than synthesize success from a transcript');
 
 assert.equal(typeof recovery.retryAgentTask, 'undefined', 'RecoveryManager must not own business retry/orchestration');
 

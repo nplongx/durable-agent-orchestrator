@@ -20,18 +20,18 @@ function taskSpec(spec, workspace) {
     role: spec.role,
     capability: contract.capability,
     dependencies: [...spec.dependencies],
-    execution: { executor: contract.executor, deterministic: false, runtime_owner: 'github-runner', execution_mode: 'agent', cwd: workspace || null, timeout_ms: 300_000 }
+    execution: { executor: 'ChatOnSteroidsHost', deterministic: false, runtime_owner: 'chat-on-steroids-plugin', execution_mode: 'host-conversation', cwd: workspace || null, timeout_ms: 300_000 }
   };
 }
 
-export function standardEngineeringTaskSpecs(workspace = process.env.WORKFLOW_WORKSPACE || null) {
+export function standardEngineeringTaskSpecs(workspace = process.env.WORKFLOW_WORKSPACE || process.cwd()) {
   return S.map(spec => taskSpec(spec, workspace));
 }
 
-export function standardEngineeringTaskSpec(taskId, { workspace = process.env.WORKFLOW_WORKSPACE || null } = {}) {
+export function standardEngineeringTaskSpec(taskId, { workspace = process.env.WORKFLOW_WORKSPACE || process.cwd() } = {}) {
   if (taskId === T.CTO_SYNTHESIS) {
     const contract = getRoleContract('cto');
-    return { id: taskId, role: 'cto', capability: contract.capability, dependencies: [T.REVIEWER], execution: { executor: contract.executor, deterministic: false, runtime_owner: 'github-runner', execution_mode: 'agent', cwd: workspace || null } };
+    return { id: taskId, role: 'cto', capability: contract.capability, dependencies: [T.REVIEWER], execution: { executor: 'ChatOnSteroidsHost', deterministic: false, runtime_owner: 'chat-on-steroids-plugin', execution_mode: 'host-conversation', cwd: workspace || null } };
   }
   const spec = standardEngineeringTaskSpecs(workspace).find(item => item.id === taskId);
   if (!spec) throw new Error(`unknown standard engineering task: ${taskId}`);

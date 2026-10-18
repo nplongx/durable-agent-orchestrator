@@ -15,7 +15,7 @@ export const StandardEngineeringTaskId = Object.freeze({
 
 export const StandardEngineeringWorkflow = Object.freeze({
   id: 'standard-engineering',
-  version: 1,
+  version: 2,
   titlePattern: /engineering standard|software delivery|software development/i,
   phases: Object.freeze([
     WorkflowPhase.PROPOSED, WorkflowPhase.APPROVED, WorkflowPhase.SPAWN_CTO,
