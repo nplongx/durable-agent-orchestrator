@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose an improvement or capability.
+title: "feature: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Who is affected and what is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Safety and compatibility considerations
+      description: Consider approvals, external side effects, durable recovery, artifact provenance, and backwards compatibility.
+    validations:
+      required: true

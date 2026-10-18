@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability reporting
+    url: https://github.com/nplongx/durable-agent-orchestrator/security
+    about: Do not post exploitable vulnerability details in a public issue. See SECURITY.md.

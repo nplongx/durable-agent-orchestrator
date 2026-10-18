@@ -8,6 +8,66 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 *.log
+*.sqlite
+*.sqlite-*
+*.db
+*.db-shm
+*.db-wal
+
+# Build output and local execution evidence (regenerate rather than commit)
+/dist/
+/.test-tmp/
+/.p3-worker/
+/.p3-worker-tamper-evidence/
+/.p1-smoke/
+/.p2-provider/
+--help
+*.mcpb
+**/*.evidence/
+benchmarks/plugin-workflow-benchmark/runs/
+benchmarks/plugin-workflow-benchmark/*-2026*.json
+benchmarks/plugin-workflow-benchmark/*-2026*.md
+benchmarks/plugin-workflow-benchmark/*-2026*.log
+benchmarks/plugin-workflow-benchmark/*-2026*.txt
+benchmarks/plugin-workflow-benchmark/*evidence*.json
+benchmarks/plugin-workflow-benchmark/*inventory*.json
+benchmarks/plugin-workflow-benchmark/*readiness*.json
+benchmarks/plugin-workflow-benchmark/*verification*.json
+benchmarks/plugin-workflow-benchmark/*attestation*.json
+benchmarks/plugin-workflow-benchmark/*receipt*.json
+benchmarks/plugin-workflow-benchmark/*authorization*.json
+benchmarks/plugin-workflow-benchmark/*handoff*.json
+benchmarks/plugin-workflow-benchmark/*packet*.json
+# The benchmark root also accumulates point-in-time audit snapshots. Keep only
+# reusable source, selected protocol templates, and the stable README/contract.
+benchmarks/plugin-workflow-benchmark/*.json
+!benchmarks/plugin-workflow-benchmark/scenario-execution-spec-v1.json
+!benchmarks/plugin-workflow-benchmark/scenario-execution-spec-v2.json
+!benchmarks/plugin-workflow-benchmark/scenario-execution-spec-v3-draft.json
+!benchmarks/plugin-workflow-benchmark/scenario-execution-spec-v3.1-draft.json
+!benchmarks/plugin-workflow-benchmark/scenario-execution-spec-v3.2-draft.json
+!benchmarks/plugin-workflow-benchmark/scenario-execution-spec-v3.3-draft.json
+!benchmarks/plugin-workflow-benchmark/scenario-execution-spec-v3.4-draft.json
+!benchmarks/plugin-workflow-benchmark/scenario-execution-spec-v3.5-draft.json
+!benchmarks/plugin-workflow-benchmark/scenario-execution-spec-v3.6-draft.json
+!benchmarks/plugin-workflow-benchmark/scenario-execution-spec-v3.7-draft.json
+!benchmarks/plugin-workflow-benchmark/scenario-execution-spec-v3.8-draft.json
+!benchmarks/plugin-workflow-benchmark/paired-host-config.template.json
+!benchmarks/plugin-workflow-benchmark/host-probe.case.template.json
+!benchmarks/plugin-workflow-benchmark/run-manifest.template.json
+benchmarks/plugin-workflow-benchmark/*.md
+!benchmarks/plugin-workflow-benchmark/README.md
+!benchmarks/plugin-workflow-benchmark/paired-host-harness-contract.md
+benchmarks/plugin-workflow-benchmark/*-2026*.mjs
+benchmarks/plugin-workflow-benchmark/*-2026*.cjs
+benchmarks/plugin-workflow-benchmark/*-2026*.yaml
+benchmarks/plugin-workflow-benchmark/assemble-phase2-packet-*.mjs
+benchmarks/plugin-workflow-benchmark/phase2-pnpm-lock-before-reconcile*.yaml
+
+# Legacy/local manifests that are not the installable plugin manifest
+/manifest.json
+/pnpm-lock.yaml
+/scripts/capture-phase2-working-tree-identity.mjs
 
 # Runtime exports and temporary artifacts
 .openclaw/
@@ -29,3 +89,4 @@ data/*.db-wal
 # Local one-off patch helpers
 patch_*.py
 update-server.cjs
+benchmarks/plugin-workflow-benchmark/phase2-strict-readiness-trace-lineage-20261013T151000Z.log*

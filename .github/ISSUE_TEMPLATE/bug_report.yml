@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a reproducible defect in the orchestrator.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "For security vulnerabilities, do not use a public issue; follow SECURITY.md. Remove credentials and private data from all examples."
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: "1.0.8 / commit SHA"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Use synthetic data and redact credentials, host paths, and database contents.
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Tests and environment
+      description: Exact commands, Node.js version, OS, and observed exit status.
+    validations:
+      required: false
