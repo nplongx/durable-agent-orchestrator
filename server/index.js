@@ -6,7 +6,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { MAX_STRICT_JSON_BYTES, parseStrictJson } from '../src/runtime/strict-json.js';
 
-const PLUGIN_VERSION = '1.0.8';
+const packageMetadata = parseStrictJson(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'), 'plugin package metadata');
+const PLUGIN_VERSION = packageMetadata.version;
 const SERVER_INFO = { name: 'chat-on-steroids-local-orchestrator', version: PLUGIN_VERSION };
 const SERVER_INSTRUCTIONS = [
   'This is the local-only Durable Agent Orchestrator plugin for Chat On Steroids.',
