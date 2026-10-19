@@ -1658,9 +1658,15 @@ async function callTool(name, args) {
         return !activeArtifacts.some(artifact => artifact.task_id === task.task_id && artifact.type === type);
       }).map(task => ({ task_id: task.task_id, role: task.role, expected_artifact_type: taskArtifactType(task) }));
       const actions = [];
+      const review = reviewArtifact?.content;
+      const reviewerRevisionEligible = review?.decision === 'accept' &&
+        ['requirementsSatisfied', 'architectureConformant', 'securityAccepted', 'qaAccepted', 'platformAccepted', 'documentationAccepted'].every(field => review[field] === true) &&
+        ['implementationIssues', 'securityIssues', 'blockingIssues'].every(field => Array.isArray(review[field]) && review[field].length === 0) &&
+        Array.isArray(review.evidenceIssues) && review.evidenceIssues.length > 0 &&
+        review.evidenceIssues.every(item => typeof item === 'string');
       if (failed.length) actions.push({ tool: 'workflow_inspect_failure', reason: 'A failed/cancelled task needs investigation; this diagnostic does not retry it automatically.' });
-      if (reviewArtifact?.content?.decision && ['needs_changes', 'reject'].includes(reviewArtifact.content.decision)) actions.push({ tool: 'workflow_request_rework', reason: 'Reviewer recorded findings; this creates linked specialist revisions and invalidates only the affected evidence.' });
-      else if (reviewArtifact?.content?.decision === 'accept' && Array.isArray(reviewArtifact.content.evidenceIssues) && reviewArtifact.content.evidenceIssues.length) actions.push({ tool: 'workflow_request_reviewer_revision', reason: 'Review was accepted but has documented evidence limitations only.' });
+      if (review?.decision && ['needs_changes', 'reject'].includes(review.decision)) actions.push({ tool: 'workflow_request_rework', reason: 'Reviewer recorded findings; this creates linked specialist revisions and invalidates only the affected evidence.' });
+      else if (reviewerRevisionEligible) actions.push({ tool: 'workflow_request_reviewer_revision', reason: 'Review was accepted with all required acceptance flags and documented evidence limitations only; no implementation, security, or blocking findings remain.' });
       else if (children.length && children.every(task => task.status === 'completed')) actions.push({ tool: 'workflow_next_task', reason: 'Re-evaluate current gates; synthesis remains controlled by the runtime.' });
       if (missingArtifacts.length) actions.push({ tool: 'workflow_recovery_verify', reason: 'Verify durable result/artifact lineage before attempting recovery.' });
       return {

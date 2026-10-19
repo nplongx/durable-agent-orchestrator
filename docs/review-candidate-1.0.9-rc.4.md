@@ -7,9 +7,9 @@ For code and workflow context, see the [architecture explanation](architecture.m
 ## Candidate identity
 
 - Package version: `1.0.9-rc.4` in `package.json`, `package-lock.json`, and `plugin/manifest.json`.
-- Bundle filename: `chat-on-steroids-local-orchestrator-1.0.9-rc.4-candidate-20261019T040737Z.mcpb`.
-- Bundle size: `317698` bytes.
-- Bundle SHA-256: `4a31a58173836bd4be7c183d679282beef454d6f4673ac8003ccf36b94a0177e`.
+- Bundle filename: `chat-on-steroids-local-orchestrator-1.0.9-rc.4-candidate-20261019T043203Z.mcpb`.
+- Bundle size: `318161` bytes.
+- Bundle SHA-256: `821ec8b24b8ba3f3a020aa72b2b1d9e42cf225924945c08fb5a8ed371a486e7e`.
 - Prepared from branch: `prep/local-orchestrator-1.0.9-rc.4`.
 - Candidate source: `prep/local-orchestrator-1.0.9-rc.4` branch content including the rewritten root README with current documentation navigation. Two independent validated builds of the selected package inputs produced the same bundle SHA-256; the stable input SHA-256 is recorded below. The review must use the exact bundle bytes and verify the digest above.
 
@@ -22,6 +22,7 @@ The `.mcpb` bundle is a local, ignored build output and is intentionally not com
 - Hardens batch preflight by validating stored command and working directory against the immutable execution plan.
 - Adds reusable workflow policy packs, immutable policy version/attachment snapshots, strict rule validation, plan-bound violations, and a read-only dashboard policy view.
 - Expands regression coverage and documentation for batch execution, policy enforcement limits, provenance, recovery, and package reproducibility.
+- Aligns workflow diagnosis suggestions with the actual reviewer-revision eligibility guard so an accepted review with unresolved security/implementation/blocking findings is not offered an ineligible revision action.
 
 ## Validation recorded for this candidate
 
@@ -30,7 +31,8 @@ The following local checks completed successfully on the candidate source snapsh
 - `npm run test:protocol`
 - `npm run test:workflow-m4`
 - `npm test`
-- `npm run test:package-reproducibility` — two independent validated builds were byte-identical; stable input SHA-256 `f22de974db20097aa8d9947a0c559ca3b9b8a89ebd3152989a4a0252aac37afb`.
+- `npm run test:package-reproducibility` — two independent validated builds were byte-identical; stable input SHA-256 `9d0b0c63bb28c6d6d040f3ae919819894ae4f1730afa8309865402d6707b28ca`.
+- `npm test` — includes a regression for diagnosis/revision eligibility mismatch; `npm run docs:check` verifies 64 Markdown files and 199 local links.
 - Packaged MCP runtime smoke and strict extracted-package schema validation: 46/46 manifest tools.
 - Lease-fencing, stdio framing/backpressure/shutdown regressions and hybrid-engineering E2E in the package validation path.
 - A separately installed local runtime check confirmed that its 44 package entries matched the earlier `1.0.9-rc.3` candidate, and a fresh `hybrid-engineering` workflow completed 11/11 tasks, ran both approved syntax checks with exit code `0`, and passed 11/11 recovery invariants. That runtime check was against the installed `1.0.9-rc.3` bundle, not this `1.0.9-rc.4` artifact; do not present it as an installation test of this candidate.
