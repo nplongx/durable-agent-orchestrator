@@ -1,16 +1,42 @@
 name: Bug report
-description: Report a reproducible defect in the orchestrator.
+description: Report a reproducible defect in Runalith.
 title: "bug: "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
-      value: "For security vulnerabilities, do not use a public issue; follow SECURITY.md. Remove credentials and private data from all examples."
+      value: "For security vulnerabilities, do not use a public issue; follow SECURITY.md. Use synthetic data and redact credentials, tokens, personal data, private host paths, and database contents."
   - type: input
     id: version
     attributes:
-      label: Version or commit
-      placeholder: "1.0.8 / commit SHA"
+      label: Version, release, or commit
+      description: Include the exact release tag or full commit SHA where possible.
+      placeholder: "v1.0.9-rc.5 / full commit SHA"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - MCP server / protocol
+        - Workflow planning / approval
+        - Dispatch / execution
+        - Recovery / durable state
+        - Artifacts / evidence / provenance
+        - Dashboard
+        - Packaging / MCPB
+        - Documentation / website
+        - CI / tests / release readiness
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary and impact
+      description: State what fails, who or what is affected, and any safe workaround.
+      placeholder: "A concise, factual description of the observed defect."
     validations:
       required: true
   - type: textarea
@@ -34,9 +60,26 @@ body:
     validations:
       required: true
   - type: textarea
+    id: evidence
+    attributes:
+      label: Observed evidence
+      description: Include a short, redacted error message, relevant run link, or artifact hash. Do not upload secrets or private runtime state.
+      render: text
+    validations:
+      required: true
+  - type: textarea
     id: validation
     attributes:
       label: Tests and environment
-      description: Exact commands, Node.js version, OS, and observed exit status.
+      description: Exact commands, Node.js version, OS, exit status, and whether the result is reproducible on a clean checkout.
     validations:
-      required: false
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety and disclosure check
+      options:
+        - label: I removed secrets, tokens, personal information, and private runtime data.
+          required: true
+        - label: This is not a request to publish sensitive vulnerability details; I reviewed SECURITY.md where applicable.
+          required: true

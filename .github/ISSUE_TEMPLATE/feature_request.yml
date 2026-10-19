@@ -1,8 +1,11 @@
-name: Feature request
-description: Propose an improvement or capability.
+name: Feature or design proposal
+description: Propose a user-facing capability or behavior change.
 title: "feature: "
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: "Prefer a concrete problem and verifiable outcome over a solution-only request. Consider local-first operation, approval boundaries, durable recovery, and compatibility."
   - type: textarea
     id: problem
     attributes:
@@ -14,12 +17,35 @@ body:
     id: proposal
     attributes:
       label: Proposed behavior
+      description: Describe the expected user-visible behavior and one or more representative scenarios.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and trade-offs
+      description: Note any existing workaround, simpler alternative, and why it is insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable outcomes that can be checked in review or automated tests.
+      placeholder: "- [ ] Given ...\n- [ ] When ...\n- [ ] Then ..."
     validations:
       required: true
   - type: textarea
     id: constraints
     attributes:
       label: Safety and compatibility considerations
-      description: Consider approvals, external side effects, durable recovery, artifact provenance, and backwards compatibility.
+      description: Consider approvals, authorization, external side effects, ambiguous outcomes, recovery, artifacts/provenance, privacy, resource limits, and backwards compatibility.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation approach
+      description: Name tests, documentation, telemetry, or observable evidence that will demonstrate success.
     validations:
       required: true

@@ -1,0 +1,66 @@
+name: Engineering task / technical debt
+description: Track maintenance, reliability, documentation, or release-readiness work.
+title: "task: "
+labels: ["maintenance"]
+body:
+  - type: markdown
+    attributes:
+      value: "Use this form for a bounded engineering task, cleanup, test gap, or operational prerequisite. Release authorization and official audit records must only be changed by their authorized custodians."
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Reliability / recovery
+        - Security / trust boundary
+        - Portability / compatibility
+        - Testing / CI
+        - Release readiness / audit
+        - Documentation / developer experience
+        - Packaging / distribution
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and problem
+      description: Describe the current behavior, gap, or blocker and why it matters.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and current state
+      description: Add exact commands, test names, file/line references, run links, or artifact hashes. Separate verified facts from assumptions.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+      description: State the work included and explicitly excluded; identify external owners or prerequisites.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Use checkable outcomes, not intentions.
+      placeholder: "- [ ] ...\n- [ ] ..."
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation and evidence to attach
+      description: List exact checks and records needed to prove completion.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and risks
+      description: Link prerequisite issues and note data integrity, authorization, side-effect, or compatibility risks.
+    validations:
+      required: false
