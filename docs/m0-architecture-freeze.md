@@ -1,5 +1,7 @@
 # M0 — Architecture Freeze
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 Status: **implemented**
 
 M0 freezes the current orchestration boundaries before the agent-team redesign. It is a baseline, not a behavior change.

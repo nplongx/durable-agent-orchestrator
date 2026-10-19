@@ -29,7 +29,7 @@ Once the engineer task is completed and both deterministic checks are pending an
 
 Profiles and skills are local records: create them first using `custom_role_create` with their supported Agent Skills directories, or use existing profile versions shown by `custom_role_list`. A role binding names the built-in role being supplemented and pins an exact custom role version. The profile's Skill files are imported and hashed when the role version is created; later edits to the original files do not rewrite that snapshot.
 
-Example using two existing local profiles (replace the workspace with the intended local checkout):
+Example using two custom-role profiles. The role IDs shown are placeholders; create/import the roles before binding them and replace the placeholders with their actual IDs (replace the workspace with the intended local checkout):
 
 ```json
 {
@@ -40,12 +40,12 @@ Example using two existing local profiles (replace the workspace with the intend
   "role_bindings": [
     {
       "role": "engineer",
-      "custom_role_id": "orbit-implementation-specialist",
+      "custom_role_id": "example-implementation-specialist",
       "custom_role_version": 1
     },
     {
       "role": "reviewer",
-      "custom_role_id": "orbit-independent-reviewer",
+      "custom_role_id": "example-independent-reviewer",
       "custom_role_version": 1
     }
   ],
@@ -58,7 +58,7 @@ Example using two existing local profiles (replace the workspace with the intend
 }
 ```
 
-Submit that object to `workflow_create`. Bindings for other roles are optional; add a profile only when it materially improves that stage. The current local database may already contain the `orbit-*` role IDs used in the example; a fresh installation or different database must create/import those role records before using their IDs.
+Submit that object to `workflow_create` after substituting real stored role IDs. Bindings for other roles are optional; add a profile only when it materially improves that stage. Role IDs are local database records and are not created automatically by this example.
 
 ## Approval and execution lifecycle
 

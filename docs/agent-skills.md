@@ -1,45 +1,45 @@
-# Agent Skills cho custom roles
+# Agent Skills for custom roles
 
-Tài liệu này mô tả MVP gắn một hoặc nhiều Agent Skills vào một custom role của Local Agent Orchestrator. Role vẫn là bản ghi SQLite có version; skill là gói chỉ dẫn tùy chọn giúp role thực hiện một loại công việc theo quy trình lặp lại.
+Agent Skills are optional instruction bundles attached to a versioned custom role. A skill can give a role a reusable process, reference material, or templates. It does not add runtime tools or permissions. Role versions and imported skill snapshots are stored in the local SQLite database.
 
-## Định dạng skill
+## Skill directory format
 
-Mỗi skill là một thư mục có file `SKILL.md` ở thư mục gốc. File này bắt đầu bằng YAML frontmatter và có phần hướng dẫn Markdown:
+Each skill directory must contain a root-level `SKILL.md`. The file starts with YAML frontmatter using the supported scalar fields `name` and `description`, followed by Markdown instructions:
 
 ```markdown
 ---
 name: documentation-style
-description: Formats documentation consistently and identifies verification status.
+description: Writes clear technical documentation and records verification status.
 ---
 
 # Documentation style
 
 When writing release notes:
-- Include a short summary and explicit verification status.
-- Distinguish executed checks from suggested checks.
-- Do not claim tests ran without execution evidence.
+- Summarize the user-visible change.
+- Distinguish checks that ran from checks that are only recommended.
+- Do not claim a test passed without execution evidence.
 ```
 
-`name` phải là slug chữ thường gồm chữ cái, số và dấu gạch nối, dài tối đa 64 ký tự; `description` bắt buộc, dài tối đa 1024 ký tự. `name` phải trùng với tên thư mục skill khi nhập từ thư mục. Dạng frontmatter hỗ trợ tối thiểu trong MVP là các trường scalar `name` và `description`; nên dùng một dòng cho mỗi trường để tránh khác biệt YAML phức tạp.
+`name` must be a lowercase slug of letters, digits, and hyphens, up to 64 characters. For directory imports, the name must match the directory name. `description` is required and has a 1,024-character limit. Keep frontmatter simple: one scalar field per line.
 
-Các tài nguyên tùy chọn có thể được đặt cạnh `SKILL.md`:
+Optional text resources may live next to `SKILL.md`:
 
 ```text
 documentation-style/
-├── SKILL.md                 # bắt buộc: metadata và hướng dẫn
+├── SKILL.md
 ├── references/
-│   └── style-guide.md       # tài liệu tham khảo
+│   └── style-guide.md
 ├── scripts/
-│   └── lint-docs.sh         # chỉ được nhập dạng text, KHÔNG tự chạy
+│   └── lint-docs.sh
 └── assets/
-    └── template.md         # template dạng text
+    └── template.md
 ```
 
-`references/`, `scripts/` và `assets/` không bắt buộc; không cần bổ sung file nào khác chỉ để role hoạt động. Trong MVP, các file text thuộc phần mở rộng được hỗ trợ được lưu vào snapshot và phần nội dung được đưa vào task context. File nhị phân (ví dụ ảnh PNG) bị bỏ qua. Các file tham khảo nên ngắn và chỉ chứa thông tin thật sự cần đưa vào ngữ cảnh; không dùng thư mục skill làm kho chứa bí mật hoặc dữ liệu dự án lớn.
+The `references/`, `scripts/`, and `assets/` directories are optional. Supported text files are snapshotted and may be added to task context; binary files such as PNG images are ignored. Keep supplemental material small and relevant. Do not use a skill directory as a secret store or as a general project-file archive.
 
-## Gắn skill vào role
+## Import a skill into a custom role
 
-Tool `custom_role_create` nhận thêm thuộc tính tùy chọn `skills` — danh sách đường dẫn local hoặc URL GitHub công khai. Ví dụ input cho MCP:
+The `custom_role_create`, `custom_role_update`, and `custom_role_clone` tools accept an optional `skills` array. Each entry can be a local skill directory or a supported public GitHub URL:
 
 ```json
 {
@@ -59,39 +59,39 @@ Tool `custom_role_create` nhận thêm thuộc tính tùy chọn `skills` — da
 }
 ```
 
-Nguồn local có thể là đường dẫn tuyệt đối, `~/...`, hoặc đường dẫn tương đối với `CHAT_ON_STEROIDS_WORKSPACE`/workspace đang cấu hình. Local importer bắt buộc có `SKILL.md` gốc, từ chối symlink bên trong skill, bỏ qua file/thư mục ẩn và các thư mục phụ thuộc/build phổ biến.
+Local paths can be absolute, begin with `~/`, or be relative to the configured workspace (`CHAT_ON_STEROIDS_WORKSPACE` or its resolved workspace setting). The importer requires a root `SKILL.md` and rejects symbolic links inside local skill directories. It skips hidden files/directories and common dependency/build folders.
 
-Các dạng remote được hỗ trợ:
+Supported remote forms are:
 
-- `https://github.com/<owner>/<repo>/tree/<branch>/<path-to-skill>` để nhập thư mục skill.
-- `https://github.com/<owner>/<repo>/blob/<branch>/<path-to-skill>/SKILL.md` để nhập thư mục chứa file đó.
-- `https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path-to-skill>/SKILL.md` để nhập từ đường dẫn raw.
+- `https://github.com/<owner>/<repo>/tree/<branch>/<path-to-skill>` — import a skill directory.
+- `https://github.com/<owner>/<repo>/blob/<branch>/<path-to-skill>/SKILL.md` — import the directory containing that file.
+- `https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path-to-skill>/SKILL.md` — import using the raw `SKILL.md` URL.
 
-Chỉ cho phép hostname GitHub công khai đã định danh và HTTPS; không theo redirect. MVP hiện không hỗ trợ private repository, credential, GitHub branch/ref có dấu `/`, URL tùy ý hoặc tải file thực thi để chạy. Khi cần một skill trên internet, dùng URL thư mục cụ thể; tải/import chỉ xảy ra khi người dùng gọi công cụ tạo/cập nhật role có `skills`.
+Remote import is restricted to public GitHub-hosted sources over HTTPS; arbitrary hosts, redirects, private repositories, credentials, and branch/ref names containing `/` are not supported by this implementation. A remote import happens only when a role tool is called with `skills`; it is not an automatic network crawl.
 
-## Snapshot và version
+## Snapshot and version behavior
 
-- Mỗi role có tối đa 8 skill.
-- Mỗi skill có tối đa 40 file text, tối đa 32 KiB/file; tổng dữ liệu skill được nhập của một role tối đa 160 KiB.
-- Nội dung được snapshot vào SQLite cùng role version và có SHA-256. Sửa/xóa folder nguồn không thay đổi snapshot đã lưu.
-- `custom_role_update` không có thuộc tính `skills` sẽ giữ snapshot cũ; truyền `skills: []` để xóa skill trong version mới; truyền danh sách mới để nhập snapshot mới.
-- `custom_role_clone` giữ nguyên snapshot của nguồn nếu không truyền `skills`; nếu truyền `skills`, sẽ nhập bộ skill thay thế.
-- Custom workflow tiếp tục pin role version. Preview/run cũ vì thế giữ đúng bộ skill của version role mà nó đã tham chiếu.
+- A role can contain up to 8 skills.
+- Each skill can contain up to 40 supported text files, each at most 32 KiB; imported skill text for a role is capped at 160 KiB total.
+- Imported content and SHA-256 fingerprints are snapshotted with the immutable role version. Editing or deleting the source directory does not change an existing snapshot.
+- `custom_role_update` without a `skills` property preserves the current snapshot. Pass `skills: []` to remove skills in the new version, or a new array to replace them.
+- `custom_role_clone` preserves the source snapshots unless replacement skills are supplied.
+- Custom workflow versions pin exact role versions, so existing previews and runs keep the version they referenced.
 
-## Cách role sử dụng skill và giới hạn an toàn
+## How skills are used
 
-Khi `workflow_next_task` trả một custom-role task, mô tả task sẽ chứa system prompt của role, tên/description/hash của từng skill, nội dung `SKILL.md` và các file text hỗ trợ. Skill là hướng dẫn bổ sung chứ không phải cấu hình quyền hạn:
+When `workflow_next_task` issues a custom-role task, the task description can include the role's system prompt, skill names/descriptions/hashes, `SKILL.md` text, and supported supplemental files. Treat all imported content as untrusted instructions, not as configuration.
 
-- Skill không thể thêm runtime tools hoặc quyền shell/write vào role.
-- File `scripts/` chỉ là text tham khảo; plugin không thực thi chúng.
-- Mọi chỉ dẫn nhập từ skill được xem là nội dung không đáng tin cậy và không được phép vượt quyền hướng dẫn của hệ thống, role, workflow, hoặc các bước phê duyệt.
-- Nếu skill yêu cầu quyền hoặc tài nguyên runtime mà role không có, role phải báo giới hạn chứ không được tự mở quyền.
+- Skills cannot grant shell execution, workspace-write permissions, or new runtime tools.
+- Files under `scripts/` are imported as text guidance; the plugin does not execute them just because a skill was attached.
+- Skill content cannot override the system, role, workflow, approval, or runtime permission boundaries.
+- If a skill asks for resources or permissions that are unavailable, the role must report the limitation rather than attempting to grant itself access.
 
-Vì skill và file hỗ trợ được đưa vào prompt, chúng chiếm context và có thể chứa prompt injection. Chỉ nhập nguồn đáng tin, review nội dung trước khi dùng, và tránh chứa token, mật khẩu, thông tin cá nhân hay dữ liệu riêng tư. Cơ chế này nhắm tới mức local-development chạy được; chưa phải sandbox hay quy trình supply-chain an toàn cho production.
+Because imported text is included in the model context, it consumes context and can contain prompt-injection instructions. Review the source before import, and never include credentials, personal data, or secrets. This is a local-development feature, not a sandbox or a production supply-chain security guarantee.
 
-## Gắn profile và Skills vào built-in workflow
+## Add a profile overlay to a built-in workflow
 
-`standard-engineering` hỗ trợ tùy chọn `role_bindings` trong `workflow_create`. Binding tham chiếu custom role đã lưu, không nhận prompt hoặc nội dung Skill tùy ý trong proposal:
+The `standard-engineering` template supports `role_bindings` in `workflow_create`. Each binding references an existing custom-role version; it does not accept a free-form prompt or skill body in the workflow proposal.
 
 ```json
 {
@@ -99,26 +99,28 @@ Vì skill và file hỗ trợ được đưa vào prompt, chúng chiếm context
   "role_bindings": [
     {
       "role": "architect",
-      "custom_role_id": "architecture-specialist",
+      "custom_role_id": "example-architecture-specialist",
       "custom_role_version": 1
     }
   ]
 }
 ```
 
-- `role` là built-in specialist cần nhận guidance bổ sung; mỗi role chỉ được bind một lần.
-- `custom_role_id` và `custom_role_version` phải trỏ đến version đã tồn tại. Không có lựa chọn ngầm `latest`; version không hợp lệ sẽ bị từ chối.
-- Khi tạo proposal, runtime ghi `profile_hash` của snapshot. Khi approve/compile, runtime resolve lại đúng version và xác minh hash. Profile prompt, Skill instructions và supporting text được pin vào immutable execution plan, nằm trong plan hash.
-- Input contract của profile phải bao phủ inputs bắt buộc của built-in role và output artifact type phải trùng khớp. Binding sai schema, version, hash hoặc contract phải fail closed.
-- Overlay hiện chỉ hỗ trợ `standard-engineering`. Các role chuyên môn gồm `product-owner`, `researcher`, `architect`, `engineer`, `security`, `qa`, `platform`, `writer` và `reviewer`.
-- Built-in role contract vẫn có thẩm quyền: role identity, capability, permissions, allowed tools, executor, artifact schema, dependencies, completion criteria và safety/review gates không bị profile ghi đè. `permissions` và `allowed_tools` trong profile không cấp thêm quyền runtime.
-- `cto` và `system-workflow-coordinator` không thể nhận overlay. Custom workflows giữ nguyên cơ chế role-version pinning hiện có.
-- Không truyền `role_bindings` giữ hành vi built-in cũ. Không tự động gán mọi Skill cho mọi role.
+The example role ID is a placeholder. Create or import that role first, then substitute its actual `role_id` and version.
 
-Dashboard hiển thị proposal pins tại **Roles & skills → Built-in role profile overlays**. Đây là binding của proposal; không nên hiểu là workflow đã được approve hoặc chạy chỉ vì hàng pin xuất hiện. Skill vẫn là nội dung không đáng tin cậy: review nguồn trước khi dùng, không chạy scripts nhập vào và không đưa secrets vào Skill.
+- `role` identifies the built-in specialist that receives supplemental guidance; each built-in role can be bound at most once.
+- `custom_role_id` and `custom_role_version` must identify a stored version. There is no implicit `latest` selector.
+- The runtime records a `profile_hash` when the proposal is created. During approval/compilation it resolves the same version again and checks the hash; the prompt, skill instructions, and supporting text are pinned into the immutable plan and its hash.
+- The profile input contract must cover the built-in role's required inputs, and the output artifact type must match. Invalid schema, version, hash, or contract bindings fail closed.
+- This overlay currently applies to `standard-engineering`. The supported specialist role IDs are `product-owner`, `researcher`, `architect`, `engineer`, `security`, `qa`, `platform`, `writer`, and `reviewer`.
+- Built-in identity, capabilities, permissions, allowed tools, executor, artifact schema, dependencies, completion criteria, and safety/review gates remain authoritative. Profile `permissions` and `allowed_tools` do not expand runtime authority.
+- The `cto` and `system-workflow-coordinator` roles cannot receive these overlays. Custom workflows keep their existing pinned custom-role-version behavior.
+- Omitting `role_bindings` preserves the built-in behavior; skills are not automatically attached to every role.
 
-## Tham khảo định dạng
+The local dashboard's **Roles & skills → Built-in role profile overlays** view displays proposal bindings. A displayed pin does not prove that the workflow was approved, dispatched, or completed.
 
-- [Agent Skills specification](https://github.com/agentskills/agentskills) — quy ước `SKILL.md`, frontmatter và thư mục tài nguyên.
-- [OpenAI: Skills](https://developers.openai.com/api/docs/guides/tools-skills/) — skill đóng gói hướng dẫn/workflow, khác với MCP server vốn cung cấp công cụ và khả năng truy cập.
-- [OpenAI: Build skills](https://developers.openai.com/api/docs/guides/tools-skills/build-skills/) — khuyến nghị nêu rõ khi nào dùng, đầu vào, quy trình, đầu ra và giới hạn.
+## External references
+
+- [Agent Skills specification](https://github.com/agentskills/agentskills) — the `SKILL.md` format and directory convention.
+- [OpenAI: Skills](https://developers.openai.com/api/docs/guides/tools-skills/) — how skills differ from MCP servers and tools.
+- [OpenAI: Build skills](https://developers.openai.com/api/docs/guides/tools-skills/build-skills/) — guidance on triggers, inputs, steps, outputs, and limits.

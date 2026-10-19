@@ -1,5 +1,7 @@
 # GitHub Actions ↔ OpenClaw worker contract matrix
 
+> **Document type:** Historical proposal or design record. Treat it as rationale/scope for the proposed work, not as a declaration that the proposal is currently implemented.
+
 Status: **research/implementation boundary only — not an OpenClaw `WorkerProvider`**.
 
 This document records the boundary between the existing GitHub Actions executor and the OpenClaw Cloud Workers lifecycle. The adapter can dispatch workflow jobs and collect artifacts, but it must not be treated as an OpenClaw cloud worker until every required row below is proven against the Gateway-owned placement lifecycle.

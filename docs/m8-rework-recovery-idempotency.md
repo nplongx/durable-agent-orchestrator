@@ -1,5 +1,7 @@
 # M8 — Rework, Recovery, Idempotency
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 Standard-engineering rework is revision-based.
 
 - Existing tasks remain immutable history; rework creates new pending task revisions.

@@ -59,8 +59,11 @@ Start at the [documentation index](docs/README.md). It separates user tasks, fea
 | I want to… | Read |
 |---|---|
 | Install the plugin and run a first health check | [Quickstart](docs/quickstart.md) |
+| Understand approval, execution, recovery and synthesis | [Workflow lifecycle and recovery](docs/workflow-lifecycle.md) |
 | Understand the runtime and trust boundaries | [Architecture](docs/architecture.md) |
 | Understand the deterministic batch tool | [Durable batch execution](docs/batch-execution.md) |
+| Look up MCP tool inputs and schemas | [MCP tool reference](docs/MCP_REFERENCE.md) |
+| Understand names vs. compatibility identifiers | [Terminology guide](docs/TERMINOLOGY.md) |
 | Use custom roles and Agent Skills | [Agent Skills](docs/agent-skills.md) |
 | Combine specialist reasoning with deterministic batch execution | [Hybrid engineering workflow](docs/hybrid-engineering-workflow.md) |
 | Define and attach reusable workflow policies | [Workflow policies](docs/workflow-policies.md) |

@@ -1,5 +1,7 @@
 # M11 QA Evidence — worker-6
 
+> **Document type:** Historical evidence record. Results apply to the specific fixture, run, environment, and scope recorded here; they do not establish current system readiness or authorize a release.
+
 Job: 52b3007b-2ada-439d-b052-0224d5d2903a
 
 Acceptance contract evidence:

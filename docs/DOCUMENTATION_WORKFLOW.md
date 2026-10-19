@@ -71,6 +71,7 @@ Review from three perspectives: a new user following the instructions literally,
 Before merging documentation changes:
 
 ```bash
+npm run docs:generate-reference   # after MCP tools/schemas change
 npm run docs:check
 git diff --check
 ```
@@ -110,12 +111,12 @@ Do not count page length, diagrams, generated output, or a successful link check
 
 ## Current rewrite backlog
 
-| Priority | Scope | Acceptance criterion |
-|---|---|---|
-| P0 | README, docs index, quickstart, documentation checks | A newcomer can find the install/health path; active navigation and local links are checked in CI. |
-| P1 | Workflow tasks, dashboard, policies, Agent Skills, hybrid workflow | Each page has one purpose, tested steps, and a clear failure/permission model. |
-| P2 | MCP tool/reference catalog and data contracts | Public tools/fields/states are complete and match the shipped schemas and tests. |
-| P3 | Architecture and recovery explanation | Current architecture is explained from the shipped local entrypoint; proposals/distributed experiments are labeled separately. |
-| P4 | Historical `m*`/`p*` plans and benchmark/evidence records | Each record has scope/status/date context and cannot be mistaken for current usage instructions or release authorization. |
+| Priority | Scope | Acceptance criterion | Status after this documentation slice |
+|---|---|---|---|
+| P0 | README, docs index, quickstart, documentation checks | A newcomer can find the install/health path; active navigation and local links are checked in CI. | Implemented in the preceding documentation-first change; keep the checks in CI. |
+| P1 | Workflow tasks, dashboard, policies, Agent Skills, hybrid workflow | Each page has one purpose, tested steps, and a clear failure/permission model. | User guides revised and dashboard display labels genericized in the current slice; continue reviewing edge cases and examples against real usage. |
+| P2 | MCP tool/reference catalog and data contracts | Public tools/fields/states are complete and match the shipped schemas and tests. | Reference generated from local `tools/list`; `docs:check` verifies it is byte-for-byte current. Add/refresh related data-contract pages as needed. |
+| P3 | Architecture and recovery explanation | Current architecture is explained from the shipped local entrypoint; proposals/distributed experiments are labeled separately. | Architecture explanation exists; this slice links historical design records to current-source verification rather than claiming all distributed paths are shipped. |
+| P4 | Historical `m*`/`p*` plans and benchmark/evidence records | Each record has scope/status/date context and cannot be mistaken for current usage instructions or release authorization. | Navigation table and scoped banners added to milestone/phase/design/evidence files; continue per-record status verification without rewriting the underlying historical evidence. |
 
 Only close a backlog row after its acceptance criteria have been reviewed. This file records the process; it is not a claim that the whole backlog has already been completed.

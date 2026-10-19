@@ -1,5 +1,7 @@
 # P8 — Autonomous Delivery Runner
 
+> **Document type:** Historical implementation-phase record. It describes the scope/contracts of that phase; confirm current behavior in the shipped source and tests before using it as an operational reference.
+
 P8 closes the durable control-loop boundary around the P2–P7 primitives.
 
 ```text

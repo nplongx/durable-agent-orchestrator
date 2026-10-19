@@ -28,7 +28,7 @@ git diff --check
 
 For execution, lease, filesystem, recovery, or package changes, also run the corresponding focused tests under `tests/`. Do not claim a check passed unless you ran it and observed a successful exit status. Mention tests that could not be run and the reason.
 
-For user-visible or architectural changes, update the canonical documentation page and the [documentation index](docs/README.md). Follow the [documentation rewrite workflow](docs/DOCUMENTATION_WORKFLOW.md) to choose the page type, verify claims against code and tests, and check links. Diagrams are optional supporting material; do not add a diagram unless it makes a concept materially easier to understand. GitHub-renderable Markdown or static PNGs are preferred over standalone HTML.
+For user-visible or architectural changes, update the canonical documentation page and the [documentation index](docs/README.md). Follow the [documentation rewrite workflow](docs/DOCUMENTATION_WORKFLOW.md) and [terminology guide](docs/TERMINOLOGY.md) to choose the page type, verify claims against code and tests, preserve compatibility identifiers, and check links. If an MCP tool/schema changes, regenerate the [MCP tool reference](docs/MCP_REFERENCE.md) with `npm run docs:generate-reference` and review the diff. Diagrams are optional supporting material; GitHub-renderable Markdown or static PNGs are preferred over standalone HTML.
 
 Before opening a documentation-only pull request, run:
 

@@ -1,5 +1,7 @@
 # P1 — GitHub Runner Smoke Test
 
+> **Document type:** Historical implementation-phase record. It describes the scope/contracts of that phase; confirm current behavior in the shipped source and tests before using it as an operational reference.
+
 Workflow: `.github/workflows/p1-runner-smoke.yml`
 
 ## What this proves

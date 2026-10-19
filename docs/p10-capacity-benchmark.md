@@ -1,5 +1,7 @@
 # P10 — Capacity Benchmark
 
+> **Document type:** Benchmark plan or scoped benchmark record. Treat measurements and gates as specific to the documented run/version; consult current code and the active readiness record before drawing release conclusions.
+
 P10 measures the control-plane dispatch boundary without spending GitHub Actions minutes.
 
 ## Metrics

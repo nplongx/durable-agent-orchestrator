@@ -1,5 +1,7 @@
 # Durable Agent Orchestrator — Agent Architecture Proposal
 
+> **Document type:** Historical proposal or design record. Treat it as rationale/scope for the proposed work, not as a declaration that the proposal is currently implemented.
+
 ## Architecture decision
 
 Use fewer OpenClaw agents with explicit bounded capabilities. LangGraph remains the workflow authority. WorkflowCompiler compiles a workflow definition into a DAG. SQLite is durable source of truth. ExecutionManager is the sole authority for commands and execution evidence.

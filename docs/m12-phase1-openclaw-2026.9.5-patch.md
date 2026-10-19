@@ -1,5 +1,7 @@
 # M12 Phase 1 — OpenClaw 2026.9.5 core patch contract
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 This file freezes the source-level change required in OpenClaw `2026.9.5`.
 It is intentionally a patch specification, not a live installation change.
 

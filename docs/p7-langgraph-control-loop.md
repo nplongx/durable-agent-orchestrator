@@ -1,5 +1,7 @@
 # P7 — LangGraph Control Loop
 
+> **Document type:** Historical implementation-phase record. It describes the scope/contracts of that phase; confirm current behavior in the shipped source and tests before using it as an operational reference.
+
 P7 connects the durable LangGraph controller to the distributed scheduler and
 provider lifecycle without making the worker its own controller.
 

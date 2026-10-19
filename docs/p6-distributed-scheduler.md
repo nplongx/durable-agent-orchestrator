@@ -1,5 +1,7 @@
 # P6 — Parallel Distributed Scheduler
 
+> **Document type:** Historical implementation-phase record. It describes the scope/contracts of that phase; confirm current behavior in the shipped source and tests before using it as an operational reference.
+
 P6 adds the control-plane scheduler that fans pending tasks out to GitHub
 Actions workers.
 

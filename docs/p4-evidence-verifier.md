@@ -1,5 +1,7 @@
 # P4 — Deterministic Evidence Verifier
 
+> **Document type:** Historical evidence record. Results apply to the specific fixture, run, environment, and scope recorded here; they do not establish current system readiness or authorize a release.
+
 P4 makes worker evidence a separate success authority. A worker's
 `status: SUCCEEDED` is only a claim; the control plane accepts it only after
 the complete evidence bundle passes deterministic checks.

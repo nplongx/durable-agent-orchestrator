@@ -1,5 +1,7 @@
 # M9 — Governance / Permissions
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 ## Contract
 
 Agent contracts are the source of truth for role permissions. Governance validates permission use instead of treating contract metadata as advisory.

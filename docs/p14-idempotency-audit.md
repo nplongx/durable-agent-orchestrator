@@ -1,5 +1,7 @@
 # P14 — Idempotency Audit
 
+> **Document type:** Historical implementation-phase record. It describes the scope/contracts of that phase; confirm current behavior in the shipped source and tests before using it as an operational reference.
+
 P14 audits retry/recovery boundaries.
 
 ## Guards

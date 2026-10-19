@@ -1,5 +1,7 @@
 # M4 — Engineer
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 M4 makes Engineer completion produce a durable `implementation` artifact when the Engineer task is part of the native `engineering` workflow and has verified ExecutionManager evidence.
 
 ## Implementation artifact

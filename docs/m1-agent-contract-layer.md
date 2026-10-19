@@ -1,5 +1,7 @@
 # M1 — Agent Contract Layer
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 Status: **implemented**
 
 M1 makes every agent role executable through one explicit, versioned contract. The contract is metadata and validation only; it does not change provider execution semantics yet.

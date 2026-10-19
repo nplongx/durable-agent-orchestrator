@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -144,11 +145,67 @@ function check() {
         const details = statSync(resolved);
         if (!details.isFile() && !details.isDirectory()) {
           errors.push(`${markdownFile}:${line}: local target is not a file or directory: ${rawTarget}`);
+          continue;
+        }
+
+        // A file that only exists in the current checkout but is ignored by
+        // Git will not exist for GitHub readers or in a clean CI checkout.
+        // For directory links, at least one committed or unignored file must
+        // exist underneath that directory so the target is present in Git.
+        const relativeTarget = relativeResolved.split(path.sep).join('/');
+        const targetAvailableInGit = allFiles.has(relativeTarget) || (
+          details.isDirectory() && [...allFiles].some((file) => file.startsWith(`${relativeTarget.replace(/\/$/, '')}/`))
+        );
+        if (!targetAvailableInGit) {
+          errors.push(`${markdownFile}:${line}: local target exists only in the workspace or is ignored by Git: ${rawTarget}`);
         }
       } catch {
         errors.push(`${markdownFile}:${line}: could not inspect local target: ${rawTarget}`);
       }
     }
+  }
+
+  // Exercise reference generation with conflicting inherited settings that
+  // would point at a caller's database/workspace if the generator failed to
+  // replace every environment override. The only permitted state is an
+  // isolated temporary directory created by the generator itself.
+  const isolationProbe = mkdtempSync(path.join(os.tmpdir(), 'docs-reference-isolation-'));
+  const inheritedDataDir = path.join(isolationProbe, 'inherited-data');
+  const inheritedDbPath = path.join(isolationProbe, 'inherited.db');
+  const inheritedWorkspace = path.join(isolationProbe, 'inherited-workspace');
+  const inheritedExecDir = path.join(isolationProbe, 'inherited-execution');
+  let referenceCheck;
+  try {
+    referenceCheck = spawnSync(process.execPath, [path.join(repoRoot, 'scripts', 'generate-mcp-reference.mjs'), '--check'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 20_000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: {
+        ...process.env,
+        CHAT_ON_STEROIDS_DATA_DIR: inheritedDataDir,
+        WORKFLOW_DATA_DIR: inheritedDataDir,
+        CHAT_ON_STEROIDS_WORKFLOW_DB: inheritedDbPath,
+        WORKFLOW_DB: inheritedDbPath,
+        CHAT_ON_STEROIDS_WORKSPACE: inheritedWorkspace,
+        WORKFLOW_WORKSPACE: inheritedWorkspace,
+        CHAT_ON_STEROIDS_EXECUTION_TMP_DIR: inheritedExecDir,
+        EXECUTION_TMP_DIR: inheritedExecDir,
+      },
+    });
+    if (existsSync(inheritedDbPath) || existsSync(inheritedDataDir) || existsSync(inheritedWorkspace) || existsSync(inheritedExecDir)) {
+      errors.push('MCP reference generator did not isolate inherited database/workspace/execution path overrides');
+    }
+  } finally {
+    rmSync(isolationProbe, { recursive: true, force: true });
+  }
+  if (referenceCheck.error) {
+    errors.push(`MCP reference parity check could not run: ${referenceCheck.error.message}`);
+  } else if (referenceCheck.status !== 0) {
+    const detail = `${referenceCheck.stdout || ''}${referenceCheck.stderr || ''}`.trim();
+    errors.push(`MCP reference parity check failed: ${detail || `exit status ${referenceCheck.status}`}`);
+  } else if (referenceCheck.stdout.trim()) {
+    console.log(referenceCheck.stdout.trim());
   }
 
   if (errors.length > 0) {

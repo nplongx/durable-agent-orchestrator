@@ -1,5 +1,7 @@
 # M5 — Security, QA, Platform, Writer
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 M5 gives the four post-Engineer specialists durable typed artifacts.
 
 ## Outputs

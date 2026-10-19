@@ -1,5 +1,7 @@
 # M3 — Requirements, Research, Architecture
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 M3 makes the first three planning artifacts durable and typed.
 
 ## Flow

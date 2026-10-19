@@ -1,5 +1,7 @@
 # M12 — JIT Runner Admission Broker Architecture
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 Status: FROZEN
 
 This document freezes the M12 broker boundary before implementation. It is an architecture contract, not an implementation.
