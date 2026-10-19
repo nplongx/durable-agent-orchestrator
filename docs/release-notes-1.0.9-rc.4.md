@@ -1,6 +1,6 @@
 # 1.0.9-rc.4 — Release notes draft
 
-> **Publication status:** draft prepared for a possible GitHub pre-release; no GitHub Release or version tag has been created. This build is for controlled testing only, is not production-approved, and is not the project's official frozen artifact.
+> **Publication status:** draft for a testing-only GitHub pre-release; no GitHub Release or version tag has been created. The pre-release tier uses the minimum checks in [Release policy](RELEASE_POLICY.md); this build is not production-approved and is not the project's official frozen artifact. Before publishing, rebuild or reconfirm the package against the exact intended tag commit and update the hash below if it changes.
 
 ## Highlights
 
@@ -32,4 +32,4 @@ The `.mcpb` is a local ignored build output and is not committed to the reposito
 
 - The formal Phase 2 readiness audit is still blocked. The official frozen artifact is absent, independent candidate review and CASE-06 policy disposition are missing, fresh exact-scope authorization is not established, and authorization-audit reconciliation remains outstanding.
 - No production-readiness claim is made. Real Gateway-backed integration acceptance remains separate from local package tests.
-- This draft is not itself approval to publish. Do not create a release tag or publish until the repository's release policy or authorized release process permits it.
+- The strict Phase 2 `BLOCKED_NOT_READY` result remains in force for formal deployment/production release. Under the tiered [release policy](RELEASE_POLICY.md), that audit result alone does not prohibit a clearly labeled testing pre-release when all minimum checks pass. Do not describe the outstanding formal gates as passed, do not edit official audit/authorization records, and do not claim production readiness.

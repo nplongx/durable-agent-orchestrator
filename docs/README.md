@@ -22,6 +22,7 @@ This index is the starting point for users, operators, and contributors. Pages a
 
 - [Architecture](architecture.md) — runtime components, durable state, execution, and recovery boundaries.
 - [Architecture illustrations](diagrams/README.md) — GitHub-rendered static PNGs that supplement the written explanation.
+- [Release policy](RELEASE_POLICY.md) — minimum checks for experimental GitHub pre-releases versus formal frozen/production releases.
 - [Known issues and release blockers](KNOWN_ISSUES.md) — current limits and outstanding gates; this is not a general feature roadmap.
 
 ## Contributing and maintaining documentation
@@ -56,7 +57,7 @@ The remaining milestone (`m*`), phase (`p*`), proposal, implementation-plan, ben
 | Distributed provider integration | [GitHub Actions distributed-worker plan](github-actions-distributed-worker-implementation-plan.md), [GitHub Actions/OpenClaw contract matrix](github-actions-openclaw-contract-matrix.md) | The contract matrix explicitly records missing/unproven native Gateway requirements; do not infer a native provider from the presence of an adapter. |
 | Workflow benchmark | [Benchmark plan](plugin-workflow-benchmark-plan.md), [tracked benchmark repository README](../benchmarks/plugin-workflow-benchmark/README.md), [paired-host harness contract](../benchmarks/plugin-workflow-benchmark/paired-host-harness-contract.md) | Keep benchmark identity and authorization separate from general test results. Local, ignored phase-freeze/preflight copies are not links for GitHub readers. Consult [known issues](KNOWN_ISSUES.md) for current release blockers. |
 
-Use [known issues and release blockers](KNOWN_ISSUES.md) for the current repository-level limitation summary and [the `1.0.9-rc.4` candidate record](review-candidate-1.0.9-rc.4.md) for the explicitly scoped candidate evidence. Neither overrides the required formal release gates.
+Use the [release policy](RELEASE_POLICY.md) to distinguish testing pre-releases from the production/frozen-release lane, [known issues](KNOWN_ISSUES.md) for current limitations, and the [`1.0.9-rc.4` candidate record](review-candidate-1.0.9-rc.4.md) for exact artifact evidence. A testing pre-release does not satisfy or override formal production release gates.
 
 ## Where facts come from
 

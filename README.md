@@ -90,7 +90,7 @@ The MCP entrypoint uses newline-delimited JSON-RPC on stdin/stdout and does not 
 
 The plugin is intended for controlled local development and testing; it is **not certified for production use**. Structured local execution and filesystem checks are defense-in-depth, not an operating-system sandbox. The dashboard is not an authenticated remote admin service, and best-effort output redaction cannot guarantee that every secret is detected.
 
-The `1.0.9-rc.4` candidate is not the official frozen release artifact and is not approved for release. Independent review, authorization, policy disposition, and other formal release gates remain outstanding. See [Known issues and release blockers](docs/KNOWN_ISSUES.md) and the [candidate record](docs/review-candidate-1.0.9-rc.4.md).
+A candidate may be published as an explicitly experimental GitHub pre-release once the separate minimum checks in the [release policy](docs/RELEASE_POLICY.md) pass; a `BLOCKED_NOT_READY` Phase 2 audit does not by itself veto this testing-only tier. Such a publication is not a production approval or an official frozen artifact. Formal independent review, authorization, policy disposition, deployment validation, and audit reconciliation remain required for the production/frozen-release tier. See [Known issues and release blockers](docs/KNOWN_ISSUES.md) and the [candidate record](docs/review-candidate-1.0.9-rc.4.md).
 
 ## Contributing
 

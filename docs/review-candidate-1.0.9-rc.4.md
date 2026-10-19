@@ -1,6 +1,6 @@
 # Review candidate: 1.0.9-rc.4
 
-**Status:** reproducible review candidate prepared; GitHub release notes are drafted but no GitHub Release or tag has been created. This candidate is not the official frozen artifact and is not approved for production release.
+**Status:** reproducible review candidate prepared; no GitHub Release or version tag has been created. It may be considered for a testing-only pre-release under the [tiered release policy](RELEASE_POLICY.md) after rebuilding/confirming the exact intended tag commit and verifying the minimum pre-release checklist. It is not the official frozen artifact and is not approved for production release.
 
 For code and workflow context, see the [architecture explanation](architecture.md), [hybrid engineering workflow](hybrid-engineering-workflow.md), and [architecture illustrations](diagrams/README.md). These docs explain the implementation; they do not satisfy any of the formal release blockers below.
 
@@ -38,7 +38,7 @@ The following local checks completed successfully on the candidate source snapsh
 - Lease-fencing, stdio framing/backpressure/shutdown regressions and hybrid-engineering E2E in the package validation path.
 - A separately installed local runtime check confirmed that its 44 package entries matched the earlier `1.0.9-rc.3` candidate, and a fresh `hybrid-engineering` workflow completed 11/11 tasks, ran both approved syntax checks with exit code `0`, and passed 11/11 recovery invariants. That runtime check was against the installed `1.0.9-rc.3` bundle, not this `1.0.9-rc.4` artifact; do not present it as an installation test of this candidate.
 
-These results are useful engineering evidence but do not replace independent review of the exact `1.0.9-rc.4` bytes or the formal release gates. The installed-runtime workflow is specifically identified above to avoid confusing its `rc.3` provenance with this `rc.4` package.
+These results are useful engineering evidence. They support a testing-candidate assessment only and do not replace a post-install test where needed, or the formal production/frozen-release gates. The installed-runtime workflow is specifically identified above to avoid confusing its `rc.3` provenance with this `rc.4` package.
 
 ## Artifact identity and handoff
 
@@ -46,13 +46,14 @@ The artifact identity above is the freshly built candidate associated with commi
 
 ## Outstanding release blockers
 
-The strict Phase 2 readiness audit remains `BLOCKED_NOT_READY`. Before creating a prerelease or calling this artifact frozen, the authorized process must establish all of the following for the exact candidate identity:
+The strict Phase 2 readiness audit remains `BLOCKED_NOT_READY`. These outstanding items prevent calling the artifact official/frozen, production-ready, or deployment-authorized. They are not, by themselves, a veto on an explicitly testing-only GitHub pre-release that satisfies the separate [minimum release policy](RELEASE_POLICY.md):
 
 1. Official frozen-artifact identity and custody.
 2. Fresh, signed, exact-scope authorization and gate approval.
 3. Independent review of this candidate bundle and inventory hashes.
 4. A valid signed CASE-06 policy disposition, verified against a trusted public-key anchor.
 5. Static release-policy validation after its prerequisites are satisfied.
-6. Authorization-audit reconciliation by the designated custodian.
+6. Fresh Phase 2 host preflight in the intended host environment.
+7. Authorization-audit reconciliation by the designated custodian.
 
-Do not create a release tag, publish a GitHub prerelease, overwrite a frozen bundle, or edit official authorization/audit records to bypass these blockers. See [Known issues and release blockers](KNOWN_ISSUES.md).
+Do not call this candidate frozen/production-approved or edit official authorization/audit records to manufacture a pass. A testing pre-release is a separate, limited publication and must retain these blockers in its notes. For current scope and minimum criteria, see [the release policy](RELEASE_POLICY.md) and [Known issues](KNOWN_ISSUES.md).
