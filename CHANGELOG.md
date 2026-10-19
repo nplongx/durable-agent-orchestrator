@@ -2,6 +2,25 @@
 
 Notable changes to this project are recorded here. This file summarizes repository changes and is not a release certification.
 
+# 1.0.9-rc.4 — 2026-10-19 (review candidate; not published)
+
+- Added the `hybrid-engineering` workflow template: nine dependency-ordered specialist tasks, optional pinned custom role/Agent Skill overlays, and two deterministic code-authored syntax checks executed together through durable ExecutionManager Batch Execution.
+- Hardened immutable-plan checks for deterministic batch command and working-directory metadata, and retained pinned role-profile snapshots during workflow plan revalidation.
+- Added regression coverage for the hybrid workflow, real batch evidence, tamper/mismatch rejection, package tool-schema parity, and deterministic package reproducibility.
+- Includes the reusable workflow-policy pack and read-only ORBIT / OPS Policies view from the preceding candidate work.
+- Local validation: `npm run test:protocol`, `npm run test:workflow-m4`, `npm test`, extracted MCP package smoke/schema validation, and package reproducibility. A post-install local workflow also completed 11/11 child tasks, both deterministic checks (exit code 0), and 11/11 durable recovery checks.
+- Review-candidate SHA-256: `689ad2c3dff0358d88afbfe461fb6f262431f0ee2a49848d4c9008d0ab007530`. This identifies the exact review candidate only; it is not a frozen artifact, authorized release, or production-readiness certification. Independent candidate review, formal exact-scope authorization, CASE-06 policy disposition, and authorization-audit reconciliation remain blocked; see [Known issues](docs/KNOWN_ISSUES.md).
+
+
+# 1.0.9-rc.3 — 2026-10-19 (pre-release)
+
+- Added reusable workflow policy packs with seven MCP tools for catalog/validation/create/list/get/version update and pre-approval attachment.
+- Policy definitions use the existing closed JSON success predicate vocabulary; unknown or executable rule content and conflicting policy predicates fail closed. Immutable SQLite policy versions, policy attachments and append-only policy audit rows are recorded locally.
+- Attached policy snapshots, exact versions, content hashes and merged predicate contract are pinned to the immutable execution plan. Plan validation re-computes the merged contract, while execution-plan loading verifies attachment-ledger and base-proposal binding. Policy changes never silently rewrite already-approved plans; attachment after approval/plan compilation is blocked.
+- Added the ORBIT / OPS read-only Policies view and `GET /api/policies` endpoint for immutable versions, exact workflow pins, stored-snapshot integrity status and plan-bound violation history; expanded policy unit, MCP E2E, dashboard and extracted-tool-schema regression coverage.
+- See [workflow policy pack documentation](docs/workflow-policies.md). Rules such as retry budgets and qualitative style checks are intentionally not advertised as machine-enforced without dedicated enforcement points.
+- Validation: `TMPDIR="$HOME/.cache/cos-batch-test-tmp" npm test` PASS; `npm run test:protocol` PASS; `npm run test:batch` PASS; policy-contract and MCP policy E2E tests PASS; Dashboard read-only/API security tests PASS; packaged MCP smoke test and extracted tool-schema parity PASS (44/44); package regression suite including lease fencing, CASE-01 crash/restart, stdio framing/backpressure and extracted-plugin E2E PASS. Final reviewed candidate SHA-256: `b5f6fbbb06a1eeaec6bea6ecaef8d8036b2f96cf0c52f206bf6395798d8f1bde`. This is not a production-readiness certification.
+
 # 1.0.9-rc.2 — 2026-10-18 (pre-release)
 
 - Added the immutable built-in `system-workflow-coordinator` role, outside custom-role persistence and CRUD; the custom-role API now reserves the `system-` namespace.

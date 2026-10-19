@@ -87,7 +87,7 @@ const qaTranscriptOnlyCompletion = store.completeTaskByRuntime(job.job_id, {
   sessionKey: qa.openclaw_session_key,
   content: [
     goodEvidence(qaCommand),
-    'PRODUCTION QA MCP INITIALIZE/37-TOOL DISCOVERY PASS',
+    'PRODUCTION QA MCP INITIALIZE/46-TOOL DISCOVERY PASS',
     'PRODUCTION QA BEHAVIORAL ARTIFACT VALIDATION PASS',
     'PRODUCTION QA APPROVAL/DISPATCH/IMMUTABLE-PLAN NEXT-TASK PASS'
   ].join('\n'),

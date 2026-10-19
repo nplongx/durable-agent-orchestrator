@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createDashboardServer } from '../dashboard/server.js';
+import { createPolicySnapshot, initializeWorkflowPolicyStore, normalizePolicyDefinition } from '../src/runtime/workflow/policy-contract.js';
+import { canonicalJson } from '../src/runtime/workflow/plan.js';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-dashboard-test-'));
 const dataDir = path.join(temp, 'data');
@@ -33,6 +35,7 @@ CREATE TABLE execution_batch_items(batch_id TEXT,item_id TEXT,task_id TEXT,comma
 CREATE TABLE custom_role_versions(role_id TEXT,version INTEGER,name TEXT,description TEXT,system_prompt TEXT,input_contract_json TEXT,output_artifact_type TEXT,allowed_capabilities_json TEXT,permissions_json TEXT,allowed_tools_json TEXT,skills_json TEXT,created_at TEXT,created_by TEXT,PRIMARY KEY(role_id,version));
 CREATE TABLE custom_workflow_versions(workflow_id TEXT,version INTEGER,name TEXT,description TEXT,input_contract_json TEXT,tasks_json TEXT,created_at TEXT,created_by TEXT,PRIMARY KEY(workflow_id,version));
 `);
+initializeWorkflowPolicyStore(db);
 const now = new Date().toISOString();
 const insertJob = db.prepare('INSERT INTO jobs(job_id,conversation_key,title,state,status,active_task_id,created_at,updated_at,approved_at) VALUES(?,?,?,?,?,?,?,?,?)');
 insertJob.run('job-demo-001','test:demo','Dashboard smoke test','EXECUTING','active','task-demo-001',now,now,now);
@@ -44,7 +47,12 @@ db.prepare('INSERT INTO tasks(task_id,job_id,role,description,status,dependency_
 db.prepare('UPDATE tasks SET execution_session_id=?,execution_status=?,execution_attempt=?,execution_exit_code=?,execution_started_at=?,execution_finished_at=?,execution_stdout=?,execution_stderr=? WHERE task_id=?').run('exec-fixture-failed','failed',1,1,now,now,'','fixture execution failed safely','task-demo-002');
 const oversizedTaskMetadata = JSON.stringify({workflow_plan_task_id:'analyze-large-metadata',custom_role_id:'fixture-analyst',custom_role_version:1,custom_role_name:'Fixture Evidence Analyst',custom_role_skills:[{name:'oversized-skill',source:{kind:'local',location:'/home/red-team/private-skill'},files:[{path:'C:\\Users\\red-team\\private\\skill.txt',sha256:'d'.repeat(64)},{path:'\\\\red-team\\share\\private.md',sha256:'e'.repeat(64)}]}],padding:'oversized metadata padding '.repeat(300)});
 assert.ok(oversizedTaskMetadata.length > 4_000);
-db.prepare('INSERT INTO tasks(task_id,job_id,role,description,status,dependency_json,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)').run('task-demo-003','job-demo-001','custom-task-2','Inspect oversized metadata safely','completed','[]',oversizedTaskMetadata,now,now);
+const oversizedMetadataObject = JSON.parse(oversizedTaskMetadata);
+oversizedMetadataObject.custom_role_skills[0].files.push({path:'/home/red-team/private-skill/references/private.md',sha256:'c'.repeat(64)});
+oversizedMetadataObject.raw_metadata_marker = 'OVERSIZED_TASK_METADATA_RAW_SENTINEL_73af';
+const oversizedTaskMetadataWithPath = JSON.stringify(oversizedMetadataObject);
+assert.ok(oversizedTaskMetadataWithPath.length > 4_000);
+db.prepare('INSERT INTO tasks(task_id,job_id,role,description,status,dependency_json,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)').run('task-demo-003','job-demo-001','custom-task-2','Inspect oversized metadata safely','completed','[]',oversizedTaskMetadataWithPath,now,now);
 db.prepare('INSERT INTO approvals VALUES(?,?,?,?,?,?,?)').run('approval-demo','job-demo-001','approved','test-user','approved exact plan','a'.repeat(64),now);
 db.prepare('INSERT INTO attempts VALUES(?,?,?,?,?,?,?)').run('attempt-demo','task-demo-001','completed',null,now,now,null);
 db.prepare('INSERT INTO results VALUES(?,?,?,?,?)').run('result-demo','task-demo-001','success',('real result content '.repeat(20)+'source path /home/red-team/private-skill/references/private.md ').repeat(25),now);
@@ -56,10 +64,27 @@ db.prepare('INSERT INTO workflow_events VALUES(?,?,?,?,?,?,?,?)').run('workflow-
 db.prepare('INSERT INTO execution_batches VALUES(?,?,?,?,?,?,?,?,?,?)').run('batch-demo','job-demo-001','task-demo-001','engineer','COMPLETED',1,now,now,now,'aggregate output');
 db.prepare('INSERT INTO execution_batch_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run('batch-demo','item-1','task-demo-001','node build.js',dataDir,5000,1,'COMPLETED',null,null,0,'stdout body','stderr body',now,now,null);
 const skillSnapshot = [{name:'review-evidence',description:'Check claims against stored evidence.',source:{kind:'local',location:'/home/test-user/.agents/skills/review-evidence'},sha256:'a'.repeat(64),instructions:'Compare every conclusion against primary source evidence. Record unresolved gaps instead of guessing. '+'x'.repeat(1_700),files:[{path:'references/checklist.md',content:'fixture checklist',sha256:'b'.repeat(64),size_bytes:17},{path:'/home/test-user/.agents/skills/review-evidence/private.md',sha256:'c'.repeat(64),size_bytes:21},{path:'C:\\Users\\fixture\\AppData\\private.txt',sha256:'d'.repeat(64),size_bytes:22},{path:'\\\\server\\share\\private.md',sha256:'e'.repeat(64),size_bytes:23}]}];
+const pathDisclosureSkill = {name:'private-skill-fixture',description:'Path disclosure regression fixture.',source:{kind:'local',location:'/home/red-team/private-skill'},instructions:'Only this safe preview should be available.',files:[{path:'/home/red-team/private-skill/references/private.md',sha256:'c'.repeat(64),size_bytes:31}]};
 db.prepare('INSERT INTO custom_role_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run('fixture-analyst',1,'Fixture Evidence Analyst','Produces grounded findings from upstream artifacts.','Act as evidence analyst.',JSON.stringify(['job.request','research']),'research',JSON.stringify(['research.collect']),JSON.stringify(['workspace.read','artifact.create']),JSON.stringify(['workflow_get','workflow_artifacts']),JSON.stringify(skillSnapshot),now,'fixture-user');
 db.prepare('INSERT INTO custom_role_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run('fixture-analyst',2,'Fixture Evidence Analyst','Version 2 with no attached skill.','Act as evidence analyst; version 2.',JSON.stringify(['job.request','research']),'research',JSON.stringify(['research.collect']),JSON.stringify(['workspace.read','artifact.create']),JSON.stringify(['workflow_get','workflow_artifacts']),JSON.stringify([]),now,'fixture-user');
+const overlaySkillSnapshot = [{name:'architecture-evidence',description:'Validate boundaries and failure modes.',source:{kind:'local',location:'/home/test-user/.agents/skills/architecture-evidence'},sha256:'f'.repeat(64),instructions:'Check boundaries, interfaces, and failure modes.',files:[]}];
+db.prepare('INSERT INTO custom_role_versions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run('fixture-architect-profile',1,'Fixture Architect Profile','Supplementary architecture guidance.','Use evidence-led architecture analysis.',JSON.stringify(['job.request','requirements','research']),'architecture',JSON.stringify(['architecture.design']),JSON.stringify(['workspace.read','artifact.create']),JSON.stringify(['workflow_get','workflow_artifacts']),JSON.stringify(overlaySkillSnapshot),now,'fixture-user');
 db.prepare('INSERT INTO custom_workflow_versions VALUES(?,?,?,?,?,?,?,?)').run('fixture-review-pipeline',1,'Fixture Review Pipeline','Three-stage review using a pinned custom profile.',JSON.stringify(['job.request']),JSON.stringify([{id:'analyze-evidence',role_id:'fixture-analyst',role_version:1,input_contract:['job.request'],output_artifact_type:'research',depends_on:[]}]),now,'fixture-user');
-db.prepare('UPDATE tasks SET role=?,metadata_json=? WHERE task_id=?').run('custom-task-1',JSON.stringify({workflow_plan_task_id:'analyze-evidence',custom_role_id:'fixture-analyst',custom_role_version:1,custom_role_name:'Fixture Evidence Analyst',custom_role_skills:skillSnapshot}), 'task-demo-001');
+db.prepare('INSERT INTO events VALUES(?,?,?,?,?)').run('event-overlay-proposal','job-demo-002','job.proposal_requested',JSON.stringify({workflowId:'standard-engineering',role_profile_bindings:[{role:'architect',custom_role_id:'fixture-architect-profile',custom_role_version:1,profile_hash:'9'.repeat(64)}]}),new Date(Date.now()+2000).toISOString());
+const fixturePolicy = normalizePolicyDefinition({
+  policy_id:'fixture-secure-release', name:'Fixture Secure Release', description:'Require local-only execution and QA evidence.',
+  constraints:[{id:'only-local',type:'local_execution_only'}],
+  success_criteria:[{id:'qa-accepted',type:'artifact_field_equals',artifact_type:'qa-report',producer_role:'qa',field:'decision',expected:'accept'}]
+});
+const fixturePolicySnapshot = createPolicySnapshot(fixturePolicy.policy_id,1,fixturePolicy);
+db.prepare('INSERT INTO workflow_policy_versions VALUES(?,?,?,?,?,?,?,?)').run(fixturePolicy.policy_id,1,fixturePolicy.name,fixturePolicy.description,canonicalJson(fixturePolicy),fixturePolicySnapshot.content_hash,now,'fixture-user');
+db.prepare('INSERT INTO workflow_policy_attachments VALUES(?,?,?,?,?,?)').run('job-demo-001',fixturePolicy.policy_id,1,fixturePolicySnapshot.content_hash,now,'fixture-user');
+db.prepare('INSERT INTO workflow_policy_events VALUES(?,?,?,?,?,?,?)').run('fixture-policy-created',fixturePolicy.policy_id,1,'created',JSON.stringify({policy_id:fixturePolicy.policy_id,version:1,content_hash:fixturePolicySnapshot.content_hash}),now,'fixture-user');
+db.prepare('INSERT INTO workflow_policy_events VALUES(?,?,?,?,?,?,?)').run('fixture-policy-violation',fixturePolicy.policy_id,1,'violation_detected',JSON.stringify({job_id:'job-demo-001',policy_id:fixturePolicy.policy_id,policy_version:1,plan_hash:'a'.repeat(64),predicate_id:'p-fixture-secure-release-qa-accepted',predicate_type:'artifact_field_equals',reason:'fixture predicate failed'}),new Date(Date.now()+1000).toISOString(),'workflow-runtime');
+const corruptPolicy = normalizePolicyDefinition({policy_id:'fixture-corrupt-policy',name:'Fixture Corrupt Policy',constraints:[{id:'local-only',type:'local_execution_only'}]});
+db.prepare('INSERT INTO workflow_policy_versions VALUES(?,?,?,?,?,?,?,?)').run(corruptPolicy.policy_id,1,corruptPolicy.name,corruptPolicy.description,canonicalJson(corruptPolicy),'f'.repeat(64),now,'fixture-user');
+db.prepare('UPDATE tasks SET role=?,metadata_json=? WHERE task_id=?').run('custom-task-1',JSON.stringify({workflow_plan_task_id:'analyze-evidence',custom_role_id:'fixture-analyst',custom_role_version:1,custom_role_name:'Fixture Evidence Analyst',custom_role_skills:[...skillSnapshot,pathDisclosureSkill],raw_metadata_marker:'PARSED_TASK_METADATA_RAW_SENTINEL_92bd'}), 'task-demo-001');
+db.prepare('UPDATE tasks SET metadata_json=? WHERE task_id=?').run(JSON.stringify({custom_role_id:'/home/red-team/private-skill',custom_role_version:1,custom_role_name:'Path-shaped invalid role ID'}), 'task-demo-002');
 db.close();
 
 const app = createDashboardServer({host:'127.0.0.1',port:0,dataDir,dbPath});
@@ -85,15 +110,21 @@ try {
   let result = await get('/api/health');
   assert.equal(result.res.status,200); assert.equal(result.body.status,'ok'); assert.equal(result.body.read_only,true);
   result = await get('/api/overview');
-  assert.equal(result.res.status,200); assert.equal(result.body.counts.jobs,2); assert.equal(result.body.counts.tasks,3); assert.equal(result.body.counts.events,2); assert.equal(result.body.counts.custom_profiles,1); assert.equal(result.body.counts.role_versions,2); assert.equal(result.body.counts.custom_workflows,1); assert.equal(result.body.counts.individual_executions,2);
+  assert.equal(result.res.status,200); assert.equal(result.body.counts.jobs,2); assert.equal(result.body.counts.tasks,3); assert.equal(result.body.counts.events,3); assert.equal(result.body.counts.custom_profiles,2); assert.equal(result.body.counts.role_versions,3); assert.equal(result.body.counts.custom_workflows,1); assert.equal(result.body.counts.individual_executions,2);
   assert.equal(result.body.job_statuses.find(x=>x.status==='active').count,1);
 
   // The role registry exposes durable custom profiles, skill snapshots and exact workflow role-version pins without enabling writes.
   result = await get('/api/roles'); assert.equal(result.res.status,200);
-  assert.equal(result.body.summary.custom_profiles,1); assert.equal(result.body.summary.custom_role_versions,2);
-  assert.equal(result.body.custom_roles.length,1); assert.equal(result.body.custom_roles[0].role_id,'fixture-analyst');
+  assert.equal(result.body.summary.custom_profiles,2); assert.equal(result.body.summary.custom_role_versions,3);
+  assert.equal(result.body.custom_roles.length,2); assert.ok(result.body.custom_roles.some(role=>role.role_id==='fixture-analyst'));
+  assert.equal(result.body.summary.builtin_profile_pins,1);
+  const overlayPin=result.body.builtin_role_profile_pins[0];
+  assert.equal(overlayPin.job_id,'job-demo-002'); assert.equal(overlayPin.built_in_role,'architect');
+  assert.equal(overlayPin.role_id,'fixture-architect-profile'); assert.equal(overlayPin.role_version,1);
+  assert.equal(overlayPin.profile_hash,'9'.repeat(64)); assert.deepEqual(overlayPin.skills,['architecture-evidence']);
+  assert.equal(overlayPin.workflow_status,'failed','proposal pin should show current workflow state without implying approval');
   assert.equal(result.body.custom_roles[0].version,2); assert.equal(result.body.custom_roles[0].skills.length,0,'latest version exposes its own skill state, not a prior version');
-  result = await get('/api/roles?versions=all'); assert.equal(result.body.custom_roles.length,2);
+  result = await get('/api/roles?versions=all'); assert.equal(result.body.custom_roles.length,3);
   const roleV1=result.body.custom_roles.find(role=>role.version===1);
   assert.equal(roleV1.skills[0].name,'review-evidence'); assert.equal(roleV1.skills[0].instruction_chars>20,true); assert.equal(roleV1.skills[0].instructions_preview.length,1200); assert.equal(roleV1.skills[0].instructions_truncated,true);
   assert.match(roleV1.skills[0].instructions_preview,/primary source evidence/);
@@ -105,10 +136,15 @@ try {
   assert.equal(result.body.custom_workflows[0].tasks[0].role_version,1,'workflow pin must remain on exact immutable role version');
   assert.deepEqual(result.body.custom_workflows[0].tasks[0].skills,['review-evidence']);
   result = await get('/api/roles?versions=all&q=review-evidence'); assert.equal(result.body.custom_roles.length,1,'all-version role search must match attached skill names');
+  result = await get('/api/roles?q=architecture-evidence'); assert.equal(result.body.builtin_role_profile_pins.length,1,'role registry search must include overlay Skill names');
+  result = await get('/api/roles?q=fixture-analyst'); assert.equal(result.body.builtin_role_profile_pins.length,0,'overlay pins must obey registry search filters');
 
   // Batch history reads the durable batch ledger, not specialist task counts.
   result = await get('/api/batches'); assert.equal(result.res.status,200);
   assert.equal(result.body.total,1); assert.equal(result.body.summary.batches,1); assert.equal(result.body.summary.items,1);
+  assert.equal(JSON.stringify(result.body).includes('/home/red-team/private-skill'),false,'individual execution projection must not leak invalid path-shaped role IDs');
+  assert.equal(result.body.individual_items.find(item=>item.task_id==='task-demo-002').role_display,'qa');
+  assert.equal(Object.hasOwn(result.body.individual_items.find(item=>item.task_id==='task-demo-002'),'custom_role_id'),false);
   assert.equal(result.body.items[0].batch_id,'batch-demo'); assert.equal(result.body.items[0].items[0].stdout,'stdout body');
   assert.equal(result.body.individual_total,2); assert.equal(result.body.summary.individual_executions,2);
   assert.ok(result.body.individual_items.some(item=>item.task_id==='task-demo-001'&&item.execution_status==='completed'));
@@ -122,6 +158,21 @@ try {
   result = await get('/api/batches?executionLimit=1&executionOffset=1'); assert.equal(result.body.individual_total,2); assert.equal(result.body.individual_items.length,1,'individual execution pagination must work independently of batch pagination');
   result = await get('/api/batches?limit=100&executionLimit=100'); assert.equal(result.body.limit,10); assert.equal(result.body.individual_limit,50,'execution response limits must be clamped to bounded payload sizes');
   result = await get('/api/roles?q=fixture-review-pipeline'); assert.equal(result.body.custom_roles.length,0); assert.equal(result.body.custom_workflows.length,1,'workflow search exposes only the matching workflow pin set');
+
+  // Policy pack snapshots, attachments, hashes and append-only audit are exposed as a bounded read-only registry.
+  result = await get('/api/policies'); assert.equal(result.res.status,200,JSON.stringify(result.body));
+  assert.equal(result.body.summary.policy_count,2); assert.equal(result.body.summary.policy_versions,2);
+  assert.equal(result.body.summary.attachments,1); assert.equal(result.body.summary.audit_events,2); assert.equal(result.body.summary.recorded_violations,1);
+  const securePolicyRow = result.body.policies.find(policy=>policy.policy_id==='fixture-secure-release');
+  assert.equal(securePolicyRow.content_hash,fixturePolicySnapshot.content_hash);
+  assert.equal(securePolicyRow.constraints[0].type,'local_execution_only');
+  assert.equal(securePolicyRow.validation_status,'valid'); assert.equal(securePolicyRow.violation_count,1);
+  const corruptPolicyRow = result.body.policies.find(policy=>policy.policy_id==='fixture-corrupt-policy');
+  assert.equal(corruptPolicyRow.validation_status,'invalid','the dashboard must flag a stored definition/hash mismatch');
+  assert.match(corruptPolicyRow.validation_reason,/hash mismatch/i);
+  assert.equal(result.body.attachments[0].job_id,'job-demo-001'); assert.equal(result.body.attachments[0].version,1); assert.equal(result.body.attachments[0].validation_status,'valid');
+  assert.equal(result.body.events[0].event_type,'violation_detected');
+  result = await get('/api/policies?versions=all&q=secure'); assert.equal(result.body.policies.length,1); assert.equal(result.body.attachments.length,1);
 
   // Search/filter and bounded pagination.
   result = await get('/api/jobs?q=smoke'); assert.equal(result.body.total,1); assert.equal(result.body.items[0].job_id,'job-demo-001');
@@ -139,12 +190,16 @@ try {
   assert.equal(parsedMetaTask.metadata.custom_role_skills[0].files[1].path,'private.md');
   assert.equal(parsedMetaTask.metadata.custom_role_skills[0].files[2].path,'private.txt');
   assert.equal(parsedMetaTask.metadata.custom_role_skills[0].files[3].path,'private.md');
+  assert.equal(parsedMetaTask.metadata.custom_role_skills[1].source.label,'Local skill · private-skill');
+  assert.equal(parsedMetaTask.metadata.custom_role_skills[1].files[0].path,'private.md','nested absolute supporting-file paths are reduced to a basename');
   const oversizedMetaTask=result.body.tasks.find(x=>x.task_id==='task-demo-003');
   assert.equal(oversizedMetaTask.metadata_truncated,true); assert.equal(oversizedMetaTask.metadata_malformed,false); assert.equal(oversizedMetaTask.metadata_available,false);
   assert.equal(oversizedMetaTask.metadata.custom_role_id,'fixture-analyst'); assert.equal(oversizedMetaTask.metadata.custom_role_version,1); assert.equal(oversizedMetaTask.metadata.workflow_plan_task_id,'analyze-large-metadata');
   assert.equal(Object.hasOwn(oversizedMetaTask.metadata,'custom_role_skills'),false,'oversized metadata must not leak the raw/truncated skill object');
+  assert.equal(result.body.tasks.find(x=>x.task_id==='task-demo-002').custom_role,null,'path-shaped role identifiers must not be echoed as custom roles');
+  assert.equal(result.body.tasks.find(x=>x.task_id==='task-demo-002').role_display,'qa');
   const serializedJobDetails=JSON.stringify(result.body);
-  for(const secretPath of ['/home/test-user/.agents/skills/review-evidence','/home/test-user/.agents/skills/review-evidence/private.md','C:\\Users\\fixture\\AppData\\private.txt','\\\\server\\share\\private.md','/home/red-team/private-skill','C:\\Users\\red-team\\private\\skill.txt','\\\\red-team\\share\\private.md']) assert.equal(serializedJobDetails.includes(secretPath),false,`job detail response must not expose ${secretPath}`);
+  for(const secretPath of ['/home/test-user/.agents/skills/review-evidence','/home/test-user/.agents/skills/review-evidence/private.md','C:\\Users\\fixture\\AppData\\private.txt','\\\\server\\share\\private.md','/home/red-team/private-skill','/home/red-team/private-skill/references/private.md','C:\\Users\\red-team\\private\\skill.txt','\\\\red-team\\share\\private.md','PARSED_TASK_METADATA_RAW_SENTINEL_92bd','OVERSIZED_TASK_METADATA_RAW_SENTINEL_73af']) assert.equal(serializedJobDetails.includes(secretPath),false,`job detail response must not expose ${secretPath}`);
   assert.equal(result.body.artifacts[0].producer_role,'Fixture Evidence Analyst (fixture-analyst@1)');
   assert.equal(result.body.attempts[0].attempt_id,'attempt-demo'); assert.match(result.body.results[0].content,/real result content/);
   assert.equal(result.body.artifacts[0].content_length,JSON.stringify({summary:'fixture artifact',details:'z'.repeat(50_000),api_key:'fixture-artifact-secret-456789'}).length);
@@ -172,10 +227,11 @@ try {
   result = await get('/api/files/preview?path=runtime%2Flinked.txt'); assert.equal(result.res.status,403);
 
   // Serving security headers, local-only Host/Origin guard, and read-only method boundary.
-  result = await get('/'); assert.equal(result.res.status,200); assert.match(result.res.headers.get('content-security-policy'),/default-src 'self'/); assert.equal(result.res.headers.get('x-content-type-options'),'nosniff'); assert.match(result.body,/Search workflows…/); assert.match(result.body,/data-view="roles"/); assert.match(result.body,/data-view="batches"/); assert.match(result.body,/id="role-list"/); assert.match(result.body,/id="batch-list"/); assert.match(result.body,/id="individual-execution-list"/);
+  result = await get('/'); assert.equal(result.res.status,200); assert.match(result.res.headers.get('content-security-policy'),/default-src 'self'/); assert.equal(result.res.headers.get('x-content-type-options'),'nosniff'); assert.match(result.body,/Search workflows…/); assert.match(result.body,/data-view="roles"/); assert.match(result.body,/data-view="policies"/); assert.match(result.body,/id="policy-list"/); assert.match(result.body,/id="policy-attachment-list"/); assert.match(result.body,/data-view="batches"/); assert.match(result.body,/id="role-list"/); assert.match(result.body,/id="builtin-role-profile-pin-list"/); assert.match(result.body,/id="batch-list"/); assert.match(result.body,/id="individual-execution-list"/);
   assert.match(result.body,/id="attention-list"/); assert.match(result.body,/id="clear-workflow-filters"/); assert.match(result.body,/ux-overrides\.css/);
   result = await get('/ux-overrides.css'); assert.equal(result.res.status,200); assert.match(result.body,/\.attention-panel/); assert.match(result.body,/\.pin-button/); assert.match(result.body,/\.attention-list\s*\{\s*display:\s*grid/); assert.match(result.body,/\.attention-head\s*\{\s*display:\s*flex/); assert.match(result.body,/\.registry-summary/); assert.match(result.body,/\.registry-summary\.batch-summary-grid/); assert.match(result.body,/\.individual-executions-panel \.data-table/); assert.match(result.body,/\.role-skill-card/); assert.match(result.body,/\.batch-item-card/); assert.match(result.body,/color-scheme:\s*light/); assert.match(result.body,/--bg:\s*#f2f4f3/); assert.match(result.body,/max-width:\s*720px/); assert.doesNotMatch(result.body,/linear-gradient|radial-gradient|filter:\s*blur|backdrop-filter:\s*blur|hover:scale/);
-  result = await get('/app.js'); assert.equal(result.res.status,200); assert.match(result.body,/function isStaleJob/); assert.match(result.body,/function copyText/); assert.match(result.body,/sessionStorage/); assert.match(result.body,/data-quick-status/); assert.match(result.body,/auto-refresh every 20s/); assert.match(result.body,/setInterval\([^\n]+20000\)/); assert.match(result.body,/el\('details','payload-block'\)/); assert.match(result.body,/assign_children/); assert.match(result.body,/function loadRoles\(/); assert.match(result.body,/function loadBatches\(/); assert.match(result.body,/individual-execution-list/); assert.match(result.body,/finishedCell\.append\(finished\?relativeTime\(finished\)/); assert.match(result.body,/taskRoleLabel\(/); assert.match(result.body,/querySelector\('\.filter-rail'\)\?\.classList\.add\('hidden'\)/); assert.match(result.body,/workflow-results-meta.*state\.jobTotal.*search applied/); assert.match(result.body,/updatedTd\.append\(relativeTime\(job\.updated_at\)\)/); assert.match(result.body,/actionsTd\.append\(actions\)/);
+  result = await get('/app.js'); assert.equal(result.res.status,200); assert.match(result.body,/function isStaleJob/); assert.match(result.body,/function copyText/); assert.match(result.body,/sessionStorage/); assert.match(result.body,/data-quick-status/); assert.match(result.body,/auto-refresh every 20s/); assert.match(result.body,/setInterval\([^\n]+20000\)/); assert.match(result.body,/el\('details','payload-block'\)/); assert.match(result.body,/assign_children/); assert.match(result.body,/function loadRoles\(/); assert.match(result.body,/builtin-role-profile-pin-list/); assert.match(result.body,/proposal pin; approval\/execution not implied/); assert.match(result.body,/function loadBatches\(/); assert.match(result.body,/individual-execution-list/); assert.match(result.body,/finishedCell\.append\(finished\?relativeTime\(finished\)/); assert.match(result.body,/taskRoleLabel\(/); assert.match(result.body,/querySelector\('\.filter-rail'\)\?\.classList\.add\('hidden'\)/); assert.match(result.body,/workflow-results-meta.*state\.jobTotal.*search applied/); assert.match(result.body,/updatedTd\.append\(relativeTime\(job\.updated_at\)\)/); assert.match(result.body,/actionsTd\.append\(actions\)/);
+  assert.match(result.body,/async function loadPolicies\(/); assert.match(result.body,/api\/policies/); assert.match(result.body,/policy-event-list/);
   result = await get('/not-an-asset.js'); assert.equal(result.res.status,404);
   result = await get('/api/health',{'origin':'http://attacker.example'}); assert.equal(result.res.status,403);
   result = await rawGet('/api/health',{'host':'attacker.example'}); assert.equal(result.res.status,403);

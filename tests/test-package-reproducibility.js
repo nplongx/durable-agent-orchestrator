@@ -220,8 +220,8 @@ try {
     assert.deepEqual(firstArchive.extracted.get(relative), bytes, `packaged entry must match exact source bytes: ${relative}`);
     assert.deepEqual(secondArchive.extracted.get(relative), bytes, `second packaged entry must match exact source bytes: ${relative}`);
   }
-  assert.equal(firstArchive.names.length, 37,
-    'candidate payload must include the strict JSON parser dependency, packaged MCP stdio backpressure regression, graceful-shutdown, backpressure-deadline and EOF/framing regressions, pinned production behavioral QA harness, and exact runtime closure');
+  assert.equal(firstArchive.names.length, 44,
+    'candidate payload must include the strict JSON parser dependency, hybrid workflow catalog/definition, pinned role-profile and policy runtime modules, packaged MCP stdio backpressure and shutdown regressions, pinned production behavioral QA harness, and exact runtime closure');
   assert.ok(firstArchive.extracted.has('src/runtime/strict-json.js'), 'strict JSON consumer hardening must ship its parser dependency in the MCP bundle');
 
   // Exercise the collector against a disposable source tree containing a

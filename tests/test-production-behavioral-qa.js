@@ -146,13 +146,13 @@ try {
   const listed = await sendRpc('tools/list');
   const tools = listed.result?.tools;
   assert.ok(Array.isArray(tools));
-  assert.equal(tools.length, 37, 'the local plugin contract must expose exactly 37 tools');
+  assert.equal(tools.length, 46, 'the local plugin contract must expose exactly 46 tools');
   const toolsByName = new Map(tools.map(tool => [tool.name, tool]));
   for (const name of ['workflow_create', 'workflow_approve', 'workflow_dispatch', 'workflow_prepare_tasks', 'workflow_next_task', 'workflow_validate_artifact']) {
     assert.ok(toolsByName.has(name), `required local QA tool is missing: ${name}`);
     assert.equal(toolsByName.get(name).inputSchema?.type, 'object', `${name} must expose an object schema`);
   }
-  console.log('PRODUCTION QA MCP INITIALIZE/37-TOOL DISCOVERY PASS');
+  console.log('PRODUCTION QA MCP INITIALIZE/46-TOOL DISCOVERY PASS');
 
   const validQa = await callTool('workflow_validate_artifact', {
     artifact_type: 'qa-report', role: 'qa',

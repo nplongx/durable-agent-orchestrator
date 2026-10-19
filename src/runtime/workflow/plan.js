@@ -1,6 +1,8 @@
 import { parseStrictJson } from '../strict-json.js';
 import { getAgentContract } from './agent-contracts.js';
 import { validateSuccessContract } from './success-contract.js';
+import { composePolicySuccessContract } from './policy-contract.js';
+import { validateRoleProfileOverlay } from './role-profiles.js';
 
 export function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -58,6 +60,28 @@ export function validateExecutionPlan(plan) {
     try { validateSuccessContract(plan.success_contract); }
     catch (error) { throw new Error(`execution plan success_contract is invalid: ${error.message}`); }
   }
+  if (Object.hasOwn(plan, 'policy_packs') || Object.hasOwn(plan, 'base_success_contract')) {
+    if (!Array.isArray(plan.policy_packs) || plan.policy_packs.length === 0 || !plan.base_success_contract) {
+      throw new Error('execution plan policy_packs and base_success_contract must both be present for an attached policy set');
+    }
+    try {
+      const recomposed = composePolicySuccessContract(plan.base_success_contract, plan.policy_packs, {
+        workflowId: plan.workflow_id,
+        children: plan.children
+      });
+      if (canonicalJson(recomposed.success_contract) !== canonicalJson(plan.success_contract)) {
+        throw new Error('merged success contract does not match immutable policy snapshots');
+      }
+      if (canonicalJson(recomposed.policy_packs) !== canonicalJson(plan.policy_packs)) {
+        throw new Error('policy snapshots are not canonical');
+      }
+      if (canonicalJson(recomposed.base_success_contract) !== canonicalJson(plan.base_success_contract)) {
+        throw new Error('base success contract is not canonical');
+      }
+    } catch (error) {
+      throw new Error(`execution plan policy contract is invalid: ${error.message}`);
+    }
+  }
   const ids = new Set();
   for (const task of [...plan.children, plan.synthesis]) {
     if (!task?.id || ids.has(task.id)) throw new Error('invalid or duplicate execution plan task: ' + task?.id);
@@ -76,6 +100,13 @@ export function validateExecutionPlan(plan) {
       if (task.execution.executor !== 'ExecutionManager') throw new Error('deterministic task must use ExecutionManager: ' + task.id);
       if (!task.execution.executable || !Array.isArray(task.execution.args)) throw new Error('structured execution contract required: ' + task.id);
       if (!task.execution.cwd || !Number.isInteger(task.execution.timeout_ms) || task.execution.timeout_ms <= 0) throw new Error('invalid deterministic execution metadata: ' + task.id);
+    }
+    if (Object.hasOwn(task.execution || {}, 'role_profile_overlay')) {
+      if (plan.custom_workflow || !['standard-engineering', 'hybrid-engineering'].includes(plan.workflow_id) || task === plan.synthesis || task.execution?.deterministic) {
+        throw new Error(`role profile overlay is not permitted for task ${task.id} in workflow ${plan.workflow_id}`);
+      }
+      try { validateRoleProfileOverlay(task.role, task.execution.role_profile_overlay); }
+      catch (error) { throw new Error(`execution plan role profile overlay is invalid: ${task.id}: ${error.message}`); }
     }
   }
   // Terminalization and recovery consume required_children independently of
@@ -117,9 +148,12 @@ export function validateExecutionPlan(plan) {
   // must have a producer in the task's transitive immutable dependency graph;
   // otherwise the runtime can issue a reviewer/CTO task that is structurally
   // incapable of receiving the evidence its contract requires.
-  if (!plan.custom_workflow && (plan.workflow_id === 'standard-engineering' ||
+  if (!plan.custom_workflow && (plan.workflow_id === 'standard-engineering' || plan.workflow_id === 'hybrid-engineering' ||
       (plan.workflow_id === 'engineering' && plan.workflow_version >= 2))) {
     for (const task of [...plan.children, plan.synthesis]) {
+      // Hybrid deterministic tasks expose their typed output via the immutable
+      // execution contract, not a built-in specialist role contract.
+      if (task.execution?.deterministic === true) continue;
       const contract = getAgentContract(task.role);
       const ancestors = new Set();
       const collectAncestors = dependencyId => {
@@ -128,8 +162,11 @@ export function validateExecutionPlan(plan) {
         for (const ancestor of tasksById.get(dependencyId).dependencies) collectAncestors(ancestor);
       };
       for (const dependency of task.dependencies) collectAncestors(dependency);
-      const availableInputs = new Set([...ancestors]
-        .flatMap(ancestorId => getAgentContract(tasksById.get(ancestorId).role).outputs));
+      const availableInputs = new Set([...ancestors].flatMap(ancestorId => {
+        const ancestor = tasksById.get(ancestorId);
+        if (ancestor.execution?.output_artifact_type) return [ancestor.execution.output_artifact_type];
+        return getAgentContract(ancestor.role).outputs;
+      }));
       for (const input of contract.inputs) {
         if (input === 'job.request') continue;
         if (!availableInputs.has(input)) {

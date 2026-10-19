@@ -89,6 +89,34 @@ Khi `workflow_next_task` trả một custom-role task, mô tả task sẽ chứa
 
 Vì skill và file hỗ trợ được đưa vào prompt, chúng chiếm context và có thể chứa prompt injection. Chỉ nhập nguồn đáng tin, review nội dung trước khi dùng, và tránh chứa token, mật khẩu, thông tin cá nhân hay dữ liệu riêng tư. Cơ chế này nhắm tới mức local-development chạy được; chưa phải sandbox hay quy trình supply-chain an toàn cho production.
 
+## Gắn profile và Skills vào built-in workflow
+
+`standard-engineering` hỗ trợ tùy chọn `role_bindings` trong `workflow_create`. Binding tham chiếu custom role đã lưu, không nhận prompt hoặc nội dung Skill tùy ý trong proposal:
+
+```json
+{
+  "workflow": "standard-engineering",
+  "role_bindings": [
+    {
+      "role": "architect",
+      "custom_role_id": "architecture-specialist",
+      "custom_role_version": 1
+    }
+  ]
+}
+```
+
+- `role` là built-in specialist cần nhận guidance bổ sung; mỗi role chỉ được bind một lần.
+- `custom_role_id` và `custom_role_version` phải trỏ đến version đã tồn tại. Không có lựa chọn ngầm `latest`; version không hợp lệ sẽ bị từ chối.
+- Khi tạo proposal, runtime ghi `profile_hash` của snapshot. Khi approve/compile, runtime resolve lại đúng version và xác minh hash. Profile prompt, Skill instructions và supporting text được pin vào immutable execution plan, nằm trong plan hash.
+- Input contract của profile phải bao phủ inputs bắt buộc của built-in role và output artifact type phải trùng khớp. Binding sai schema, version, hash hoặc contract phải fail closed.
+- Overlay hiện chỉ hỗ trợ `standard-engineering`. Các role chuyên môn gồm `product-owner`, `researcher`, `architect`, `engineer`, `security`, `qa`, `platform`, `writer` và `reviewer`.
+- Built-in role contract vẫn có thẩm quyền: role identity, capability, permissions, allowed tools, executor, artifact schema, dependencies, completion criteria và safety/review gates không bị profile ghi đè. `permissions` và `allowed_tools` trong profile không cấp thêm quyền runtime.
+- `cto` và `system-workflow-coordinator` không thể nhận overlay. Custom workflows giữ nguyên cơ chế role-version pinning hiện có.
+- Không truyền `role_bindings` giữ hành vi built-in cũ. Không tự động gán mọi Skill cho mọi role.
+
+Dashboard hiển thị proposal pins tại **Roles & skills → Built-in role profile overlays**. Đây là binding của proposal; không nên hiểu là workflow đã được approve hoặc chạy chỉ vì hàng pin xuất hiện. Skill vẫn là nội dung không đáng tin cậy: review nguồn trước khi dùng, không chạy scripts nhập vào và không đưa secrets vào Skill.
+
 ## Tham khảo định dạng
 
 - [Agent Skills specification](https://github.com/agentskills/agentskills) — quy ước `SKILL.md`, frontmatter và thư mục tài nguyên.

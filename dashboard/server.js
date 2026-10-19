@@ -5,6 +5,7 @@ import os from 'node:os';
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { inspectStoredWorkflowPolicyRow } from '../src/runtime/workflow/policy-contract.js';
 
 const DEFAULT_DATA_DIR = path.resolve(process.env.CHAT_ON_STEROIDS_DATA_DIR || process.env.WORKFLOW_DATA_DIR || path.join(os.homedir(), '.chat-on-steroids', 'agent-orchestrator'));
 const DEFAULT_DB_PATH = path.resolve(process.env.CHAT_ON_STEROIDS_WORKFLOW_DB || process.env.WORKFLOW_DB || path.join(DEFAULT_DATA_DIR, 'workflow.db'));
@@ -93,11 +94,15 @@ function mapArtifact(row, includeContent = false) {
   const metadata = parseJson(row.metadata_json, 4_000);
   const evidence = parseJson(row.evidence_json, 8_000);
   const producerMetadata = parseJson(row.producer_task_metadata_json, 4_000).value;
-  const producerRoleId = typeof row.producer_custom_role_id === 'string' ? row.producer_custom_role_id : producerMetadata?.custom_role_id;
-  const producerRoleVersion = row.producer_custom_role_version ?? producerMetadata?.custom_role_version;
+  const producerRoleIdCandidate = typeof row.producer_custom_role_id === 'string' ? row.producer_custom_role_id : producerMetadata?.custom_role_id;
+  const producerRoleId = typeof producerRoleIdCandidate === 'string' && producerRoleIdCandidate.length <= 80 && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(producerRoleIdCandidate)
+    ? producerRoleIdCandidate : null;
+  const producerRoleVersionCandidate = row.producer_custom_role_version ?? producerMetadata?.custom_role_version;
+  const parsedProducerRoleVersion = Number(producerRoleVersionCandidate);
+  const producerRoleVersion = Number.isSafeInteger(parsedProducerRoleVersion) && parsedProducerRoleVersion >= 1 ? parsedProducerRoleVersion : null;
   const producerRoleName = row.producer_custom_role_name || producerMetadata?.custom_role_name;
-  const customRole = typeof producerRoleId === 'string'
-    ? `${boundedText(producerRoleName || producerRoleId, 120)} (${producerRoleId}@${Number(producerRoleVersion) || '?'})`
+  const customRole = producerRoleId && producerRoleVersion !== null
+    ? `${boundedText(producerRoleName || producerRoleId, 120)} (${producerRoleId}@${producerRoleVersion})`
     : null;
   const content = boundedText(row.content, MAX_PREVIEW_CHARS);
   const out = {
@@ -121,11 +126,15 @@ function safeTask(row) {
   const metadataTooLarge = metadataSize > 4_000 || metadataParsed.truncated;
   const rawMetadata = !metadataTooLarge && metadataParsed.value && typeof metadataParsed.value === 'object' && !Array.isArray(metadataParsed.value)
     ? metadataParsed.value : null;
-  const roleId = typeof row.custom_role_id === 'string' ? row.custom_role_id : rawMetadata?.custom_role_id;
-  const roleVersion = row.custom_role_version ?? rawMetadata?.custom_role_version;
+  const roleIdCandidate = typeof row.custom_role_id === 'string' ? row.custom_role_id : rawMetadata?.custom_role_id;
+  const roleId = typeof roleIdCandidate === 'string' && roleIdCandidate.length <= 80 && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(roleIdCandidate)
+    ? roleIdCandidate : null;
+  const roleVersionCandidate = row.custom_role_version ?? rawMetadata?.custom_role_version;
+  const parsedRoleVersion = Number(roleVersionCandidate);
+  const roleVersion = Number.isSafeInteger(parsedRoleVersion) && parsedRoleVersion >= 1 ? parsedRoleVersion : null;
   const roleName = typeof row.custom_role_name === 'string' ? row.custom_role_name : rawMetadata?.custom_role_name;
-  const customRole = typeof roleId === 'string'
-    ? { role_id: roleId, version: Number(roleVersion) || null, name: boundedText(roleName || roleId, 120) }
+  const customRole = roleId && roleVersion !== null
+    ? { role_id: roleId, version: roleVersion, name: boundedText(roleName || roleId, 120) }
     : null;
   const metadataMalformed = !metadataTooLarge && metadataParsed.malformed;
   const metadata = metadataTooLarge || metadataMalformed || !rawMetadata
@@ -148,7 +157,15 @@ function safeTask(row) {
         custom_role_skills_truncated: rawMetadata.custom_role_skills.length > 8
       } : {})
     };
-  const { metadata_json: _storedMetadataJson, ...safeRow } = row;
+  const {
+    metadata_json: _storedMetadataJson,
+    metadata_size: _storedMetadataSize,
+    workflow_plan_task_id: _storedWorkflowPlanTaskId,
+    custom_role_id: _storedCustomRoleId,
+    custom_role_version: _storedCustomRoleVersion,
+    custom_role_name: _storedCustomRoleName,
+    ...safeRow
+  } = row;
   return {
     ...safeRow,
     description: boundedText(row.description, 5_000),
@@ -332,6 +349,42 @@ function getRoles(db, params) {
         tasks, created_at: row.created_at, created_by: boundedText(row.created_by, 200) };
     });
   }
+
+  // Built-in role overlays are pinned by the immutable workflow proposal
+  // event, not inferred from whichever custom-role version is newest.
+  const builtinRoleProfilePins = [];
+  if (dbHasTable(db, 'events') && dbHasTable(db, 'jobs') && dbHasTable(db, 'custom_role_versions')) {
+    const proposalRows = queryRows(db, `SELECT e.job_id,j.title,j.status AS workflow_status,e.payload_json,e.created_at
+      FROM events e JOIN jobs j ON j.job_id=e.job_id
+      WHERE e.type IN ('job.proposal_requested','job.proposal_refined')
+        AND e.rowid=(SELECT p.rowid FROM events p WHERE p.job_id=e.job_id
+          AND p.type IN ('job.proposal_requested','job.proposal_refined') ORDER BY p.created_at DESC,p.rowid DESC LIMIT 1)
+      ORDER BY e.created_at DESC LIMIT 500`);
+    for (const row of proposalRows) {
+      const parsed = parseJson(row.payload_json, 64_000);
+      if (parsed.malformed || !Array.isArray(parsed.value?.role_profile_bindings)) continue;
+      for (const binding of parsed.value.role_profile_bindings) {
+        if (!binding || typeof binding.role !== 'string' || typeof binding.custom_role_id !== 'string' ||
+            !Number.isSafeInteger(binding.custom_role_version) || binding.custom_role_version < 1) continue;
+        const role = queryOne(db, 'SELECT name,output_artifact_type,skills_json FROM custom_role_versions WHERE role_id=? AND version=?', [binding.custom_role_id, binding.custom_role_version]);
+        const skills = safeJsonArray(role?.skills_json, 180_000, { redactLocalSkillPaths: false }).map(skill => boundedText(skill.name || 'unnamed-skill', 80));
+        const item = {
+          job_id: boundedText(row.job_id, 200), workflow_name: boundedText(row.title || row.job_id, 500),
+          workflow_status: boundedText(row.workflow_status || 'unknown', 40),
+          workflow_id: boundedText(parsed.value.workflowId || 'standard-engineering', 80),
+          built_in_role: boundedText(binding.role, 80), task_id: boundedText(`standard-${binding.role}`, 100),
+          role_id: boundedText(binding.custom_role_id, 80), role_version: binding.custom_role_version,
+          role_name: boundedText(role?.name || binding.custom_role_id, 120),
+          output_artifact_type: boundedText(role?.output_artifact_type || '', 80), skills,
+          profile_hash: /^[a-f0-9]{64}$/.test(binding.profile_hash || '') ? binding.profile_hash : null,
+          created_at: row.created_at
+        };
+        if (!q || [item.job_id,item.workflow_name,item.workflow_id,item.built_in_role,item.role_id,item.role_name,...skills].some(value => String(value).toLowerCase().includes(q.toLowerCase()))) {
+          builtinRoleProfilePins.push(item);
+        }
+      }
+    }
+  }
   const latestRoles = dbHasTable(db, 'custom_role_versions')
     ? queryRows(db, 'SELECT skills_json FROM custom_role_versions v WHERE version=(SELECT MAX(x.version) FROM custom_role_versions x WHERE x.role_id=v.role_id)')
     : [];
@@ -342,11 +395,13 @@ function getRoles(db, params) {
       custom_profiles: dbHasTable(db, 'custom_role_versions') ? Number(queryOne(db, 'SELECT COUNT(DISTINCT role_id) n FROM custom_role_versions')?.n || 0) : 0,
       custom_role_versions: tableCount(db, 'custom_role_versions'),
       attached_skills: latestRoles.reduce((sum, row) => sum + safeJsonArray(row.skills_json, 180_000).length, 0),
-      custom_workflows: dbHasTable(db, 'custom_workflow_versions') ? Number(queryOne(db, 'SELECT COUNT(DISTINCT workflow_id) n FROM custom_workflow_versions')?.n || 0) : 0
+      custom_workflows: dbHasTable(db, 'custom_workflow_versions') ? Number(queryOne(db, 'SELECT COUNT(DISTINCT workflow_id) n FROM custom_workflow_versions')?.n || 0) : 0,
+      builtin_profile_pins: builtinRoleProfilePins.length
     },
     builtin_roles: builtinRoles.map(row => ({ role: row.role, task_count: Number(row.task_count), job_count: Number(row.job_count) })),
     custom_roles: customRoles,
     custom_workflows: customWorkflows,
+    builtin_role_profile_pins: builtinRoleProfilePins,
     edit_note: 'This dashboard is deliberately GET-only. Use custom_role_create/update and custom_workflow_create/update tools to change definitions; run approval flow before execution.'
   };
 }
@@ -409,11 +464,16 @@ function getBatches(db, params) {
     ${individualJoin} ${individualFilter} ORDER BY COALESCE(t.execution_started_at,t.updated_at,t.created_at) DESC LIMIT ? OFFSET ?`, [...individualValues, executionLimit, executionOffset]);
   const individualTotal = Number(queryOne(db, `SELECT COUNT(*) AS n ${individualJoin} ${individualFilter}`, individualValues)?.n || 0);
   const individualItems = individualRows.map(row => {
-    const customRole = typeof row.custom_role_id === 'string';
+    const roleId = typeof row.custom_role_id === 'string' && row.custom_role_id.length <= 80 && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(row.custom_role_id)
+      ? row.custom_role_id : null;
+    const parsedRoleVersion = Number(row.custom_role_version);
+    const roleVersion = Number.isSafeInteger(parsedRoleVersion) && parsedRoleVersion >= 1 ? parsedRoleVersion : null;
+    const customRole = roleId && roleVersion !== null;
     const roleDisplay = customRole
-      ? `${boundedText(row.custom_role_name || row.custom_role_id, 120)} (${boundedText(row.custom_role_id,80)}@${Number(row.custom_role_version) || '?'})`
+      ? `${boundedText(row.custom_role_name || roleId, 120)} (${roleId}@${roleVersion})`
       : row.role;
-    return { ...row, role_display: roleDisplay, job_title: boundedText(row.job_title || row.job_id, 1_000),
+    const { custom_role_id: _customRoleId, custom_role_version: _customRoleVersion, custom_role_name: _customRoleName, ...safeRow } = row;
+    return { ...safeRow, role_display: roleDisplay, job_title: boundedText(row.job_title || row.job_id, 1_000),
       stdout: boundedText(row.stdout, 6_000), stderr: boundedText(row.stderr, 6_000),
       stdout_truncated: Number(row.stdout_size || 0) > 6_000, stderr_truncated: Number(row.stderr_size || 0) > 6_000 };
   });
@@ -541,6 +601,115 @@ function previewFile(dataRoot, relative) {
     return {path:relative,size:info.size,preview:boundedText(text,MAX_FILE_BYTES),truncated:info.size>read,limit:MAX_FILE_BYTES,modified_at:info.mtime.toISOString()};
   } finally { fs.closeSync(fd); }
 }
+function getPolicies(db, params) {
+  const q = boundedText(params.get('q') || '', 120).trim();
+  const includeVersions = params.get('versions') === 'all';
+  const limit = clampInt(params.get('limit'), 100, 1, 200);
+  const hasVersions = dbHasTable(db, 'workflow_policy_versions');
+  const hasAttachments = dbHasTable(db, 'workflow_policy_attachments');
+  const hasEvents = dbHasTable(db, 'workflow_policy_events');
+  if (!hasVersions) return {
+    mode: 'read-only registry snapshot', generated_at: new Date().toISOString(), include_versions: includeVersions,
+    summary: { policy_count: 0, policy_versions: 0, attachments: 0, audit_events: 0 },
+    policies: [], attachments: [], events: [],
+    note: 'Policy registry has not been initialized by the MCP runtime yet.'
+  };
+  const rows = includeVersions
+    ? queryRows(db, `SELECT * FROM workflow_policy_versions WHERE (?='' OR instr(lower(policy_id),lower(?))>0 OR instr(lower(name),lower(?))>0 OR instr(lower(description),lower(?))>0) ORDER BY policy_id,version DESC LIMIT ?`, [q, q, q, q, limit])
+    : queryRows(db, `SELECT v.* FROM workflow_policy_versions v JOIN (SELECT policy_id,MAX(version) AS version FROM workflow_policy_versions GROUP BY policy_id) latest ON latest.policy_id=v.policy_id AND latest.version=v.version WHERE (?='' OR instr(lower(v.policy_id),lower(?))>0 OR instr(lower(v.name),lower(?))>0 OR instr(lower(v.description),lower(?))>0) ORDER BY v.name COLLATE NOCASE,v.policy_id LIMIT ?`, [q, q, q, q, limit]);
+  const policies = rows.map(row => {
+    const parsed = parseJson(row.definition_json, 20_000);
+    const definition = parsed.value && typeof parsed.value === 'object' && !Array.isArray(parsed.value) ? parsed.value : {};
+    const integrity = inspectStoredWorkflowPolicyRow(row);
+    const safeRule = rule => {
+      if (!rule || typeof rule !== 'object' || Array.isArray(rule)) return null;
+      const result = {};
+      for (const key of ['id','type','description','artifact_type','producer_role','field','task_id','role']) {
+        if (typeof rule[key] === 'string') result[key] = redactSensitiveText(boundedText(rule[key], key === 'description' ? 1000 : 100));
+      }
+      if (['string','number','boolean'].includes(typeof rule.expected)) result.expected = typeof rule.expected === 'string' ? redactSensitiveText(boundedText(rule.expected, 500)) : rule.expected;
+      return result;
+    };
+    const constraints = Array.isArray(definition.constraints) ? definition.constraints.slice(0, 32).map(safeRule).filter(Boolean) : [];
+    const successCriteria = Array.isArray(definition.success_criteria) ? definition.success_criteria.slice(0, 32).map(safeRule).filter(Boolean) : [];
+    return {
+      policy_id: boundedText(row.policy_id, 80), version: Math.max(1, Number(row.version) || 1),
+      name: redactSensitiveText(boundedText(row.name, 120)), description: redactSensitiveText(boundedText(row.description, 2000)),
+      content_hash: typeof row.content_hash === 'string' && /^[a-f0-9]{64}$/.test(row.content_hash) ? row.content_hash : null,
+      created_at: row.created_at, created_by: boundedText(row.created_by, 120),
+      schema_version: definition.schema_version === 1 ? 1 : null,
+      constraints, success_criteria: successCriteria,
+      constraint_count: constraints.length, success_criteria_count: successCriteria.length,
+      definition_truncated: parsed.truncated || parsed.malformed,
+      validation_status: integrity.validation_status,
+      validation_reason: integrity.valid ? null : redactSensitiveText(integrity.reason),
+      violation_count: null
+    };
+  });
+  const violationCounts = hasEvents ? queryRows(db,
+    "SELECT policy_id,version,COUNT(*) AS n FROM workflow_policy_events WHERE event_type='violation_detected' GROUP BY policy_id,version", []).reduce((result, row) => {
+      result[`${row.policy_id}@${row.version}`] = Number(row.n) || 0;
+      return result;
+    }, Object.create(null)) : Object.create(null);
+  for (const policy of policies) policy.violation_count = violationCounts[`${policy.policy_id}@${policy.version}`] || 0;
+  let attachments = [];
+  if (hasAttachments) {
+    const sql = `SELECT a.job_id,a.policy_id,a.version,a.content_hash,a.attached_at,a.attached_by,j.title AS job_title,j.state AS job_state,j.status AS job_status,
+      v.policy_id AS version_policy_id,v.version AS stored_policy_version,v.name AS policy_name,v.description AS policy_description,
+      v.definition_json AS policy_definition_json,v.content_hash AS policy_version_content_hash,v.created_at AS policy_created_at,v.created_by AS policy_created_by
+      FROM workflow_policy_attachments a LEFT JOIN jobs j ON j.job_id=a.job_id
+      LEFT JOIN workflow_policy_versions v ON v.policy_id=a.policy_id AND v.version=a.version
+      WHERE (?='' OR instr(lower(a.policy_id),lower(?))>0 OR instr(lower(v.name),lower(?))>0 OR instr(lower(j.title),lower(?))>0 OR instr(lower(a.job_id),lower(?))>0)
+      ORDER BY a.attached_at DESC,a.job_id LIMIT ?`;
+    attachments = queryRows(db, sql, [q, q, q, q, q, limit]).map(row => {
+      const integrity = row.version_policy_id ? inspectStoredWorkflowPolicyRow({
+        policy_id: row.version_policy_id, version: row.stored_policy_version, name: row.policy_name,
+        description: row.policy_description, definition_json: row.policy_definition_json,
+        content_hash: row.policy_version_content_hash, created_at: row.policy_created_at, created_by: row.policy_created_by
+      }) : { valid: false, validation_status: 'invalid', reason: 'pinned policy version is missing' };
+      const pinMatches = integrity.valid && row.content_hash === row.policy_version_content_hash;
+      return {
+        job_id: boundedText(row.job_id, 200), policy_id: boundedText(row.policy_id, 80), version: Math.max(1, Number(row.version) || 1),
+        content_hash: typeof row.content_hash === 'string' && /^[a-f0-9]{64}$/.test(row.content_hash) ? row.content_hash : null,
+        name: redactSensitiveText(boundedText(row.policy_name || row.policy_id, 120)), attached_at: row.attached_at, attached_by: boundedText(row.attached_by, 120),
+        job_title: redactSensitiveText(boundedText(row.job_title || row.job_id, 180)), job_state: boundedText(row.job_state || 'unknown', 40), job_status: boundedText(row.job_status || 'unknown', 40),
+        validation_status: pinMatches ? 'valid' : 'invalid',
+        validation_reason: pinMatches ? null : redactSensitiveText(integrity.reason || 'attachment hash does not match its pinned policy version')
+      };
+    });
+  }
+  const events = hasEvents ? queryRows(db,
+    `SELECT event_id,policy_id,version,event_type,payload_json,created_at,created_by FROM workflow_policy_events
+      WHERE (?='' OR instr(lower(policy_id),lower(?))>0) ORDER BY created_at DESC LIMIT ?`, [q, q, Math.min(limit, 100)]).map(row => ({
+        event_id: boundedText(row.event_id, 80), policy_id: boundedText(row.policy_id, 80), version: Number.isSafeInteger(Number(row.version)) ? Number(row.version) : null,
+        event_type: boundedText(row.event_type, 80), payload: redactPolicyEventPayload(parseJson(row.payload_json, 3000).value),
+        created_at: row.created_at, created_by: boundedText(row.created_by, 120)
+      })) : [];
+  return {
+    mode: 'read-only registry snapshot', generated_at: new Date().toISOString(), include_versions: includeVersions,
+    summary: {
+      policy_count: Number(queryOne(db, 'SELECT COUNT(DISTINCT policy_id) n FROM workflow_policy_versions')?.n || 0),
+      policy_versions: tableCount(db, 'workflow_policy_versions'),
+      attachments: tableCount(db, 'workflow_policy_attachments'),
+      audit_events: tableCount(db, 'workflow_policy_events'),
+      recorded_violations: hasEvents
+        ? Number(queryOne(db, "SELECT COUNT(*) AS n FROM workflow_policy_events WHERE event_type='violation_detected'")?.n || 0)
+        : 0
+    },
+    policies, attachments, events,
+    enforcement_note: 'Stored rules use a closed JSON predicate catalog. Runtime enforcement is independent at immutable-plan validation and synthesis/terminalization; this dashboard is read-only and does not validate or change rules.'
+  };
+}
+function redactPolicyEventPayload(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const result = {};
+  for (const key of ['job_id','policy_id','policy_version','version','content_hash','policy_content_hash','plan_hash','predicate_id','predicate_type','reason','previous_version']) {
+    const item = value[key];
+    if (typeof item === 'string') result[key] = redactSensitiveText(boundedText(item, key === 'reason' ? 1000 : 200));
+    else if (typeof item === 'number' && Number.isSafeInteger(item)) result[key] = item;
+  }
+  return result;
+}
 function requestHostOk(req, expectedHost, port) {
   const host = req.headers.host || '';
   if (host.toLowerCase() !== expectedHost.toLowerCase()) return false;
@@ -585,6 +754,7 @@ export function createDashboardServer(options = {}) {
         if (route === '/api/health') payload = { status:'ok', database:'connected', database_path:path.basename(dbPath), data_root:path.basename(dataRoot), mode:'local-read-only', read_only:true, host, port:server.address()?.port || port };
         else if (route === '/api/overview') payload = getOverview(db);
         else if (route === '/api/roles') payload = getRoles(db,url.searchParams);
+        else if (route === '/api/policies') payload = getPolicies(db,url.searchParams);
         else if (route === '/api/batches') payload = getBatches(db,url.searchParams);
         else if (route === '/api/jobs') payload = getJobs(db,url.searchParams);
         else if (route.startsWith('/api/jobs/')) {

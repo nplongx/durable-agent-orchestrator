@@ -4,6 +4,8 @@ import { productionTaskSpec } from './catalog/production.js';
 import { engineeringTaskSpec } from './catalog/engineering.js';
 import { standardEngineeringTaskSpec } from './catalog/standard-engineering.js';
 import { StandardEngineeringWorkflow } from './definitions/standard-engineering.js';
+import { HybridEngineeringWorkflow } from './definitions/hybrid-engineering.js';
+import { hybridEngineeringTaskSpecs } from './catalog/hybrid-engineering.js';
 
 export function validateWorkflowDefinition(definition) {
   if (!definition?.id) throw new Error('workflow definition id is required');
@@ -33,5 +35,15 @@ export function validateStandardEngineeringWorkflow(workspace = process.env.WORK
   validateWorkflowDefinition(StandardEngineeringWorkflow);
   for (const taskId of StandardEngineeringWorkflow.requiredChildren) standardEngineeringTaskSpec(taskId, { workspace });
   standardEngineeringTaskSpec(StandardEngineeringWorkflow.synthesisTask, { workspace });
+  return true;
+}
+
+export function validateHybridEngineeringWorkflow(workspace = process.env.WORKFLOW_WORKSPACE) {
+  validateWorkflowDefinition(HybridEngineeringWorkflow);
+  for (const task of hybridEngineeringTaskSpecs(workspace)) {
+    if (!HybridEngineeringWorkflow.requiredChildren.includes(task.id)) {
+      throw new Error(`hybrid engineering task is missing from requiredChildren: ${task.id}`);
+    }
+  }
   return true;
 }

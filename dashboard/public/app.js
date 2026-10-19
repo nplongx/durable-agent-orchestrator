@@ -4,6 +4,7 @@ const state = {
   jobQuery: '', statusFilter: '', phaseFilter: '', eventQuery: '', eventType: '', artifactQuery: '', artifactType: '', filePath: '', selectedEvent: null, selectedArtifact: null,
   currentJob: null, jobTab: 'tasks', autoRefresh: true, lastSync: null, attentionJobs: [], attentionFilter: 'all', pinnedJobs: new Set(), filePreviewPath: '',
   roles: null, roleQuery: '', roleVersions: 'latest', selectedRoleKey: null,
+  policies: null, policyQuery: '', policyVersions: 'latest',
   batches: [], batchTotal: 0, batchOffset: 0, batchLimit: 50, batchQuery: '', batchStatus: '', selectedBatchId: null,
   individualExecutions: [], individualExecutionTotal: 0, individualExecutionOffset: 0, individualExecutionLimit: 50
 };
@@ -18,7 +19,7 @@ state.statusFilter = typeof sessionPrefs.statusFilter === 'string' ? sessionPref
 state.phaseFilter = typeof sessionPrefs.phaseFilter === 'string' ? sessionPrefs.phaseFilter : '';
 state.pinnedJobs = new Set(Array.isArray(sessionPrefs.pinnedJobs) ? sessionPrefs.pinnedJobs.filter(x => typeof x === 'string') : []);
 const $ = id => document.getElementById(id);
-const views = ['overview','workflows','roles','batches','events','artifacts','files'];
+const views = ['overview','workflows','roles','policies','batches','events','artifacts','files'];
 let toastTimer = null;
 let pollTimer = null;
 let refreshInFlight = false;
@@ -122,9 +123,9 @@ function setView(view) {
     $('workflows-view').querySelector('.section-toolbar')?.classList.remove('hidden');$('workflows-view').querySelector('.table-panel')?.classList.remove('hidden');
   }
   document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
-  const meta={overview:['Operations','Overview','Workflow status, recent activity and exceptions.'],workflows:['Workflows','Registry','Search, filter and inspect workflow runs.'],roles:['Role','Registry','Saved role versions, skill snapshots and custom workflow pins.'],batches:['Batch','Execution','Durable command batches and per-item execution evidence.'],events:['Events','Stream','Recent events across workflow runs.'],artifacts:['Artifacts','Library','Stored results, reports and evidence.'],files:['Local files','Explorer','Read-only text and log previews.']}[view];
-  updateHero(...meta); $('crumb-current').textContent=({overview:'Overview',workflows:'Workflows',roles:'Roles & skills',batches:'Batch execution',events:'Event stream',artifacts:'Artifacts',files:'File explorer'})[view];
-  if(view==='workflows') loadJobs(); if(view==='roles') loadRoles(); if(view==='batches') loadBatches(); if(view==='events') loadEvents(); if(view==='artifacts') loadArtifacts(); if(view==='files') loadFiles(state.filePath);
+  const meta={overview:['Operations','Overview','Workflow status, recent activity and exceptions.'],workflows:['Workflows','Registry','Search, filter and inspect workflow runs.'],roles:['Role','Registry','Saved role versions, skill snapshots and custom workflow pins.'],policies:['Workflow','Policies','Reusable policy packs, immutable versions and workflow attachments.'],batches:['Batch','Execution','Durable command batches and per-item execution evidence.'],events:['Events','Stream','Recent events across workflow runs.'],artifacts:['Artifacts','Library','Stored results, reports and evidence.'],files:['Local files','Explorer','Read-only text and log previews.']}[view];
+  updateHero(...meta); $('crumb-current').textContent=({overview:'Overview',workflows:'Workflows',roles:'Roles & skills',policies:'Policies',batches:'Batch execution',events:'Event stream',artifacts:'Artifacts',files:'File explorer'})[view];
+  if(view==='workflows') loadJobs(); if(view==='roles') loadRoles(); if(view==='policies') loadPolicies(); if(view==='batches') loadBatches(); if(view==='events') loadEvents(); if(view==='artifacts') loadArtifacts(); if(view==='files') loadFiles(state.filePath);
   if(view==='overview') renderOverview();
 }
 function setCountsText(id, count) { $(id).textContent=fmtNumber(count); }
@@ -367,7 +368,8 @@ async function loadRoles(quiet=false) {
       ['Custom profiles',summary.custom_profiles||0,'Saved role identities'],
       ['Stored versions',summary.custom_role_versions||0,'Immutable versions'],
       ['Attached skills',summary.attached_skills||0,'Latest version snapshots'],
-      ['Custom workflows',summary.custom_workflows||0,'Role pins per task']
+      ['Custom workflows',summary.custom_workflows||0,'Role pins per task'],
+      ['Built-in overlays',summary.builtin_profile_pins||0,'Proposal-pinned profiles']
     ]);
     $('role-list-caption').textContent=`${(data.custom_roles||[]).length} profile versions shown · ${state.roleVersions==='all'?'all versions':'latest version per profile'}`;
     const rolesBody=$('role-list');clear(rolesBody);
@@ -383,6 +385,9 @@ async function loadRoles(quiet=false) {
     const pins=$('role-workflow-list');clear(pins);const pinRows=(data.custom_workflows||[]).flatMap(workflow=>(workflow.tasks||[]).map(task=>({workflow,task})));
     if(!pinRows.length){const tr=el('tr'),td=el('td','table-empty','No custom workflow role pins found. Built-in workflows use their fixed specialist contracts.');td.colSpan=5;tr.append(td);pins.append(tr);}
     for(const {workflow,task} of pinRows){const tr=el('tr');const workflowCell=el('td');append(workflowCell,el('strong','',workflow.name),el('small','mono',`${workflow.workflow_id}@${workflow.version}`));const roleCell=el('td');const roleButton=el('button','role-select-button');append(roleButton,el('strong','',task.role_name),el('small','mono',`${task.role_id}@${task.role_version}`));roleButton.addEventListener('click',()=>inspectPinnedRole(task.role_id,task.role_version));append(tr,workflowCell,el('td','mono',task.task_id),roleCell,el('td','',task.output_artifact_type),el('td','',task.skills?.length?task.skills.join(', '):'No skills'));roleCell.append(roleButton);pins.append(tr);}
+    const overlayPins=$('builtin-role-profile-pin-list');clear(overlayPins);const overlays=data.builtin_role_profile_pins||[];
+    if(!overlays.length){const tr=el('tr'),td=el('td','table-empty','No built-in workflow proposal has pinned a custom profile overlay.');td.colSpan=5;tr.append(td);overlayPins.append(tr);}
+    for(const pin of overlays){const tr=el('tr');const workflowCell=el('td');append(workflowCell,el('strong','',pin.workflow_name||pin.job_id),el('small','mono',`${pin.workflow_id} · ${pin.job_id}`),el('small','',`Workflow status: ${pin.workflow_status||'unknown'} · proposal pin; approval/execution not implied`));const roleCell=el('td','mono',pin.built_in_role);const profileCell=el('td');const profileButton=el('button','role-select-button');append(profileButton,el('strong','',pin.role_name),el('small','mono',`${pin.role_id}@${pin.role_version}`));profileButton.addEventListener('click',()=>inspectPinnedRole(pin.role_id,pin.role_version));profileCell.append(profileButton);append(tr,workflowCell,roleCell,profileCell,el('td','mono',pin.profile_hash||'Hash unavailable'),el('td','',pin.skills?.length?pin.skills.join(', '):'No skills'));overlayPins.append(tr);}
     $('role-edit-note').textContent=data.edit_note||'This registry is read-only. Use the custom-role tools to change definitions.';
     const selected=(data.custom_roles||[]).find(role=>roleKey(role)===state.selectedRoleKey);
     if(selected)inspectRole(selected);else if(data.custom_roles?.length)inspectRole(data.custom_roles[0]);else{
@@ -452,6 +457,51 @@ async function loadBatches(quiet=false) {
     const selected=state.batches.find(batch=>batch.batch_id===state.selectedBatchId);if(selected)inspectBatch(selected);else if(state.batches.length)inspectBatch(state.batches[0]);else{state.selectedBatchId=null;$('batch-inspector-title').textContent='No batch selected';$('batch-inspector-subtitle').textContent='No durable batch record is available.';const inspector=$('batch-inspector-body');clear(inspector);inspector.className='inspector-placeholder';inspector.append(el('span','', 'No batch record is selected. Individual task runs are listed below; they are not grouped batch records.'))}
   }catch(error){if(!quiet)notify(`Unable to load batch history: ${error.message}`,true);}
 }
+async function loadPolicies(quiet=false) {
+  try {
+    state.policyQuery=$('policy-search').value.trim();state.policyVersions=$('policy-version-filter').value||'latest';
+    const params=new URLSearchParams({q:state.policyQuery,versions:state.policyVersions,limit:'200'});
+    const data=await api(`/api/policies?${params}`);state.policies=data;
+    const summary=data.summary||{};
+    $('nav-policies-count').textContent=fmtNumber(summary.policy_count||0);
+    renderRegistrySummary('policy-summary',[
+      ['Policy packs',summary.policy_count||0,'Reusable policy identities'],
+      ['Immutable versions',summary.policy_versions||0,'Stored content snapshots'],
+      ['Workflow attachments',summary.attachments||0,'Exact version pins'],
+      ['Audit events',summary.audit_events||0,'Append-only policy history'],
+      ['Recorded violations',summary.recorded_violations||0,'Historical failed predicates; not automatically cleared']
+    ]);
+    $('policy-list-caption').textContent=`${(data.policies||[]).length} ${state.policyVersions==='all'?'stored versions':'latest policy versions'} shown · SHA-256 identifies the immutable definition`;
+    const policies=$('policy-list');clear(policies);
+    if(!data.policies?.length){const tr=el('tr'),td=el('td','table-empty',state.policyQuery?'No policy packs match this filter.':(data.note||'No workflow policy packs have been created. Use workflow_policy_create and workflow_policy_attach through the MCP tools.'));td.colSpan=6;tr.append(td);policies.append(tr);}
+    for(const policy of data.policies||[]){
+      const tr=el('tr');
+      const name=el('td');append(name,el('strong','',policy.name),el('small','mono',policy.policy_id),el('small','',policy.description||'No description recorded.'));
+      const rules=el('td');append(rules,el('span','status-pill status-live',`${policy.constraint_count||0} constraints`),el('span','status-pill status-live',`${policy.success_criteria_count||0} criteria`));
+      const types=[...(policy.constraints||[]),...(policy.success_criteria||[])].map(rule=>`${rule.type||'unknown'} (${rule.id||'unidentified'})`);
+      if(types.length)rules.title=types.join('\n');
+      const hash=el('td','mono',policy.content_hash?`${policy.content_hash.slice(0,12)}…${policy.content_hash.slice(-8)}`:'Invalid/missing hash');hash.title=policy.content_hash||'';
+      const validation=el('td');validation.append(pill(policy.validation_status||'unknown'),el('small','',`${policy.violation_count||0} recorded violation${Number(policy.violation_count||0)===1?'':'s'}`));if(policy.validation_reason)validation.title=policy.validation_reason;
+      const created=el('td');created.append(policy.created_at?relativeTime(policy.created_at):el('span','','—'));
+      if(policy.definition_truncated)created.append(el('small','status-failed','Definition preview truncated or malformed'));
+      append(tr,name,el('td','mono',`v${policy.version}`),rules,hash,validation,created);policies.append(tr);
+    }
+    const attachments=$('policy-attachment-list');clear(attachments);
+    if(!data.attachments?.length){const tr=el('tr'),td=el('td','table-empty','No workflow policy attachments match this filter. Packs may exist without being attached to a proposal.');td.colSpan=6;tr.append(td);attachments.append(tr);}
+    for(const attachment of data.attachments||[]){
+      const tr=el('tr');const workflow=el('td');append(workflow,el('strong','',attachment.job_title||attachment.job_id),el('small','mono',compactId(attachment.job_id,24)));
+      const policy=el('td');append(policy,el('strong','',attachment.name||attachment.policy_id),el('small','mono',`${attachment.policy_id}@${attachment.version}`));
+      const hash=el('td','mono',attachment.content_hash?`${attachment.content_hash.slice(0,12)}…${attachment.content_hash.slice(-8)}`:'Invalid/missing hash');hash.title=attachment.content_hash||'';
+      const validation=el('td');validation.append(pill(attachment.validation_status||'unknown'));if(attachment.validation_reason)validation.title=attachment.validation_reason;
+      const when=el('td');when.append(attachment.attached_at?relativeTime(attachment.attached_at):el('span','','—'));
+      append(tr,workflow,policy,pill(attachment.job_state||attachment.job_status),hash,validation,when);tr.title=`Attached by ${attachment.attached_by||'unknown actor'}`;attachments.append(tr);
+    }
+    const events=$('policy-event-list');clear(events);
+    if(!data.events?.length){const tr=el('tr'),td=el('td','table-empty','No policy audit events match this filter.');td.colSpan=5;tr.append(td);events.append(tr);}
+    for(const event of data.events||[]){const tr=el('tr');const type=el('td');append(type,pill(event.event_type),el('small','mono',compactId(event.event_id,20)));const policy=el('td');append(policy,el('strong','',event.policy_id),el('small','mono',event.version?`v${event.version}`:'—'));const when=el('td');when.append(event.created_at?relativeTime(event.created_at):el('span','','—'));append(tr,type,policy,el('td','mono',event.version?`v${event.version}`:'—'),el('td','',event.created_by||'—'),when);tr.title=JSON.stringify(event.payload||{});events.append(tr);}
+    if(data.enforcement_note)$('policies-view').dataset.enforcementNote=data.enforcement_note;
+  } catch(error) {if(!quiet)notify(`Unable to load policy registry: ${error.message}`,true);}
+}
 async function loadFiles(relative='') {
   state.filePath=relative;try{const data=await api(`/api/files?path=${encodeURIComponent(relative)}`);const target=$('file-list');clear(target);$('file-breadcrumb').textContent=data.path?`/${data.path}`:'/';$('file-up').disabled=!data.parent;$('file-up').onclick=()=>loadFiles(data.parent||'');if(!data.entries.length)target.append(el('div','table-empty','No supported text/log files in this folder.'));for(const item of data.entries){const row=el('div',`file-row ${item.kind}`);append(row,el('span','file-glyph',item.kind==='directory'?'▰':'▤'),el('span','file-name',item.name),el('span','file-size',item.kind==='file'?humanSize(item.size):'DIR'),el('span','file-date',ago(item.modified_at)));row.title=item.path;row.addEventListener('click',()=>item.kind==='directory'?loadFiles(item.path):previewFile(item.path));target.append(row);}if(data.truncated)target.append(el('div','file-footnote','Showing the first 200 entries. Narrow folders to browse further.'));
   }catch(error){notify(`Unable to browse local files: ${error.message}`,true)}
@@ -460,7 +510,7 @@ function humanSize(value){const n=Number(value||0);if(n<1024)return `${n} B`;if(
 async function previewFile(relative){
   try{const f=await api(`/api/files/preview?path=${encodeURIComponent(relative)}`);state.filePreviewPath=relative;$('file-preview-title').textContent=relative.split('/').pop();$('file-preview-meta').textContent=`${humanSize(f.size)} · modified ${dateTime(f.modified_at)}${f.truncated?' · PREVIEW TRUNCATED':''}`;$('file-preview-content').textContent=f.preview+(f.truncated?'\n\n[Preview truncated at 64 KB]':'');const copyPath=$('file-copy-path');if(copyPath)copyPath.disabled=false;notify(`Opened read-only preview: ${relative}`)}catch(error){notify(`File preview denied: ${error.message}`,true)}
 }
-async function refreshAll(quiet=false){if(refreshInFlight)return false;refreshInFlight=true;try{const ok=await refreshOverview();if(state.view==='workflows')await loadJobs(quiet);if(state.view==='roles')await loadRoles(quiet);if(state.view==='batches')await loadBatches(quiet);if(state.view==='events')await loadEvents();if(state.view==='artifacts')await loadArtifacts();if(state.view==='files'&&state.filePath)await loadFiles(state.filePath);return ok;}finally{refreshInFlight=false;}}
+async function refreshAll(quiet=false){if(refreshInFlight)return false;refreshInFlight=true;try{const ok=await refreshOverview();if(state.view==='workflows')await loadJobs(quiet);if(state.view==='roles')await loadRoles(quiet);if(state.view==='policies')await loadPolicies(quiet);if(state.view==='batches')await loadBatches(quiet);if(state.view==='events')await loadEvents();if(state.view==='artifacts')await loadArtifacts();if(state.view==='files'&&state.filePath)await loadFiles(state.filePath);return ok;}finally{refreshInFlight=false;}}
 function debounce(fn,delay=180){let timer;return(...args)=>{clearTimeout(timer);timer=setTimeout(()=>fn(...args),delay)}}
 for(const b of document.querySelectorAll('.nav-item')) b.addEventListener('click',()=>setView(b.dataset.view));
 for(const b of document.querySelectorAll('[data-open-view]')) b.addEventListener('click',()=>setView(b.dataset.openView));
@@ -478,6 +528,8 @@ $('artifact-search').addEventListener('input',debounce(()=>{state.artifactOffset
 $('artifact-type-filter').addEventListener('change',()=>{state.artifactOffset=0;loadArtifacts()});
  $('role-search').addEventListener('input',debounce(()=>loadRoles(true)));
  $('role-version-filter').addEventListener('change',()=>loadRoles());
+ $('policy-search').addEventListener('input',debounce(()=>loadPolicies(true)));
+ $('policy-version-filter').addEventListener('change',()=>loadPolicies());
  $('batch-search').addEventListener('input',debounce(()=>{state.batchOffset=0;state.individualExecutionOffset=0;loadBatches(true)}));
  $('batch-status-filter').addEventListener('change',()=>{state.batchOffset=0;state.individualExecutionOffset=0;loadBatches()});
 $('file-refresh').addEventListener('click',()=>loadFiles(state.filePath));
