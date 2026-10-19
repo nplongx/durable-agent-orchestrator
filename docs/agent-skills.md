@@ -59,7 +59,7 @@ The `custom_role_create`, `custom_role_update`, and `custom_role_clone` tools ac
 }
 ```
 
-Local paths can be absolute, begin with `~/`, or be relative to the configured workspace (`CHAT_ON_STEROIDS_WORKSPACE` or its resolved workspace setting). The importer requires a root `SKILL.md` and rejects symbolic links inside local skill directories. It skips hidden files/directories and common dependency/build folders.
+Local paths can be absolute, begin with `~/`, or be relative to the configured workspace (`RUNALITH_WORKSPACE` or the configured workspace setting). The importer requires a root `SKILL.md` and rejects symbolic links inside local skill directories. It skips hidden files/directories and common dependency/build folders.
 
 Supported remote forms are:
 

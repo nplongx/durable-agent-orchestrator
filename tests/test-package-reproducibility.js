@@ -9,17 +9,20 @@ import { validateZipEntryTypes } from '../benchmarks/plugin-workflow-benchmark/p
 import { serializePluginPackageMetadata } from '../scripts/plugin-package-metadata.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const script = path.join(root, 'scripts/package-chat-on-steroids-plugin.sh');
+const script = path.join(root, 'scripts/package-runalith-mcpb.sh');
 const packagerSource = fs.readFileSync(script, 'utf8');
-assert.match(packagerSource, /CHAT_ON_STEROIDS_WORKFLOW_DB="\$SMOKE_DB_PATH"/, 'packager MCP smoke must override ambient DB paths with its isolated candidate-local DB');
+assert.ok(packagerSource.includes('RUNALITH_DATA_DIR="$SMOKE_DATA_DIR"'), 'packager MCP smoke must isolate the Runalith data directory');
+assert.ok(packagerSource.includes('RUNALITH_WORKFLOW_DB="$SMOKE_DB_PATH"'), 'packager MCP smoke must isolate the Runalith database');
+assert.ok(packagerSource.includes('RUNALITH_EXECUTION_TMP_DIR="$SMOKE_DATA_DIR/runtime"'), 'packager MCP smoke must isolate Runalith execution temp');
+assert.ok(packagerSource.includes('RUNALITH_WORKSPACE="$EXTRACTED"'), 'packager MCP smoke must isolate the Runalith workspace');
 assert.match(packagerSource, /WORKFLOW_DB="\$SMOKE_DB_PATH"/, 'packager MCP smoke must isolate the legacy workflow DB override as well');
 assert.match(packagerSource, /WORKFLOW_DATA_DIR="\$SMOKE_DATA_DIR"/, 'packager MCP smoke must isolate the SQLite parent directory');
 assert.match(packagerSource, /SMOKE_ROOT="\$\(mktemp -d/, 'MCP smoke SQLite state must live outside a potentially shared checkout parent');
 assert.doesNotMatch(packagerSource, /SMOKE_DATA_DIR="\$EXTRACTED\/\.smoke-data"/, 'MCP smoke state must not be placed beneath the extracted bundle path');
 assert.match(packagerSource, /unzip -q \"\$BUNDLE\" -d \"\$EXTRACTED\"/, 'packager must extract the completed archive before running MCP smoke/E2E');
 assert.match(packagerSource, /node \"\$EXTRACTED\/server\/index\.js\"/, 'MCP handshake must use the archive-extracted server bytes');
-assert.match(packagerSource, /node \"\$EXTRACTED\/tests\/test-chat-on-steroids-plugin\.js\"/, 'full local MCP E2E must use archive-extracted test/runtime bytes');
-assert.doesNotMatch(packagerSource, /node \"\$PAYLOAD\/(?:server\/index\.js|tests\/test-chat-on-steroids-plugin\.js)\"/, 'packager must not substitute the pre-archive staging tree for packaged E2E');
+assert.match(packagerSource, /node \"\$EXTRACTED\/tests\/test-runalith-plugin\.js\"/, 'full local MCP E2E must use archive-extracted test/runtime bytes');
+assert.doesNotMatch(packagerSource, /node \"\$PAYLOAD\/(?:server\/index\.js|tests\/test-runalith-plugin\.js)\"/, 'packager must not substitute the pre-archive staging tree for packaged E2E');
 assert.match(packagerSource, /test-extracted-package-tool-schemas\.mjs/, 'packager must validate schemas from the exact candidate archive');
 assert.match(packagerSource, /plugin-package-metadata\.mjs/, 'packager must project full-app metadata into the local-only runtime dependency closure');
 const serverSource = fs.readFileSync(path.join(root, 'server/index.js'), 'utf8');
@@ -38,13 +41,13 @@ function packageInputSnapshot(label) {
   fs.mkdirSync(stage);
   const explicit = [
     'README.md', 'LICENSE', 'plugin/manifest.json',
-    'tests/test-chat-on-steroids-plugin.js',
+    'tests/test-runalith-plugin.js',
     'tests/test-mcp-stdio-backpressure.mjs',
     'tests/test-mcp-graceful-signal-shutdown-20261017.js',
     'tests/test-mcp-shutdown-backpressure-deadline-20261017.js',
     'tests/test-mcp-eof-shutdown-framing-20261017.js',
     'tests/test-production-behavioral-qa.js',
-    'scripts/package-chat-on-steroids-plugin.sh',
+    'scripts/package-runalith-mcpb.sh',
     'scripts/collect-plugin-runtime.mjs',
     'scripts/plugin-package-metadata.mjs',
   ];
@@ -206,7 +209,7 @@ try {
   assert.deepEqual(firstArchive.names, secondArchive.names, 'independent builds must have identical ordered payload entry names');
   const expectedArchiveNames = new Set(sourceBefore.files.map(([relative]) => {
     if (relative === 'plugin/manifest.json') return 'manifest.json';
-    if (relative === 'scripts/package-chat-on-steroids-plugin.sh' || relative === 'scripts/collect-plugin-runtime.mjs' ||
+    if (relative === 'scripts/package-runalith-mcpb.sh' || relative === 'scripts/collect-plugin-runtime.mjs' ||
         relative === 'scripts/plugin-package-metadata.mjs') return null;
     return relative;
   }).filter(Boolean));

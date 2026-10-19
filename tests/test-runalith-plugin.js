@@ -342,13 +342,13 @@ function artifactFor(role) {
     'product-owner': { scope: 'Define the local plugin workflow acceptance scope.', acceptance_criteria: ['Approval required', 'Durable results'], non_goals: ['Cloud execution'] },
     researcher: { findings: ['MCP stdio is sufficient for local tool integration.'], sources: ['repository inspection'], limitations: ['Host conversation performs reasoning.'] },
     architect: { components: ['MCP stdio server', 'SQLite store', 'local execution manager'], interfaces: ['tools/list', 'tools/call'], failure_modes: ['SQLite lock', 'invalid artifact'], implementation_boundary: 'No cloud runner or HTTP adapter.' },
-    engineer: { summary: 'Implemented the local plugin test fixture.', files_changed: [], verification: ['Plugin E2E test process ran.'], execution: { mode: 'chat-on-steroids-local-tools', exit_code: null, session_id: null, evidence_refs: ['test:chat-on-steroids-plugin'] } },
+    engineer: { summary: 'Implemented the local plugin test fixture.', files_changed: [], verification: ['Plugin E2E test process ran.'], execution: { mode: 'chat-on-steroids-local-tools', exit_code: null, session_id: null, evidence_refs: ['test:runalith-plugin'] } },
     security: { threats: ['Unapproved execution', 'secret leakage'], findings: ['Approval gate and output redaction are present.'], decision: 'accept' },
     qa: { checks: ['stdio protocol', 'approval gate', 'DAG ordering'], results: ['all assertions passed'], decision: 'accept' },
     platform: { runtime: { mode: 'local stdio' }, deployment: { package: 'mcpb' }, recovery: { state: 'SQLite durable state' } },
     writer: { summary: 'Local plugin workflow instructions are documented.', user_facing_changes: ['MCP tools'], verification: ['README reviewed'] },
     reviewer: { requirementsSatisfied: true, architectureConformant: true, securityAccepted: true, qaAccepted: true, platformAccepted: true, documentationAccepted: true, implementationIssues: [], evidenceIssues: [], securityIssues: [], blockingIssues: [], decision: 'accept' },
-    cto: { decision: 'approve', summary: 'Local plugin acceptance test completed.', accepted_requirements: ['local-only orchestration'], unresolved_risks: [], follow_up_actions: [], evidence_refs: ['test:chat-on-steroids-plugin'] }
+    cto: { decision: 'approve', summary: 'Local plugin acceptance test completed.', accepted_requirements: ['local-only orchestration'], unresolved_risks: [], follow_up_actions: [], evidence_refs: ['test:runalith-plugin'] }
   };
   return values[role];
 }
@@ -420,7 +420,7 @@ async function testCase01ConsumptionAckSigkillRecovery(crashBoundary = 'after-ac
   try {
     serverProcess = launch(crashBoundary);
     const initialized = await serverProcess.rpcCall('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'case01-ack-crash-test', version: '1' } });
-    assert.equal(initialized.result?.serverInfo?.name, 'chat-on-steroids-local-orchestrator');
+    assert.equal(initialized.result?.serverInfo?.name, 'runalith-agent-orchestrator');
     await serverProcess.rpcCall('tools/list');
     await serverProcess.callTool('custom_role_create', {
       role_id: 'ack-crash-requirements', name: 'Ack crash requirements', description: 'Isolated crash/recovery fixture.',
@@ -483,7 +483,7 @@ async function testCase01ConsumptionAckSigkillRecovery(crashBoundary = 'after-ac
 
     serverProcess = launch(false);
     const restartedInit = await serverProcess.rpcCall('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'case01-ack-restart-test', version: '1' } });
-    assert.equal(restartedInit.result?.serverInfo?.name, 'chat-on-steroids-local-orchestrator');
+    assert.equal(restartedInit.result?.serverInfo?.name, 'runalith-agent-orchestrator');
     const interrupted = await serverProcess.callTool('workflow_recovery_verify', { job_id: run.job_id });
     assert.equal(interrupted.status, 'NEEDS_ATTENTION', 'fresh process must report the persisted CTO-to-report crash window');
     assert.equal(interrupted.checks.find(check => check.name === 'case01_durable_consumption_ack_binds_actual_bytes_and_full_lineage')?.pass,
@@ -514,7 +514,7 @@ async function testCase01ConsumptionAckSigkillRecovery(crashBoundary = 'after-ac
 
 try {
   const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
-  assert.equal(init.result?.serverInfo?.name, 'chat-on-steroids-local-orchestrator');
+  assert.equal(init.result?.serverInfo?.name, 'runalith-agent-orchestrator');
   const listed = await rpc('tools/list');
   assert.equal(listed.result.tools.length, 46);
   for (const name of ['workflow_coordinator_role', 'workflow_coordinator_step']) assert(listed.result.tools.some(tool => tool.name === name), `missing exposed tool ${name}`);
@@ -2381,7 +2381,7 @@ try {
   assert.equal(mixedRework.synthesis_allowed, false);
   assert.deepEqual(mixedRework.targetRoles, ['engineer', 'security', 'qa', 'writer', 'reviewer']);
 
-  console.log('chat-on-steroids local plugin E2E: PASS (stdio MCP, approval, versioned custom-role CRUD/clone/validation, custom-workflow CRUD/clone/version pinning, DAG contract/cycle validation, immutable plan preview/approval, separate execution approval, custom workflow DAG execution and typed artifacts, 9-task built-in DAG, evidence-provenance rejection/restoration, deterministic local execution, production checks, reviewer rejection guard and provenance-preserving reviewer revision, mixed-finding rework routing, failure terminalization, synthesis, terminalization; no cloud/API key)');
+  console.log('Runalith local MCP E2E: PASS (stdio MCP, approval, versioned custom-role CRUD/clone/validation, custom-workflow CRUD/clone/version pinning, DAG contract/cycle validation, immutable plan preview/approval, separate execution approval, custom workflow DAG execution and typed artifacts, 9-task built-in DAG, evidence-provenance rejection/restoration, deterministic local execution, production checks, reviewer rejection guard and provenance-preserving reviewer revision, mixed-finding rework routing, failure terminalization, synthesis, terminalization; no cloud/API key)');
 } finally {
   child.stdin.end();
   await new Promise(resolve => {

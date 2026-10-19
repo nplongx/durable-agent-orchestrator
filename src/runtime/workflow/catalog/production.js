@@ -13,7 +13,7 @@ export const PRODUCTION_QA_SUCCESS_MARKERS = Object.freeze([
 ]);
 // Deliberately checked in, not computed-and-trusted from the current bytes.
 // Update this pin only alongside a reviewed source change and successor package.
-export const PRODUCTION_QA_HARNESS_SHA256 = '175b04fe9bedc3c600135620dccde0cdb50838f8e2f9002679c73e36d14471b3';
+export const PRODUCTION_QA_HARNESS_SHA256 = '89d52a2b5113e2346f45c2d2ae37706896ecdee081004e8e6e5525b4e667f42c';
 
 function resolvePluginRoot() {
   // Source checkout layout: src/runtime/workflow/catalog -> repository root

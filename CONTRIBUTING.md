@@ -9,8 +9,8 @@ Thanks for helping improve Durable Agent Orchestrator / Local Agent Orchestrator
 - `tmux` only for tests or workflows that exercise deterministic local execution.
 
 ```bash
-git clone https://github.com/nplongx/durable-agent-orchestrator.git
-cd durable-agent-orchestrator
+git clone https://github.com/nplongx/runalith.git
+cd runalith
 npm ci
 npm test
 ```

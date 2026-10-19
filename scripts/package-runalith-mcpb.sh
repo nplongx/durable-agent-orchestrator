@@ -20,11 +20,11 @@ assert_regular_source() {
   done
   [[ "$(realpath -e "$current")" == "$current" ]] || { echo "Refusing non-canonical package source: $relative" >&2; exit 2; }
 }
-for SOURCE in README.md LICENSE package.json plugin/manifest.json tests/test-chat-on-steroids-plugin.js tests/test-production-behavioral-qa.js tests/test-extracted-package-tool-schemas.mjs tests/test-execution-lease-fencing.js tests/test-mcp-stdio-backpressure.mjs tests/test-temp-dir.js tests/test-mcp-graceful-signal-shutdown-20261017.js tests/test-mcp-shutdown-backpressure-deadline-20261017.js tests/test-mcp-eof-shutdown-framing-20261017.js scripts/package-chat-on-steroids-plugin.sh scripts/collect-plugin-runtime.mjs scripts/plugin-package-metadata.mjs; do
+for SOURCE in README.md LICENSE package.json plugin/manifest.json tests/test-runalith-plugin.js tests/test-production-behavioral-qa.js tests/test-extracted-package-tool-schemas.mjs tests/test-execution-lease-fencing.js tests/test-mcp-stdio-backpressure.mjs tests/test-temp-dir.js tests/test-mcp-graceful-signal-shutdown-20261017.js tests/test-mcp-shutdown-backpressure-deadline-20261017.js tests/test-mcp-eof-shutdown-framing-20261017.js scripts/package-runalith-mcpb.sh scripts/collect-plugin-runtime.mjs scripts/plugin-package-metadata.mjs; do
   assert_regular_source "$SOURCE"
 done
 VERSION="$(node -p "require('$ROOT/package.json').version")"
-OUT="${PLUGIN_BUNDLE_OUT:-$ROOT/dist/chat-on-steroids-local-orchestrator-${VERSION}-candidate-$(date -u +%Y%m%dT%H%M%SZ).mcpb}"
+OUT="${PLUGIN_BUNDLE_OUT:-$ROOT/dist/runalith-${VERSION}-candidate-$(date -u +%Y%m%dT%H%M%SZ).mcpb}"
 if [[ "$OUT" != /* ]]; then OUT="$ROOT/$OUT"; fi
 # Canonicalize the output parent (including symlinked parents) before comparing the
 # protected release path, so ./, ../, and symlink aliases cannot bypass the guard.
@@ -64,7 +64,7 @@ const source = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
 fs.writeFileSync(outputPath, serializePluginPackageMetadata(source), { flag: 'wx', mode: 0o644 });
 NODE
 mkdir -p "$PAYLOAD/tests"
-cp "$ROOT/tests/test-chat-on-steroids-plugin.js" "$PAYLOAD/tests/"
+cp "$ROOT/tests/test-runalith-plugin.js" "$PAYLOAD/tests/"
 cp "$ROOT/tests/test-production-behavioral-qa.js" "$PAYLOAD/tests/"
 cp "$ROOT/tests/test-mcp-stdio-backpressure.mjs" "$PAYLOAD/tests/"
 cp "$ROOT/tests/test-mcp-graceful-signal-shutdown-20261017.js" "$PAYLOAD/tests/"
@@ -126,6 +126,10 @@ mkdir -p "$SMOKE_DATA_DIR"
 chmod 700 "$SMOKE_DATA_DIR"
 SMOKE_DB_PATH="$SMOKE_DATA_DIR/workflow.db"
 SMOKE_OUTPUT="$(env -u OPENAI_API_KEY \
+  RUNALITH_DATA_DIR="$SMOKE_DATA_DIR" \
+  RUNALITH_WORKFLOW_DB="$SMOKE_DB_PATH" \
+  RUNALITH_EXECUTION_TMP_DIR="$SMOKE_DATA_DIR/runtime" \
+  RUNALITH_WORKSPACE="$EXTRACTED" \
   CHAT_ON_STEROIDS_DATA_DIR="$SMOKE_DATA_DIR" \
   CHAT_ON_STEROIDS_WORKFLOW_DB="$SMOKE_DB_PATH" \
   WORKFLOW_DATA_DIR="$SMOKE_DATA_DIR" \
@@ -144,7 +148,7 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 const { parseStrictJson } = await import(pathToFileURL(process.env.STRICT_JSON_MODULE));
 const lines = process.env.SMOKE_OUTPUT.trim().split(/\r?\n/).map((line, index) => parseStrictJson(line, `MCP smoke response ${index + 1}`));
-if (lines.length !== 2 || lines[0].result?.serverInfo?.name !== 'chat-on-steroids-local-orchestrator') throw new Error('bundled MCP initialize failed');
+if (lines.length !== 2 || lines[0].result?.serverInfo?.name !== 'runalith-agent-orchestrator') throw new Error('bundled MCP initialize failed');
 const exposed = lines[1].result?.tools || [];
 const expected = parseStrictJson(fs.readFileSync(process.env.EXPECTED_MANIFEST, 'utf8'), 'source package manifest').tools.map(tool => tool.name);
 const exposedNames = new Set(exposed.map(tool => tool.name));
@@ -166,7 +170,7 @@ node "$EXTRACTED/tests/test-mcp-shutdown-backpressure-deadline-20261017.js"
 node "$EXTRACTED/tests/test-mcp-eof-shutdown-framing-20261017.js"
 
 # Run the complete acceptance workflow against bytes extracted from the exact archive.
-env -u OPENAI_API_KEY node "$EXTRACTED/tests/test-chat-on-steroids-plugin.js"
+env -u OPENAI_API_KEY node "$EXTRACTED/tests/test-runalith-plugin.js"
 
 # Publish only after every package check passes. The hard link is atomic and fails if
 # another process created OUT after the initial existence check; STAGE lives beside OUT.

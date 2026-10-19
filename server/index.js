@@ -9,9 +9,9 @@ import { MAX_EXECUTION_BATCH_ITEMS, validateExecutionBatch, validateExecutionRes
 
 const packageMetadata = parseStrictJson(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'), 'plugin package metadata');
 const PLUGIN_VERSION = packageMetadata.version;
-const SERVER_INFO = { name: 'chat-on-steroids-local-orchestrator', version: PLUGIN_VERSION };
+const SERVER_INFO = { name: 'runalith-agent-orchestrator', version: PLUGIN_VERSION };
 const SERVER_INSTRUCTIONS = [
-  'This is the local-only Durable Agent Orchestrator plugin for Chat On Steroids.',
+  'This is Runalith, a local-first MCP runtime for durable agent workflows.',
   'All workflow state is stored in local SQLite. Deterministic commands execute on this computer only through the task’s immutable structured execution contract.',
   'There is no cloud runner, GitHub Actions dispatch, remote worker, external model API, or HTTP service in this plugin.',
   'Use the immutable System Workflow Coordinator role and workflow_coordinator_step as the primary lifecycle interface. It dispatches only after approval, prepares tasks, runs approved deterministic steps, and hands host reasoning tasks back with their typed contract.',
@@ -23,7 +23,14 @@ const SERVER_INSTRUCTIONS = [
 ].join(' ');
 
 const home = os.homedir();
-const dataDir = path.resolve(process.env.CHAT_ON_STEROIDS_DATA_DIR || process.env.WORKFLOW_DATA_DIR || path.join(home, '.chat-on-steroids', 'agent-orchestrator'));
+function defaultDataDirectory(homeDir) {
+  const current = path.join(homeDir, '.runalith', 'agent-orchestrator');
+  const legacy = path.join(homeDir, '.chat-on-steroids', 'agent-orchestrator');
+  // Existing installations keep their durable SQLite state after rebranding;
+  // fresh installs get the neutral Runalith directory by default.
+  return fs.existsSync(legacy) && !fs.existsSync(current) ? legacy : current;
+}
+const dataDir = path.resolve(process.env.RUNALITH_DATA_DIR || process.env.CHAT_ON_STEROIDS_DATA_DIR || process.env.WORKFLOW_DATA_DIR || defaultDataDirectory(home));
 fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 let dataDirChmodError = null;
 try { fs.chmodSync(dataDir, 0o700); } catch (error) { dataDirChmodError = error; }
@@ -41,9 +48,9 @@ if (process.platform !== 'win32' && (dataDirStat.mode & 0o077) !== 0) {
   throw new Error(`local plugin data directory is not private: ${dataDir} mode=0${mode}; expected no group/world permissions${chmodDetail}; refusing to open workflow state`);
 }
 process.env.WORKFLOW_DATA_DIR = dataDir;
-process.env.WORKFLOW_DB = path.resolve(process.env.CHAT_ON_STEROIDS_WORKFLOW_DB || process.env.WORKFLOW_DB || path.join(dataDir, 'workflow.db'));
-process.env.EXECUTION_TMP_DIR = path.resolve(process.env.CHAT_ON_STEROIDS_EXECUTION_TMP_DIR || process.env.EXECUTION_TMP_DIR || path.join(dataDir, 'runtime'));
-process.env.WORKFLOW_WORKSPACE = path.resolve(process.env.CHAT_ON_STEROIDS_WORKSPACE || process.env.WORKFLOW_WORKSPACE || home);
+process.env.WORKFLOW_DB = path.resolve(process.env.RUNALITH_WORKFLOW_DB || process.env.CHAT_ON_STEROIDS_WORKFLOW_DB || process.env.WORKFLOW_DB || path.join(dataDir, 'workflow.db'));
+process.env.EXECUTION_TMP_DIR = path.resolve(process.env.RUNALITH_EXECUTION_TMP_DIR || process.env.CHAT_ON_STEROIDS_EXECUTION_TMP_DIR || process.env.EXECUTION_TMP_DIR || path.join(dataDir, 'runtime'));
+process.env.WORKFLOW_WORKSPACE = path.resolve(process.env.RUNALITH_WORKSPACE || process.env.CHAT_ON_STEROIDS_WORKSPACE || process.env.WORKFLOW_WORKSPACE || home);
 
 const runtimePrefix = fs.existsSync(new URL('./runtime/job-store.js', import.meta.url)) ? './runtime' : '../src/runtime';
 const [{ workflowStore, WORKFLOW_DB_PATH }, { ExecutionManager, isVerifiedSuccessfulLocalExecution, isSuccessfulLocalExecutionSummary }] = await Promise.all([

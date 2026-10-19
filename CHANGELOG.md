@@ -2,6 +2,15 @@
 
 Notable changes to this project are recorded here. This file summarizes repository changes and is not a release certification.
 
+# 1.0.9-rc.5 — 2026-10-19 (testing-only pre-release)
+
+- Rebranded the product, MCP server identity, package metadata and developer-facing command names to Runalith; repository renamed to `nplongx/runalith`.
+- Standardized the public package filename to `runalith-1.0.9-rc.5.mcpb`. The MCPB remains a general bundle container for compatible MCP clients; the runtime can also be launched directly over MCP stdio.
+- Added neutral `RUNALITH_*` environment variables and a new `~/.runalith/agent-orchestrator` default data path for fresh installs. Existing legacy data directories and environment aliases remain supported so rebranding does not strand prior SQLite state.
+- Added a responsive, framework-free static project site in `site/` with GitHub Pages deployment through Actions.
+- Updated current documentation, dashboard labeling, benchmark template metadata and generated MCP tool reference. Historical frozen-artifact identifiers remain unchanged in the audit code so the recorded version 1.0.8 hash remains protected.
+- This is a testing-only pre-release, not an official frozen artifact or production-readiness certification. Formal Phase 2 production/deployment blockers remain unchanged; see [release policy](docs/RELEASE_POLICY.md) and [known issues](docs/KNOWN_ISSUES.md).
+
 # 1.0.9-rc.4 — 2026-10-19 (testing-only pre-release candidate; not production-approved)
 
 - Added the `hybrid-engineering` workflow template: nine dependency-ordered specialist tasks, optional pinned custom role/Agent Skill overlays, and two deterministic code-authored syntax checks executed together through durable ExecutionManager Batch Execution.
@@ -10,7 +19,7 @@ Notable changes to this project are recorded here. This file summarizes reposito
 - Includes reusable workflow-policy packs and a read-only local dashboard view for policy versions, pins and violations from the preceding candidate work.
 - Continued the documentation-first rewrite: generated the 46-tool MCP reference from the actual stdio `tools/list` response and added CI parity checking; added a generic terminology/compatibility guide; rewrote the Agent Skills guide in English, genericized dashboard display labels, replaced instance-specific custom-role IDs with placeholders, and indexed/labeled 40 milestone/phase/design/benchmark records without rewriting their underlying evidence. The original README/index/quickstart and link-check workflow remain the entrypoint; standalone HTML diagrams are not used as GitHub documentation.
 - Local validation on the refreshed package inputs: `npm run test:package-reproducibility` passed with two independent byte-identical validated builds; plugin packaging passed its extracted MCP smoke, 46/46 tool-schema checks, lease-fencing, stdio/backpressure/shutdown regressions, hybrid-engineering E2E, CASE-01 recovery, and local plugin E2E. The earlier installed-runtime workflow evidence was against `rc.3`, not this `rc.4` candidate.
-- Testing candidate package: `chat-on-steroids-local-orchestrator-1.0.9-rc.4.mcpb` (`324541` bytes; SHA-256 `bfb68c11317dc394f6d1ea85368a801dc9f6f473974e34e96d02736747776552`; [candidate record](docs/review-candidate-1.0.9-rc.4.md)). Two independent validated package builds were byte-identical and the final packaged runtime/E2E validation passed. The [testing-only release notes](docs/release-notes-1.0.9-rc.4.md) describe the minimum checks and remaining limitations. This is not the official frozen artifact or a production-readiness certification; formal independent review, exact-scope authorization, CASE-06 disposition, frozen-artifact custody, host preflight/static release validation, and authorization-audit reconciliation remain open under the [tiered release policy](docs/RELEASE_POLICY.md).
+- Historical RC.4 testing package (`324541` bytes; SHA-256 `bfb68c11317dc394f6d1ea85368a801dc9f6f473974e34e96d02736747776552`; [candidate record](docs/review-candidate-1.0.9-rc.4.md)). Two independent validated package builds were byte-identical and the final packaged runtime/E2E validation passed. The [testing-only release notes](docs/release-notes-1.0.9-rc.4.md) describe the minimum checks and remaining limitations. This is not the official frozen artifact or a production-readiness certification; formal independent review, exact-scope authorization, CASE-06 disposition, frozen-artifact custody, host preflight/static release validation, and authorization-audit reconciliation remain open under the [tiered release policy](docs/RELEASE_POLICY.md).
 
 
 # 1.0.9-rc.3 — 2026-10-19 (pre-release)

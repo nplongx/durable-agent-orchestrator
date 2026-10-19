@@ -1,6 +1,6 @@
 {
   "protocol": {
-    "name": "Chat On Steroids Local Agent Orchestrator workflow benchmark",
+    "name": "Runalith local-first agent workflow benchmark",
     "revision": "phase1-freeze-2026-10-10",
     "case_id": "CASE-NN",
     "condition": "plugin-or-basic-tools",

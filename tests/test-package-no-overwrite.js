@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const script = path.join(root, 'scripts/package-chat-on-steroids-plugin.sh');
+const script = path.join(root, 'scripts/package-runalith-mcpb.sh');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-no-overwrite-'));
 
 function runAt(output) {
@@ -67,7 +67,7 @@ try {
   const fakeBin = path.join(temp, 'fake-bin');
   fs.mkdirSync(fakeBin);
   const nodeWrapper = path.join(fakeBin, 'node');
-  fs.writeFileSync(nodeWrapper, `#!/usr/bin/env bash\nfor arg in "$@"; do\n  if [[ "$arg" == */tests/test-chat-on-steroids-plugin.js ]]; then\n    echo 'intentional integration-test failure for publication-safety test' >&2\n    exit 91\n  fi\ndone\nexec "$REAL_NODE" "$@"\n`);
+  fs.writeFileSync(nodeWrapper, `#!/usr/bin/env bash\nfor arg in "$@"; do\n  if [[ "$arg" == */tests/test-runalith-plugin.js ]]; then\n    echo 'intentional integration-test failure for publication-safety test' >&2\n    exit 91\n  fi\ndone\nexec "$REAL_NODE" "$@"\n`);
   fs.chmodSync(nodeWrapper, 0o755);
   const failedBuild = path.join(temp, 'must-not-publish.mcpb');
   const failedBuildResult = spawnSync('bash', [script], {
@@ -87,12 +87,12 @@ try {
 
   const symlinkSourceRoot = path.join(temp, 'symlink-source-project');
   fs.mkdirSync(path.join(symlinkSourceRoot, 'scripts'), { recursive: true });
-  fs.copyFileSync(script, path.join(symlinkSourceRoot, 'scripts/package-chat-on-steroids-plugin.sh'));
+  fs.copyFileSync(script, path.join(symlinkSourceRoot, 'scripts/package-runalith-mcpb.sh'));
   const externalReadme = path.join(temp, 'external-readme.md');
   fs.writeFileSync(externalReadme, 'external source bytes that must not be packaged\n');
   fs.symlinkSync(externalReadme, path.join(symlinkSourceRoot, 'README.md'));
   const symlinkSourceOutput = path.join(symlinkSourceRoot, 'dist/candidate.mcpb');
-  const symlinkSourceBuild = spawnSync('bash', [path.join(symlinkSourceRoot, 'scripts/package-chat-on-steroids-plugin.sh')], {
+  const symlinkSourceBuild = spawnSync('bash', [path.join(symlinkSourceRoot, 'scripts/package-runalith-mcpb.sh')], {
     cwd: symlinkSourceRoot, encoding: 'utf8', env: { ...process.env, PLUGIN_BUNDLE_OUT: symlinkSourceOutput },
   });
   assert.equal(symlinkSourceBuild.status, 2, 'packager must reject a symlinked explicit source file before staging or publication');
@@ -106,13 +106,13 @@ try {
   for (const directory of ['scripts', 'tests', 'plugin']) fs.mkdirSync(path.join(schemaSourceRoot, directory), { recursive: true });
   for (const relative of [
     'README.md', 'LICENSE', 'package.json', 'plugin/manifest.json',
-    'tests/test-chat-on-steroids-plugin.js', 'tests/test-production-behavioral-qa.js',
+    'tests/test-runalith-plugin.js', 'tests/test-production-behavioral-qa.js',
     'tests/test-execution-lease-fencing.js', 'tests/test-mcp-stdio-backpressure.mjs', 'tests/test-temp-dir.js',
-    'scripts/package-chat-on-steroids-plugin.sh', 'scripts/collect-plugin-runtime.mjs', 'scripts/plugin-package-metadata.mjs'
+    'scripts/package-runalith-mcpb.sh', 'scripts/collect-plugin-runtime.mjs', 'scripts/plugin-package-metadata.mjs'
   ]) fs.copyFileSync(path.join(root, relative), path.join(schemaSourceRoot, relative));
   fs.symlinkSync(externalReadme, path.join(schemaSourceRoot, 'tests/test-extracted-package-tool-schemas.mjs'));
   const schemaSourceOutput = path.join(schemaSourceRoot, 'dist/candidate.mcpb');
-  const symlinkSchemaBuild = spawnSync('bash', [path.join(schemaSourceRoot, 'scripts/package-chat-on-steroids-plugin.sh')], {
+  const symlinkSchemaBuild = spawnSync('bash', [path.join(schemaSourceRoot, 'scripts/package-runalith-mcpb.sh')], {
     cwd: schemaSourceRoot, encoding: 'utf8', env: { ...process.env, PLUGIN_BUNDLE_OUT: schemaSourceOutput },
   });
   assert.equal(symlinkSchemaBuild.status, 2,
@@ -128,9 +128,9 @@ try {
   fs.writeFileSync(externalTest, "throw new Error('external package test must never execute');\n", { flag: 'wx', mode: 0o600 });
   const preflightInputs = [
     'README.md', 'LICENSE', 'package.json', 'plugin/manifest.json',
-    'tests/test-chat-on-steroids-plugin.js', 'tests/test-production-behavioral-qa.js', 'tests/test-extracted-package-tool-schemas.mjs',
+    'tests/test-runalith-plugin.js', 'tests/test-production-behavioral-qa.js', 'tests/test-extracted-package-tool-schemas.mjs',
     'tests/test-execution-lease-fencing.js', 'tests/test-mcp-stdio-backpressure.mjs', 'tests/test-temp-dir.js',
-    'scripts/package-chat-on-steroids-plugin.sh', 'scripts/collect-plugin-runtime.mjs', 'scripts/plugin-package-metadata.mjs'
+    'scripts/package-runalith-mcpb.sh', 'scripts/collect-plugin-runtime.mjs', 'scripts/plugin-package-metadata.mjs'
   ];
   for (const [relative, expectedMessage] of [
     ['tests/test-production-behavioral-qa.js', /missing or symlinked package source: tests\/test-production-behavioral-qa\.js/],
@@ -146,7 +146,7 @@ try {
     }
     fs.symlinkSync(externalTest, path.join(project, relative));
     const output = path.join(project, 'dist/candidate.mcpb');
-    const result = spawnSync('bash', [path.join(project, 'scripts/package-chat-on-steroids-plugin.sh')], {
+    const result = spawnSync('bash', [path.join(project, 'scripts/package-runalith-mcpb.sh')], {
       cwd: project, encoding: 'utf8', env: { ...process.env, PLUGIN_BUNDLE_OUT: output },
     });
     assert.equal(result.status, 2, `packager must reject symlinked ${relative} before executing it: ${result.stderr}`);

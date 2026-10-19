@@ -1,15 +1,15 @@
 {
-  "name": "chat-on-steroids-local-orchestrator",
-  "version": "1.0.9-rc.4",
-  "description": "Local-only Chat On Steroids MCP plugin for approval-gated durable agent workflows, typed evidence, and local execution.",
+  "name": "runalith-agent-orchestrator",
+  "version": "1.0.9-rc.5",
+  "description": "Runalith is a local-first MCP runtime for approval-gated durable agent workflows, typed evidence, and constrained local execution.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/nplongx/durable-agent-orchestrator.git"
+    "url": "https://github.com/nplongx/runalith.git"
   },
-  "homepage": "https://github.com/nplongx/durable-agent-orchestrator#readme",
+  "homepage": "https://nplongx.github.io/runalith/",
   "bugs": {
-    "url": "https://github.com/nplongx/durable-agent-orchestrator/issues"
+    "url": "https://github.com/nplongx/runalith/issues"
   },
   "keywords": [
     "mcp",
@@ -17,7 +17,10 @@
     "workflow",
     "sqlite",
     "local-first",
-    "durable-execution"
+    "durable-execution",
+    "mcpb",
+    "mcp-bundle",
+    "runalith"
   ],
   "engines": {
     "node": ">=22.13.0"
@@ -30,7 +33,7 @@
     "docs:check": "node scripts/check-docs.mjs",
     "docs:check:external": "node scripts/check-docs.mjs --check-external-links",
     "dashboard": "node dashboard/server.js",
-    "test": "node tests/test-agent-skills.js && node tests/test-agent-tool-guidance.js && node tests/test-doc-link-parser.js && node tests/test-success-contract.js && node tests/test-policy-contract.js && node tests/test-workflow-policies-mcp.js && node tests/test-chat-on-steroids-plugin.js && node tests/test-dashboard.js",
+    "test": "node tests/test-agent-skills.js && node tests/test-agent-tool-guidance.js && node tests/test-doc-link-parser.js && node tests/test-success-contract.js && node tests/test-policy-contract.js && node tests/test-workflow-policies-mcp.js && node tests/test-runalith-plugin.js && node tests/test-dashboard.js",
     "test:dashboard": "node tests/test-dashboard.js",
     "test:phase2-security-regressions": "node tests/test-secure-filesystem-boundary.js && node tests/test-worker-filesystem-boundary.js && node tests/test-execution-verifier.js && node tests/test-execution-verifier-output-commit-binding-20261017.js && node tests/test-github-actions-provider.js && node benchmarks/plugin-workflow-benchmark/test-create-phase2-candidate-inventory.mjs && node tests/test-dispatch-lease-quarantine.js && node tests/test-provider-pre-send-recovery.js && node tests/test-provider-run-quarantine-reconciliation.js && node tests/test-provider-status-quarantine-sqlite-integration-20261018.js && node tests/test-execution-contract.js && node tests/test-execution-control-process-boundary.js && node tests/test-github-actions-dispatch-concurrency.js && node tests/test-github-actions-lifecycle-boundary.js && node tests/test-task-lease-expiry-race.js && node tests/test-strict-json-safe-integer.js && node tests/test-openclaw-message-receipt.js && node tests/test-openclaw-transport-byte-contract.js && node tests/test-slack-projection-uncertain.js && node tests/test-m12-runner-agent.js && node tests/test-mcp-eof-shutdown-framing-20261017.js",
     "test:provider-pre-send-recovery": "node tests/test-provider-pre-send-recovery.js",
@@ -64,8 +67,9 @@
     "test:phase2-readiness-audit": "node tests/test-phase2-deployment-readiness-audit.mjs",
     "audit:phase2-readiness": "node benchmarks/plugin-workflow-benchmark/audit-phase2-deployment-readiness.mjs",
     "test:case01-artifact-acceptance": "node tests/test-case01-artifact-acceptance.js && node tests/test-case01-artifact-transaction.js",
-    "test:chat-on-steroids-plugin": "node tests/test-chat-on-steroids-plugin.js",
-    "pack:chat-on-steroids-plugin": "bash scripts/package-chat-on-steroids-plugin.sh"
+    "test:runalith-plugin": "node tests/test-runalith-plugin.js",
+    "pack:runalith-mcpb": "bash scripts/package-runalith-mcpb.sh",
+    "site:check": "node scripts/check-static-site.mjs"
   },
   "dependencies": {
     "@langchain/langgraph": "^1.4.21"

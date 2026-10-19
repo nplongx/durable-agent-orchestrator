@@ -181,7 +181,7 @@ try {
   const responses = smoke.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line));
   assert.equal(responses.length, 4, 'notifications must not emit responses');
   assert.equal(responses[0].id, 1);
-  assert.equal(responses[0].result.serverInfo.name, 'chat-on-steroids-local-orchestrator');
+  assert.equal(responses[0].result.serverInfo.name, 'runalith-agent-orchestrator');
   assert.equal(responses[1].id, 2);
   const manifestPath = fs.existsSync(path.join(repo, 'plugin/manifest.json'))
     ? path.join(repo, 'plugin/manifest.json')

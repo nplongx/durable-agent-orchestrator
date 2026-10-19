@@ -1,13 +1,13 @@
-# Local Agent Orchestrator — Chat On Steroids plugin
+# Runalith MCP bundle
 
-The installable MCPB bundle is built from the `manifest.json` in this directory and canonical runtime sources. Use the bundle for installation so the complete runtime dependency graph is packaged and checked.
+Runalith is a local-first, durable workflow runtime exposed through the Model Context Protocol (MCP). The installable `.mcpb` file is a standard bundle container for compatible clients; it is not tied to one assistant vendor.
 
-From the repository root:
+From the repository root, build and validate a local candidate:
 
 ```sh
-npm run pack:chat-on-steroids-plugin
+npm run pack:runalith-mcpb
 ```
 
-The command prints the exact path and SHA-256 of a newly created, versioned **candidate** bundle under `dist/`. Inspect that reported candidate and its independent release authorization before installing it; the command does not create or replace the frozen release bundle. The packer collects the local runtime dependency graph, excludes the legacy HTTP adapter and cloud-provider modules, validates the archive, and launches the extracted MCP server for an end-to-end smoke test.
+The packer prints the exact candidate path, size, and SHA-256. It validates the archive, smoke-tests the extracted stdio MCP runtime, checks all manifest tool schemas, and runs the local acceptance suite. A generated candidate is not automatically a production-approved release.
 
-The plugin owns durable SQLite workflow state, explicit approvals, dependency-aware local tasks, typed artifacts, and terminalization guards. Reasoning runs in the host conversation; deterministic commands execute on the local machine through the approved execution contract.
+Runalith persists workflow state locally, gates execution on explicit approval, binds deterministic work to immutable plans, validates typed artifacts and provenance, and records recovery events. It does not provide a hosted model or a remote execution fleet.

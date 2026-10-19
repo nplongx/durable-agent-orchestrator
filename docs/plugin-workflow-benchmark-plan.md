@@ -3,7 +3,7 @@
 > **Document type:** Benchmark plan or scoped benchmark record. Treat measurements and gates as specific to the documented run/version; consult current code and the active readiness record before drawing release conclusions.
 
 **Status:** Proposed protocol; Phase 1 environment freeze is recorded separately.
-**Target:** Chat On Steroids Local Agent Orchestrator.
+**Target:** Runalith MCP workflow runtime.
 **Scope:** Evaluate workflow orchestration behavior, not application feature output. OpsHub is out of scope and is not a benchmark target.
 
 ## 1. Decision to support

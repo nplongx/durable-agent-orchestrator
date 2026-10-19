@@ -16,7 +16,7 @@ export function projectPluginPackageMetadata(source) {
     engines: { node: '>=22.13.0' },
     scripts: {
       start: 'node server/index.js',
-      test: 'node tests/test-chat-on-steroids-plugin.js',
+      test: 'node tests/test-runalith-plugin.js',
     },
   };
 }

@@ -8,7 +8,7 @@
     "quality_profile": "showcase",
     "visual_preset": "blueprint",
     "repository": {
-      "url": "git@github.com:nplongx/durable-agent-orchestrator.git",
+      "url": "git@github.com:nplongx/runalith.git",
       "link_mode": "local-only",
       "revision": "74a2e7426c1ecc9618ffb0eea8943fa250fec268"
     }
@@ -19,7 +19,7 @@
   "nodes": [
     {
       "id": "repo",
-      "label": "durable-agent-orchestrator",
+      "label": "runalith",
       "sublabel": "Node.js · local-first MCP plugin",
       "sources": [
         {

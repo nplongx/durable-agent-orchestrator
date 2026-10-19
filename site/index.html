@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f6f7f2">
+  <meta name="description" content="Runalith is a local-first MCP runtime for durable, approval-gated agent workflows with typed evidence and constrained execution.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Runalith — Durable agent workflows">
+  <meta property="og:description" content="Turn agent work into explicit plans, verifiable evidence, and durable local state.">
+  <meta property="og:url" content="https://nplongx.github.io/runalith/">
+  <link rel="canonical" href="https://nplongx.github.io/runalith/">
+  <link rel="stylesheet" href="styles.css">
+  <title>Runalith — Durable agent workflows</title>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="#top" aria-label="Runalith home">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 40 40" role="img"><path d="M10 11h9v8h11M10 29h9v-8h11"/><circle cx="10" cy="11" r="3"/><circle cx="10" cy="29" r="3"/><circle cx="30" cy="19" r="3"/></svg>
+      </span>
+      <span>runalith<span class="brand-dot">.</span></span>
+    </a>
+    <nav aria-label="Main navigation">
+      <a href="#capabilities">Capabilities</a>
+      <a href="#how-it-works">How it works</a>
+      <a href="https://github.com/nplongx/runalith/tree/main/docs">Documentation</a>
+      <a class="nav-github" href="https://github.com/nplongx/runalith">GitHub <span aria-hidden="true">↗</span></a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero section-wrap" id="top">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="status-dot"></span> Local-first MCP runtime</div>
+        <h1>Make agent work<br><span>durable by design.</span></h1>
+        <p class="hero-lede">Runalith turns multi-step agent work into explicit plans, recoverable state, and evidence you can verify—not just a confident final answer.</p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="https://github.com/nplongx/runalith/releases">Explore releases <span aria-hidden="true">↗</span></a>
+          <a class="button button-secondary" href="https://github.com/nplongx/runalith/blob/main/README.md">Read the README</a>
+        </div>
+        <div class="hero-meta"><span>Open source</span><span>SQLite-backed</span><span>MCP over stdio</span></div>
+      </div>
+      <div class="hero-visual" aria-label="Illustration of a workflow moving through approval, execution, evidence and durable state">
+        <div class="visual-grid" aria-hidden="true"></div>
+        <div class="visual-kicker">WORKFLOW / 0042</div>
+        <div class="workflow-card card-proposal"><span class="step-number">01</span><div><strong>Proposal</strong><small>Define scope & intent</small></div><span class="mini-state">DRAFT</span></div>
+        <div class="flow-line line-one" aria-hidden="true"></div>
+        <div class="workflow-card card-plan"><span class="step-number">02</span><div><strong>Immutable plan</strong><small>Approval recorded</small></div><span class="check-mark" aria-label="Approved">✓</span></div>
+        <div class="flow-line line-two" aria-hidden="true"></div>
+        <div class="workflow-card card-evidence"><span class="step-number">03</span><div><strong>Evidence checks</strong><small>Artifacts · lineage · exit</small></div><span class="pulse-mark" aria-hidden="true"></span></div>
+        <div class="visual-footer"><span><i></i> STATE PERSISTED</span><span>SQLITE / LOCAL</span></div>
+        <span class="orbit orbit-one" aria-hidden="true"></span><span class="orbit orbit-two" aria-hidden="true"></span>
+      </div>
+    </section>
+
+    <section class="proof-strip" aria-label="Core design principles">
+      <div><span class="proof-index">01</span><strong>Approval before action</strong><small>Intended work is explicit</small></div>
+      <div><span class="proof-index">02</span><strong>State that survives</strong><small>Durable records, not chat history</small></div>
+      <div><span class="proof-index">03</span><strong>Completion by evidence</strong><small>Proof beats assertion</small></div>
+    </section>
+
+    <section class="content-section section-wrap" id="capabilities">
+      <div class="section-heading">
+        <div><div class="eyebrow">THE RUNTIME</div><h2>Orchestration with<br>clear boundaries.</h2></div>
+        <p>Runalith keeps planning, authorization, execution, and acceptance distinct. Each stage leaves durable state that can be inspected when work succeeds, fails, or needs recovery.</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature-card feature-large"><div class="feature-icon icon-approval" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M16 3 26 7v8c0 7-4.7 11.5-10 14C10.7 26.5 6 22 6 15V7z"/><path d="m11 16 3.3 3.3L21.5 12"/></svg></div><div class="feature-label">CONTROL</div><h3>Approval is a real gate</h3><p>A proposal does not start work. Explicit approval compiles an immutable plan; dispatch and deterministic execution are checked against that plan.</p><a href="https://github.com/nplongx/runalith/blob/main/docs/workflow-lifecycle.md">Workflow lifecycle <span aria-hidden="true">→</span></a></article>
+        <article class="feature-card"><div class="feature-icon icon-state" aria-hidden="true"><svg viewBox="0 0 32 32"><ellipse cx="16" cy="7" rx="10" ry="4"/><path d="M6 7v18c0 2.2 4.5 4 10 4s10-1.8 10-4V7M6 16c0 2.2 4.5 4 10 4s10-1.8 10-4"/></svg></div><div class="feature-label">PERSISTENCE</div><h3>Durable local state</h3><p>Tasks, approvals, results, artifacts, and audit events are recorded in SQLite for inspection and recovery.</p><a href="https://github.com/nplongx/runalith/blob/main/docs/architecture.md">Architecture <span aria-hidden="true">→</span></a></article>
+        <article class="feature-card"><div class="feature-icon icon-proof" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M6 5h20v22H6zM10 11h12M10 16h7M10 21h4"/><path d="m19 21 2.5 2.5L27 18"/></svg></div><div class="feature-label">VERIFICATION</div><h3>Evidence over assertions</h3><p>Typed artifact schemas, producer lineage, execution results, and supported success predicates feed completion gates.</p><a href="https://github.com/nplongx/runalith/blob/main/docs/batch-execution.md">Batch execution <span aria-hidden="true">→</span></a></article>
+        <article class="feature-card"><div class="feature-icon icon-recovery" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M7 12a10 10 0 1 1-1 8M7 5v7h7"/><path d="M16 10v7l5 3"/></svg></div><div class="feature-label">RECOVERY</div><h3>Failures stay visible</h3><p>Unknown or incomplete outcomes remain blocked until durable evidence supports a safe next step. Retries preserve plan and provenance.</p><a href="https://github.com/nplongx/runalith/blob/main/docs/KNOWN_ISSUES.md">Known issues <span aria-hidden="true">→</span></a></article>
+      </div>
+    </section>
+
+    <section class="process-section" id="how-it-works">
+      <div class="section-wrap process-inner">
+        <div class="eyebrow">A WORKFLOW, NOT A PROMPT CHAIN</div>
+        <h2>One traceable path<br>from intent to outcome.</h2>
+        <div class="process-steps">
+          <div><span>01</span><h3>Propose</h3><p>Record a bounded request and its intended work.</p></div>
+          <div><span>02</span><h3>Approve</h3><p>Review the plan and make authorization explicit.</p></div>
+          <div><span>03</span><h3>Execute</h3><p>Release dependency-ready work under its planned contract.</p></div>
+          <div><span>04</span><h3>Verify</h3><p>Check task state, typed evidence and completion conditions.</p></div>
+          <div><span>05</span><h3>Recover or finish</h3><p>Persist a truthful terminal status and auditable history.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="bundle-section section-wrap">
+      <div class="bundle-copy"><div class="eyebrow">BUILT FOR MCP</div><h2>Standard bundle.<br><span>Local-first runtime.</span></h2><p>The `.mcpb` file is a bundle container for compatible MCP clients. Runalith also supports direct stdio integration, so the package format and the client are separate choices.</p><div class="bundle-links"><a href="https://github.com/nplongx/runalith/blob/main/docs/quickstart.md">Connect a client <span aria-hidden="true">→</span></a><a href="https://github.com/nplongx/runalith/blob/main/docs/MCP_REFERENCE.md">Browse 46 MCP tools <span aria-hidden="true">→</span></a></div></div>
+      <div class="code-panel"><div class="code-top"><span><i></i><i></i><i></i></span><b>mcp server config</b><span class="code-file">JSON</span></div><pre><code><span class="code-punct">{</span>
+  <span class="code-key">"mcpServers"</span><span class="code-punct">: {</span>
+    <span class="code-key">"runalith"</span><span class="code-punct">: {</span>
+      <span class="code-key">"command"</span><span class="code-punct">: </span><span class="code-string">"node"</span><span class="code-punct">,</span>
+      <span class="code-key">"args"</span><span class="code-punct">: [</span>
+        <span class="code-string">"/path/to/runalith/server/index.js"</span>
+      <span class="code-punct">],</span>
+      <span class="code-key">"env"</span><span class="code-punct">: {</span>
+        <span class="code-key">"RUNALITH_WORKSPACE"</span><span class="code-punct">: </span><span class="code-string">"/path/to/workspace"</span>
+      <span class="code-punct">}</span>
+    <span class="code-punct">}</span>
+  <span class="code-punct">}</span>
+<span class="code-punct">}</span></code></pre><div class="code-bottom"><span>STDIO · LOCAL PROCESS</span><span>NO HOSTED RUNNER</span></div></div>
+    </section>
+
+    <section class="release-section section-wrap">
+      <div class="release-panel"><div><div class="eyebrow">TRY THE PROJECT</div><h2>Explore the code.<br>Verify the package.</h2><p>Read the source, run the acceptance suite, or download an explicitly experimental release. Testing artifacts are not production certifications.</p></div><div class="release-actions"><a class="button button-light" href="https://github.com/nplongx/runalith/releases">Browse releases <span aria-hidden="true">↗</span></a><a class="button button-dark" href="https://github.com/nplongx/runalith">View repository <span aria-hidden="true">↗</span></a></div><div class="release-note"><span class="status-dot status-warn"></span> Testing releases are experimental, not production certifications. Verify the downloaded package checksum and read the release notes before installation.</div></div>
+    </section>
+  </main>
+
+  <footer class="site-footer section-wrap">
+    <a class="brand brand-footer" href="#top"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 40 40"><path d="M10 11h9v8h11M10 29h9v-8h11"/><circle cx="10" cy="11" r="3"/><circle cx="10" cy="29" r="3"/><circle cx="30" cy="19" r="3"/></svg></span><span>runalith<span class="brand-dot">.</span></span></a>
+    <p>Local-first workflow infrastructure for evidence-driven agents.</p>
+    <div class="footer-links"><a href="https://github.com/nplongx/runalith/blob/main/LICENSE">MIT License</a><a href="https://github.com/nplongx/runalith/blob/main/CONTRIBUTING.md">Contributing</a><a href="https://github.com/nplongx/runalith/blob/main/SECURITY.md">Security</a><a href="https://github.com/nplongx/runalith/issues">Issues</a></div>
+    <span class="copyright">© Runalith contributors</span>
+  </footer>
+</body>
+</html>

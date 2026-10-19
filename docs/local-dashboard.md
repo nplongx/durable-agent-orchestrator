@@ -1,6 +1,6 @@
 # Local monitoring dashboard
 
-The local dashboard is an optional, local-only, read-only web interface for inspecting the orchestrator's existing SQLite records. It runs as a separate process from the MCP stdio server, does not create a second workflow database, and does not expose workflow approval, dispatch, retry, or mutation operations.
+The Runalith dashboard is an optional, local-only, read-only web interface for inspecting the runtime's existing SQLite records. It runs as a separate process from the MCP stdio server, does not create a second workflow database, and does not expose workflow approval, dispatch, retry, or mutation operations.
 
 The dashboard is a separate process and opens the workflow database read-only. See the [architecture explanation](architecture.md#dashboard) for its trust boundary and the [static architecture illustrations](diagrams/README.md) for a supplementary overview.
 
@@ -16,12 +16,12 @@ The server prints its URL and database path. The default URL is `http://127.0.0.
 
 | Environment variable | Purpose | Default / accepted values |
 |---|---|---|
-| `CHAT_ON_STEROIDS_DATA_DIR` | Data directory containing workflow files and logs | `~/.chat-on-steroids/agent-orchestrator`; `WORKFLOW_DATA_DIR` is the compatibility alias |
-| `CHAT_ON_STEROIDS_WORKFLOW_DB` | SQLite database path | `workflow.db` under the resolved data directory; `WORKFLOW_DB` is the compatibility alias |
-| `CHAT_ON_STEROIDS_DASHBOARD_PORT` | HTTP port | `8318` |
-| `CHAT_ON_STEROIDS_DASHBOARD_HOST` | Listener address | `127.0.0.1` or `::1` only |
+| `RUNALITH_DATA_DIR` | Data directory containing workflow files and logs | `~/.runalith/agent-orchestrator` on new installs; an existing data directory is preserved automatically |
+| `RUNALITH_WORKFLOW_DB` | SQLite database path | `workflow.db` under the resolved data directory; omit to use the default |
+| `RUNALITH_DASHBOARD_PORT` | HTTP port | `8318` |
+| `RUNALITH_DASHBOARD_HOST` | Listener address | `127.0.0.1` or `::1` only |
 
-The host is deliberately restricted to loopback. A non-loopback host value is rejected instead of exposing the dashboard on a LAN or public interface. If another process uses the default port, select an unused port using `CHAT_ON_STEROIDS_DASHBOARD_PORT`.
+The host is deliberately restricted to loopback. A non-loopback host value is rejected instead of exposing the dashboard on a LAN or public interface. If another process uses the default port, select an unused port using `RUNALITH_DASHBOARD_PORT`.
 
 ## What it shows
 

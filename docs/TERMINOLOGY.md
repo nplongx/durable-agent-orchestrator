@@ -1,35 +1,37 @@
 # Terminology and naming compatibility
 
-Use plain, descriptive language for concepts and UI copy. Keep literal names unchanged when they identify an actual public interface, stored record, installation step, or historical event. This table is the review boundary for naming changes; it is not an aliasing layer in the runtime.
+Runalith uses host-neutral product language. The MCPB package format is a bundle container; the MCP server identity, runtime semantics, and client integration are separate concepts. This guide distinguishes user-facing descriptions from identifiers that remain necessary for compatibility or historical evidence.
 
 ## Preferred wording
 
-| Prefer in explanatory text/UI | Use exact identifier when needed | Notes |
+| Preferred explanatory wording | Exact identifier when needed | Notes |
 |---|---|---|
-| **Local dashboard** | `dashboard/public/`, existing `/api/...` routes | Generic user-facing name for the read-only UI. Do not rename routes, browser storage keys, or database identifiers in a documentation-only change. |
-| **Local orchestrator plugin** | `chat-on-steroids-local-orchestrator`, `Local Agent Orchestrator` | Use generic wording in prose. Preserve the actual package/manifest/plugin identity in installation and diagnostic instructions. |
-| **Workflow run** or **workflow** | `job_id`, `workflow_create`, `workflow_dispatch` | “Run” describes the user's workflow instance; code and tool names retain their exact spelling. A `job_id` is a public field, not a prose synonym. |
-| **Custom role profile** | `custom_role_id`, `custom_role_version`, `custom_role_create` | Use the generic term in prose, but preserve the API fields and role IDs in examples. |
-| **Skill bundle** or **Agent Skill** | `SKILL.md`, `skills`, `custom_role_update` | “Agent Skills” is the upstream format/product name used in import guidance; do not invent another file format or change the literal property names. |
-| **Execution record** | `ExecutionManager`, `execute_batch`, `task_execute_local` | Explain the concept in generic words; preserve internal class names when source tracing or debugging requires them, and preserve tool names in instructions. |
-| **Policy pack** | `workflow_policy_*`, policy IDs and version fields | Use “policy pack” for the reusable versioned definition. It does not grant permissions and only its catalogued predicates are runtime-enforced. |
-| **Approval** / **explicit approval** | `workflow_approve`, plan hash, approval events | Creating a proposal or preview is not approval. Keep this distinction explicit. |
-| **Historical engineering record** | `M0`, `M11`, `M12`, `P0`–`P14`, case IDs, evidence filenames | These tokens identify particular milestones, tests, and records. Explain their scope; do not rewrite or normalize the identifiers inside their source records. |
+| **Runalith runtime** | `runalith-agent-orchestrator` | Current MCP server identity and package name. |
+| **MCP bundle** or **MCPB** | `.mcpb`, bundle-root `manifest.json` | A package/container format, not a claim of vendor-specific behavior. Client-side installation support varies. |
+| **MCP stdio server** | `server/index.js`, newline-delimited JSON-RPC | The direct integration path for clients that launch local stdio servers. |
+| **Local dashboard** | `dashboard/public/`, existing `/api/...` routes | Read-only local UI. Do not rename routes, browser storage keys, or database identifiers in a documentation-only change. |
+| **Workflow run** or **workflow** | `job_id`, `workflow_create`, `workflow_dispatch` | “Run” describes the user's workflow instance; code and tool names retain their exact spelling. |
+| **Custom role profile** | `custom_role_id`, `custom_role_version`, `custom_role_create` | Use generic wording in prose, but preserve API fields and role IDs in examples. |
+| **Agent Skill** | `SKILL.md`, `skills`, `custom_role_update` | The upstream skill format is retained; do not invent another file format or change property names. |
+| **Execution record** | `ExecutionManager`, `execute_batch`, `task_execute_local` | Preserve internal class names where source tracing or debugging requires them. |
+| **Policy pack** | `workflow_policy_*`, policy IDs and version fields | A reusable versioned definition; it does not grant permissions and only catalogued predicates are enforced. |
+| **Explicit approval** | `workflow_approve`, plan hash, approval events | Proposal creation and preview are not approval. Keep this distinction explicit. |
+| **Historical engineering record** | `M0`, `M11`, `M12`, `P0`–`P14`, case IDs, evidence filenames | These identify particular milestones, tests and records. Do not rewrite literal identifiers inside source evidence. |
 
-## Names that should not be mass-renamed
+## Compatibility boundary
 
-These strings can be externally observable or operationally significant. A documentation cleanup must not change them unless a separate API/compatibility change has been designed, reviewed, migrated, and tested.
+These strings can be externally observable or operationally significant. Do not mass-rename them without a separately reviewed migration, compatibility and test plan:
 
-- MCP tool names and arguments, workflow/template IDs, built-in role IDs, custom role IDs, artifact types, enum values, and JSON protocol fields.
-- The package name/version, manifest identifiers, connector/plugin display name needed for installation, script names, environment variables, filesystem paths, API route paths, and browser storage keys.
-- SQLite schema/table/column names, stored events, existing record IDs, hashes, signed authorizations, benchmark identities, candidate bundle identities, or historical evidence content.
-- Genuine upstream names required to reproduce a setup or integration, such as Chat On Steroids or OpenClaw. Keep these only where they are operationally meaningful, not as gratuitous decoration.
+- MCP tool names and arguments, workflow/template IDs, built-in role IDs, custom role IDs, artifact types, enum values and JSON protocol fields.
+- SQLite schema/table/column names, stored events, record IDs, hashes, signed authorizations, benchmark identities and historical artifact identities.
+- Existing environment-variable names and data paths. The neutral `RUNALITH_*` variables are the preferred documentation surface; legacy aliases remain accepted for backward compatibility.
+- Historical filenames that identify the pre-rebrand frozen package and the scripts that verify that exact artifact. They are not the current Runalith package name.
 
-For example, the local dashboard still uses the browser storage key `orbit-dashboard-session-v1` for existing tab preferences. That string is retained for compatibility even though the current UI label is generic. Do not infer that it is a product name or a server API.
+Historical benchmark evidence may still contain exact identifiers from the software and host environment that were observed at that time. Do not change a recorded hash or represent an old artifact as a newly branded build. Public product copy should use Runalith and refer to historical materials only where their provenance matters.
 
 ## Custom role ID examples
 
-Custom role IDs are records in the local database. They are not populated merely by copying a documentation example. Use placeholders in generic examples, for example:
+Custom role IDs are local database records, not populated by copying a documentation example:
 
 ```json
 {
@@ -39,12 +41,12 @@ Custom role IDs are records in the local database. They are not populated merely
 }
 ```
 
-Create/import the role first and replace the placeholder with the exact ID and version that exist in the target database. Never rewrite a literal stored ID to match the placeholder.
+Create/import the role first and replace the placeholder with the exact ID and version that exists in the target database. Never rewrite a literal stored ID to match a placeholder.
 
-## Rules for a naming change
+## Naming-change rules
 
-1. Search source, docs, tests, manifests, UI text, routes, storage keys, and generated/package inputs before changing a term.
-2. Classify each occurrence as descriptive copy, a public contract, a stored/compatibility identifier, a true upstream proper name, or a historical quotation.
-3. Change descriptive copy only. Retain exact identifiers and annotate them if they look branded or installation-specific.
-4. Run `npm run docs:check`, `git diff --check`, plus focused UI/API/contract tests for the affected surface.
-5. For any identifier migration, stop and create a separately reviewed migration/compatibility plan; do not mix it into a documentation-only PR.
+1. Search source, docs, tests, manifests, UI text, routes, storage keys and generated/package inputs before changing a term.
+2. Classify occurrences as descriptive copy, public contract, stored/compatibility identifier, upstream proper name or historical evidence.
+3. Change descriptive copy and current public package identity; preserve immutable historical identities and compatibility paths.
+4. Run `npm run docs:check`, `git diff --check`, and focused UI/API/contract tests for the affected surface.
+5. For any protocol or stored-identifier migration, prepare a separately reviewed migration plan instead of mixing it into a documentation change.

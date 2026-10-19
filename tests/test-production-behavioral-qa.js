@@ -142,7 +142,7 @@ try {
     protocolVersion: '2025-06-18', capabilities: {},
     clientInfo: { name: 'production-behavioral-qa', version: '1' }
   });
-  assert.equal(initialized.result?.serverInfo?.name, 'chat-on-steroids-local-orchestrator');
+  assert.equal(initialized.result?.serverInfo?.name, 'runalith-agent-orchestrator');
   const listed = await sendRpc('tools/list');
   const tools = listed.result?.tools;
   assert.ok(Array.isArray(tools));

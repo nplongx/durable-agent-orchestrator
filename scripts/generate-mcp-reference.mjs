@@ -60,7 +60,7 @@ function renderReference(mcp) {
     '',
     '- Source: `server/index.js` and its runtime schema definitions.',
     '- Server identity reported by the checked-out source: `' + escMarkdown(mcp.initialize.result.serverInfo.name) + '`.',
-    '- Source package version reported at generation time: `' + escMarkdown(version) + '`. This is source-runtime metadata, not proof of which bundle is installed in Chat On Steroids.',
+    '- Source package version reported at generation time: `' + escMarkdown(version) + '`. This is source-runtime metadata, not proof of which bundle is installed in a client.',
     `- Registered tools: **${tools.length}**.`,
     '',
     '## Choosing the right operation',

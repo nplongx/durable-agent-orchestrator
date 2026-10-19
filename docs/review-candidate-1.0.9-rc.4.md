@@ -7,7 +7,7 @@ For code and workflow context, see the [architecture explanation](architecture.m
 ## Candidate identity
 
 - Package version: `1.0.9-rc.4` in `package.json`, `package-lock.json`, and `plugin/manifest.json`.
-- Bundle filename: `chat-on-steroids-local-orchestrator-1.0.9-rc.4.mcpb`.
+- Bundle identity: the original RC.4 asset attached to the existing release; it predates the Runalith package rename.
 - Bundle size: `324541` bytes.
 - Bundle SHA-256: `bfb68c11317dc394f6d1ea85368a801dc9f6f473974e34e96d02736747776552`.
 - Source identity: `v1.0.9-rc.4` tag target; the package and source inventory were generated from that commit.

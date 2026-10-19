@@ -1,13 +1,14 @@
 # Documentation
 
-This index is the starting point for users, operators, and contributors. Pages are grouped by the question they answer rather than by the order in which the implementation was built.
+This index is the starting point for users, operators, and contributors. Visit the [Runalith project website](https://nplongx.github.io/runalith/) for an overview, then use the guides below for implementation details. Pages are grouped by the question they answer rather than by the order in which the implementation was built.
 
 ## Getting started
 
-- [Quickstart](quickstart.md) — install a local candidate, verify the MCP connection, and understand the first workflow steps.
+- [Quickstart](quickstart.md) — build or connect the local MCP runtime and understand the first workflow steps.
 - [Root README](../README.md) — project purpose, capabilities, security boundaries, commands, and navigation.
+- [Testing pre-release notes for 1.0.9-rc.5](release-notes-1.0.9-rc.5.md) — Runalith package identity, compatibility and testing boundaries.
 
-## Using the plugin
+## Using the runtime
 
 - [Workflow lifecycle and recovery](workflow-lifecycle.md) — proposal, explicit approval, task execution, diagnosing blockers, rework, and synthesis.
 - [Hybrid engineering workflow](hybrid-engineering-workflow.md) — combine specialist reasoning with plan-bound deterministic execution.
@@ -15,8 +16,8 @@ This index is the starting point for users, operators, and contributors. Pages a
 - [Agent Skills](agent-skills.md) — skill format, import sources, immutable snapshots, role bindings, and security limits.
 - [Workflow policies](workflow-policies.md) — supported predicates, policy versions, attachment timing, evaluation, and audit behavior.
 - [Local dashboard](local-dashboard.md) — start and configure the read-only UI, endpoints, and security boundaries.
-- [MCP tool reference](MCP_REFERENCE.md) — generated tool index and full input schemas from the shipped `tools/list` response.
-- [Terminology and naming compatibility](TERMINOLOGY.md) — preferred generic words and identifiers that must remain exact.
+- [MCP tool reference](MCP_REFERENCE.md) — generated tool index and full input schemas from the current `tools/list` response.
+- [Terminology and naming compatibility](TERMINOLOGY.md) — product terminology and identifiers retained for compatibility.
 
 ## Understanding the implementation
 

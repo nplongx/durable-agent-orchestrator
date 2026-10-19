@@ -19,7 +19,7 @@ const script = path.join(root, 'benchmarks/plugin-workflow-benchmark/create-phas
 const bundleCandidates = process.env.PHASE2_CANDIDATE_BUNDLE
   ? [process.env.PHASE2_CANDIDATE_BUNDLE]
   : fs.readdirSync(path.join(root, 'dist'))
-    .filter(name => /^chat-on-steroids-local-orchestrator-.*-candidate-.*\.mcpb$/.test(name))
+    .filter(name => /^runalith-.*-candidate-.*\.mcpb$/.test(name))
     .map(name => `dist/${name}`)
     .sort((left, right) => fs.statSync(path.join(root, right)).mtimeMs - fs.statSync(path.join(root, left)).mtimeMs);
 const outDir = path.join(root, 'benchmarks/plugin-workflow-benchmark');

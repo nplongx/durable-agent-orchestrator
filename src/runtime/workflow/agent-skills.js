@@ -136,7 +136,7 @@ function parseGithubSource(source) {
 
 async function fetchText(url, fetchImpl) {
   const response = await fetchImpl(url, {
-    headers: { 'Accept': 'application/vnd.github+json', 'User-Agent': 'chat-on-steroids-local-orchestrator' },
+    headers: { 'Accept': 'application/vnd.github+json', 'User-Agent': 'runalith-agent-orchestrator' },
     redirect: 'error', signal: AbortSignal.timeout(10000)
   });
   if (!response?.ok) throw new Error(`skill download failed (${response?.status ?? 'network error'}): ${new URL(url).hostname}`);

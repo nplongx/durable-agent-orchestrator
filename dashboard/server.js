@@ -7,8 +7,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { inspectStoredWorkflowPolicyRow } from '../src/runtime/workflow/policy-contract.js';
 
-const DEFAULT_DATA_DIR = path.resolve(process.env.CHAT_ON_STEROIDS_DATA_DIR || process.env.WORKFLOW_DATA_DIR || path.join(os.homedir(), '.chat-on-steroids', 'agent-orchestrator'));
-const DEFAULT_DB_PATH = path.resolve(process.env.CHAT_ON_STEROIDS_WORKFLOW_DB || process.env.WORKFLOW_DB || path.join(DEFAULT_DATA_DIR, 'workflow.db'));
+function defaultDataDirectory(homeDir) {
+  const current = path.join(homeDir, '.runalith', 'agent-orchestrator');
+  const legacy = path.join(homeDir, '.chat-on-steroids', 'agent-orchestrator');
+  return fs.existsSync(legacy) && !fs.existsSync(current) ? legacy : current;
+}
+const DEFAULT_DATA_DIR = path.resolve(process.env.RUNALITH_DATA_DIR || process.env.CHAT_ON_STEROIDS_DATA_DIR || process.env.WORKFLOW_DATA_DIR || defaultDataDirectory(os.homedir()));
+const DEFAULT_DB_PATH = path.resolve(process.env.RUNALITH_WORKFLOW_DB || process.env.CHAT_ON_STEROIDS_WORKFLOW_DB || process.env.WORKFLOW_DB || path.join(DEFAULT_DATA_DIR, 'workflow.db'));
 const MAX_LIST = 200;
 const MAX_PREVIEW_CHARS = 48_000;
 const MAX_FILE_BYTES = 64 * 1024;
@@ -727,7 +732,7 @@ function requestHostOk(req, expectedHost, port) {
 export function createDashboardServer(options = {}) {
   const host = options.host ?? '127.0.0.1';
   if (!onlyLoopback(host)) throw new Error('dashboard host must be 127.0.0.1 or ::1');
-  const port = options.port ?? clampInt(process.env.CHAT_ON_STEROIDS_DASHBOARD_PORT, 8318, 1, 65535);
+  const port = options.port ?? clampInt(process.env.RUNALITH_DASHBOARD_PORT || process.env.CHAT_ON_STEROIDS_DASHBOARD_PORT, 8318, 1, 65535);
   const dataRoot = resolveDataDir(options.dataDir || DEFAULT_DATA_DIR);
   const dbPath = path.resolve(options.dbPath || DEFAULT_DB_PATH);
   let db = null;
@@ -804,12 +809,12 @@ export function createDashboardServer(options = {}) {
 }
 
 async function main() {
-  const rawHost=process.env.CHAT_ON_STEROIDS_DASHBOARD_HOST || '127.0.0.1';
-  if(!onlyLoopback(rawHost)) throw new Error('CHAT_ON_STEROIDS_DASHBOARD_HOST must be 127.0.0.1 or ::1; non-loopback dashboards are disabled');
+  const rawHost=process.env.RUNALITH_DASHBOARD_HOST || process.env.CHAT_ON_STEROIDS_DASHBOARD_HOST || '127.0.0.1';
+  if(!onlyLoopback(rawHost)) throw new Error('RUNALITH_DASHBOARD_HOST must be 127.0.0.1 or ::1; non-loopback dashboards are disabled');
   const app=createDashboardServer({host:rawHost});
   const address=await app.listen();
   const shownHost=rawHost.includes(':')?`[${rawHost}]`:rawHost;
-  console.log(`Local Orchestrator Dashboard: http://${shownHost}:${address.port}`);
+  console.log(`Runalith Dashboard: http://${shownHost}:${address.port}`);
   console.log(`Database: ${app.dbPath}`);
   console.log('Mode: read-only; loopback only. Press Ctrl+C to stop.');
   const stop=async()=>{await app.close();process.exit(0);};
