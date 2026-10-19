@@ -1,9 +1,4 @@
-* text=auto eol=lf
-*.png binary
-*.jpg binary
-*.jpeg binary
-*.gif binary
-*.webp binary
-*.mcpb binary
-*.sqlite binary
-*.db binary
+# Archify's generated standalone HTML contains intentional whitespace in its
+# embedded viewer template. Keep normal whitespace checks strict for source and
+# Markdown, but don't reject the generator's trailing spaces in these artifacts.
+docs/diagrams/rendered/*.html whitespace=-blank-at-eol
