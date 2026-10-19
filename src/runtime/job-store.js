@@ -16,6 +16,9 @@ import { canonicalExecutionEvidenceContent as executionEvidenceContent, validate
 import { assertSessionGrantAuthority, assertSessionRevokeAuthority, normalizeGovernanceRole } from './workflow/governance.js';
 import { parseStrictJson } from './strict-json.js';
 import { assertProviderDispatchIntent } from './provider-dispatch-identity.js';
+import { getWorkflowPolicySnapshotsForJob, initializeWorkflowPolicyStore } from './workflow/policy-contract.js';
+import { normalizeSuccessContract } from './workflow/success-contract.js';
+import { resolveRoleProfileBindings } from './workflow/role-profiles.js';
 
 const DATA_DIR = process.env.WORKFLOW_DATA_DIR || '/home/long/work/chatgpt-adapter/data';
 const configuredDbPath = path.resolve(process.env.WORKFLOW_DB || path.join(DATA_DIR, 'workflow.db'));
@@ -513,7 +516,10 @@ export function conversationKeyFromMessages(messages) {
 }
 
 export class WorkflowStore {
-  constructor(database = db) { this.db = database; }
+  constructor(database = db) {
+    this.db = database;
+    initializeWorkflowPolicyStore(this.db);
+  }
   getActiveJob(conversationKey) {
     return this.db.prepare("SELECT * FROM jobs WHERE conversation_key = ? AND status = 'active' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get(conversationKey) || null;
   }
@@ -694,6 +700,91 @@ export class WorkflowStore {
       throw error;
     }
   }
+  prepareReviewDrivenRework(jobId, { reason } = {}) {
+    const normalizedReason = typeof reason === 'string' ? reason.trim() : '';
+    if (!normalizedReason || normalizedReason.length > 4000) throw new Error('workflow rework requires a concise non-empty reason (max 4000 characters)');
+    this.assertApprovalCurrent(jobId);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const job = this.getJob(jobId);
+      if (!job || job.state !== 'EXECUTING' || job.status !== 'active') throw new Error(`workflow rework requires an active executing workflow: ${jobId}`);
+      const plan = this.getExecutionPlan(jobId);
+      if (String(plan?.workflow_id || '').toLowerCase() !== 'standard-engineering' || Number(plan?.workflow_version) < 2) throw new Error('workflow rework is only supported for standard-engineering workflow version 2 or later');
+      const parent = this.getTask(job.active_task_id);
+      if (!parent || parent.role !== 'cto' || parent.status !== 'running') throw new Error('workflow rework requires the active running CTO coordinator task');
+      const priorReworkEvent = this.db.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='workflow.review_rework.prepared' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(jobId);
+      if (priorReworkEvent) {
+        const payload = parseStrictJson(priorReworkEvent.payload_json, 'workflow review rework event payload');
+        const tasks = (payload.createdTasks || []).map(taskId => this.getTask(taskId));
+        const allStillPresent = tasks.length > 0 && tasks.every(task => task && ['pending', 'running', 'completed'].includes(task.status));
+        const currentActiveReview = this.db.prepare("SELECT artifact_id FROM artifacts WHERE job_id=? AND kind='review' AND status='active' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(jobId);
+        if (allStillPresent && (!currentActiveReview || currentActiveReview.artifact_id === payload.reviewArtifactId)) {
+          this.db.exec('COMMIT');
+          return { prepared: true, idempotent: true, ...payload, tasks };
+        }
+      }
+      const reviewRow = this.db.prepare("SELECT * FROM artifacts WHERE job_id=? AND kind='review' AND status='active' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(jobId);
+      if (!reviewRow) throw new Error('workflow rework requires an active reviewer artifact');
+      const reviewArtifact = this.hydrateArtifact(reviewRow);
+      const review = reviewArtifact.content || {};
+      if (!['needs_changes', 'reject'].includes(review.decision)) throw new Error('workflow rework requires a reviewer decision of needs_changes or reject');
+      if (Array.isArray(review.securityIssues) && review.securityIssues.length && review.securityAccepted !== false) throw new Error('review findings are internally inconsistent; resolve security review data before rework');
+      const children = this.db.prepare('SELECT * FROM tasks WHERE job_id=? AND parent_task_id=? ORDER BY created_at ASC, rowid ASC').all(jobId, parent.task_id);
+      const unsettled = children.filter(task => task.status !== 'completed');
+      if (unsettled.length) throw new Error(`workflow rework requires all current specialist tasks to be completed: ${unsettled.map(task => `${task.role}:${task.status}`).join(', ')}`);
+      const reviewerTask = this.getTask(reviewArtifact.task_id);
+      if (!reviewerTask || reviewerTask.role !== 'reviewer' || reviewerTask.status !== 'completed' || reviewerTask.parent_task_id !== parent.task_id) throw new Error('active review artifact is not owned by the completed reviewer task under the active CTO parent');
+      const specs = plan.children || [];
+      const roles = new Set(['reviewer']);
+      if (review.requirementsSatisfied === false) ['product-owner', 'researcher', 'architect', 'engineer', 'security', 'qa', 'platform', 'writer'].forEach(role => roles.add(role));
+      if (review.architectureConformant === false) ['architect', 'engineer', 'security', 'qa', 'platform', 'writer'].forEach(role => roles.add(role));
+      if (review.securityAccepted === false) ['engineer', 'security'].forEach(role => roles.add(role));
+      if (review.qaAccepted === false) ['engineer', 'qa'].forEach(role => roles.add(role));
+      if (review.platformAccepted === false) ['engineer', 'platform'].forEach(role => roles.add(role));
+      if (review.documentationAccepted === false) ['engineer', 'writer'].forEach(role => roles.add(role));
+      if (Array.isArray(review.implementationIssues) && review.implementationIssues.length) roles.add('engineer');
+      if (Array.isArray(review.securityIssues) && review.securityIssues.length) ['engineer', 'security'].forEach(role => roles.add(role));
+      const targetSpecs = specs.filter(spec => roles.has(String(spec.role).toLowerCase()));
+      if (!targetSpecs.some(spec => String(spec.role).toLowerCase() === 'reviewer')) throw new Error('immutable plan does not include a reviewer task');
+      const latestTaskForSpec = spec => children.filter(task => {
+        try { return parseStrictJson(task.metadata_json || '{}', 'task metadata').workflow_plan_task_id === spec.id; } catch { return false; }
+      }).at(-1);
+      const invalidateIds = [];
+      const createSpecs = [];
+      for (const spec of targetSpecs) {
+        const previous = latestTaskForSpec(spec);
+        if (!previous || previous.status !== 'completed') throw new Error(`cannot rework ${spec.role}: latest planned task is missing or incomplete`);
+        const expectedType = String(spec.role).toLowerCase() === 'reviewer' ? 'review' : getAgentArtifactType(spec.role);
+        const active = this.db.prepare("SELECT artifact_id FROM artifacts WHERE job_id=? AND task_id=? AND kind=? AND status='active' ORDER BY created_at DESC, rowid DESC").all(jobId, previous.task_id, expectedType);
+        if (active.length !== 1) throw new Error(`cannot rework ${spec.role}: expected exactly one active ${expectedType} artifact for prior task`);
+        invalidateIds.push(active[0].artifact_id);
+        createSpecs.push({ spec, previous, priorArtifactId: active[0].artifact_id });
+      }
+      for (const artifactId of invalidateIds) {
+        const updated = this.db.prepare("UPDATE artifacts SET status=? WHERE artifact_id=? AND job_id=? AND status='active'").run(ArtifactStatus.INVALIDATED, artifactId, jobId);
+        if (updated.changes !== 1) throw new Error(`artifact invalidation lost a concurrent update: ${artifactId}`);
+      }
+      const createdTasks = [];
+      for (const { spec, previous, priorArtifactId } of createSpecs) {
+        const task = this.createChildTask(jobId, {
+          parentTaskId: parent.task_id,
+          role: spec.role,
+          description: `Evidence-driven rework for ${spec.role} after reviewer finding in ${reviewArtifact.artifact_id}: ${normalizedReason}`,
+          dependencies: spec.dependencies || [],
+          metadata: { ...(spec.execution || {}), rework: true, rework_of_task_id: previous.task_id, rework_of_artifact_id: priorArtifactId, workflow_plan_task_id: spec.id }
+        });
+        createdTasks.push(task.task_id);
+      }
+      const payload = { jobId, parentTaskId: parent.task_id, reviewArtifactId: reviewArtifact.artifact_id, previousReviewerTaskId: reviewerTask.task_id, targetRoles: createSpecs.map(entry => entry.spec.role), createdTasks, invalidatedArtifacts: invalidateIds, reason: normalizedReason, planHash: plan.plan_hash };
+      this.recordEvent(jobId, 'workflow.artifacts.invalidated', { reviewArtifactId: reviewArtifact.artifact_id, artifactIds: invalidateIds }, `${jobId}|review-rework-invalidation|${reviewArtifact.artifact_id}`);
+      this.recordEvent(jobId, 'workflow.review_rework.prepared', payload, `${jobId}|review-rework|${reviewArtifact.artifact_id}`);
+      this.db.exec('COMMIT');
+      return { prepared: true, idempotent: false, ...payload, tasks: createdTasks.map(taskId => this.getTask(taskId)) };
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch (_) {}
+      throw error;
+    }
+  }
   prepareReviewerRevision(jobId, { reason } = {}) {
     const normalizedReason = typeof reason === 'string' ? reason.trim() : '';
     if (!normalizedReason || normalizedReason.length > 4000) {
@@ -819,6 +910,22 @@ export class WorkflowStore {
     }
     try { validateExecutionPlan(plan); }
     catch (error) { throw new Error(`immutable execution plan schema validation failed: ${jobId}: ${error.message}`); }
+    const attachedPolicySnapshots = getWorkflowPolicySnapshotsForJob(this.db, jobId);
+    const planPolicySnapshots = Array.isArray(plan.policy_packs) ? plan.policy_packs : [];
+    if (canonicalJson(attachedPolicySnapshots) !== canonicalJson(planPolicySnapshots)) {
+      throw new Error(`immutable execution plan policy attachment ledger mismatch: ${jobId}`);
+    }
+    if (planPolicySnapshots.length) {
+      const job = this.getJob(jobId);
+      const proposalPayload = this.getCurrentProposal(jobId)?.payload || {};
+      const expectedBaseContract = normalizeSuccessContract(
+        proposalPayload.success_contract || { goal: proposalPayload.task || job?.title || jobId },
+        job?.title || jobId
+      );
+      if (canonicalJson(expectedBaseContract) !== canonicalJson(plan.base_success_contract)) {
+        throw new Error(`immutable execution plan base success contract mismatch: ${jobId}`);
+      }
+    }
     const planEvents = this.db.prepare("SELECT event_id,job_id,type,payload_json FROM events WHERE job_id=? AND type='workflow.plan_compiled'").all(jobId);
     const expectedEventId = eventId(jobId, 'workflow.plan_compiled', row.plan_hash);
     const expectedPayload = { workflowId: plan.workflow_id, workflowVersion: plan.workflow_version, planHash: row.plan_hash };
@@ -828,13 +935,21 @@ export class WorkflowStore {
     }
     return { ...plan, plan_hash: row.plan_hash, compiled_at: row.compiled_at, approved_at: row.approved_at };
   }
-  compileExecutionPlan(jobId, { workspace = process.env.WORKFLOW_WORKSPACE, customWorkflow = null, successContract = undefined } = {}) {
+  compileExecutionPlan(jobId, { workspace = process.env.WORKFLOW_WORKSPACE, customWorkflow = null, successContract = undefined, roleProfiles = null } = {}) {
     const job = this.getJob(jobId);
     if (!job) throw new Error('job not found: ' + jobId);
     const existing = this.getExecutionPlan(jobId);
     const proposalPayload = this.getCurrentProposal(jobId)?.payload || {};
     const pinnedSuccessContract = successContract ?? proposalPayload.success_contract ?? { goal: proposalPayload.task || job.title };
-    const plan = compileWorkflowPlan(job, { workspace, customWorkflow, successContract: pinnedSuccessContract });
+    const policyPacks = getWorkflowPolicySnapshotsForJob(this.db, jobId);
+    // Recompilation during local task/batch execution must reconstruct the same
+    // role profile overlay snapshots from exact IDs/versions/hash pins in the
+    // approved proposal. Treating an omitted argument as [] silently removed
+    // overlays during plan revalidation and made every profile-bound execution
+    // fail the immutable-plan comparison. Explicit [] remains meaningful for
+    // callers that deliberately compiled a proposal with no overlays.
+    const pinnedRoleProfiles = roleProfiles ?? resolveRoleProfileBindings(this.db, proposalPayload.role_profile_bindings || []);
+    const plan = compileWorkflowPlan(job, { workspace, customWorkflow, successContract: pinnedSuccessContract, policyPacks, roleProfiles: pinnedRoleProfiles });
     const planJson = canonicalJson(Object.fromEntries(Object.entries(plan).filter(([key]) => key !== 'plan_hash')));
     if (existing) {
       const storedPlan = this.db.prepare('SELECT plan_json, plan_hash FROM workflow_plans WHERE job_id = ?').get(jobId);
@@ -3360,7 +3475,10 @@ export class WorkflowStore {
           const plan = this.getExecutionPlan(task.job_id);
           const workflowId = String(plan?.workflow_id || '').toLowerCase();
           const role = String(task.role || '').toLowerCase();
-          const artifactType = workflowId === 'production' && ['architect','qa'].includes(role)
+          const plannedTask = plan?.children?.find(item => item.id === metadata.workflow_plan_task_id);
+          const artifactType = workflowId === 'hybrid-engineering' && plannedTask?.execution?.deterministic === true
+            ? plannedTask.execution.output_artifact_type
+            : workflowId === 'production' && ['architect','qa'].includes(role)
             ? getAgentArtifactType(task.role)
             : workflowId === 'engineering' && role === 'engineer' ? 'implementation'
               : workflowId === 'engineering' ? ({ security: 'security-review', qa: 'qa-report', platform: 'platform-review', writer: 'documentation' })[role]
@@ -3403,6 +3521,7 @@ export class WorkflowStore {
       const workflowId = String(planForExecution?.workflow_id || '').toLowerCase();
       const engineeringWorkflow = workflowId === 'engineering';
       const productionWorkflow = workflowId === 'production';
+      const hybridWorkflow = workflowId === 'hybrid-engineering';
       if (outcome === 'success' && engineeringWorkflow && String(task.role || '').toLowerCase() === 'engineer') {
         this.createArtifact({
           artifact_id: `implementation-${resultId}`, job_id: task.job_id, task_id: task.task_id,
@@ -3431,6 +3550,36 @@ export class WorkflowStore {
           type: specialistType, producer_role: task.role, content: contentByType[specialistType],
           evidence: [resultId, implementation.artifact_id]
         });
+      }
+      // Hybrid deterministic tasks publish a typed artifact only after the
+      // approved ExecutionManager command succeeds. Keep it in the same SQLite
+      // savepoint as result/session/attempt/completion evidence so recovery can
+      // validate the exact result -> artifact -> terminal-event lineage.
+      if (outcome === 'success' && hybridWorkflow) {
+        const plannedTask = planForExecution?.children?.find(item => item.id === metadata.workflow_plan_task_id);
+        const artifactType = plannedTask?.execution?.deterministic === true
+          ? plannedTask.execution.output_artifact_type
+          : null;
+        if (artifactType) {
+          const existingArtifact = this.db.prepare("SELECT artifact_id FROM artifacts WHERE job_id=? AND task_id=? AND kind=? AND status='active'")
+            .get(task.job_id, taskId, artifactType);
+          if (existingArtifact) throw new Error(`hybrid execution already has an active ${artifactType} artifact before its terminal result`);
+          let artifactContent;
+          if (artifactType === 'documentation') {
+            artifactContent = {
+              summary: `Deterministic local check completed: ${command}`,
+              user_facing_changes: [],
+              verification: [`execution_session_id=${executionSessionId}`, `exit_code=${normalizedExitCode}`, evidence]
+            };
+          } else {
+            throw new Error(`hybrid deterministic task has unsupported typed output artifact: ${artifactType}`);
+          }
+          this.createArtifact({
+            artifact_id: `${artifactType}-${resultId}`, job_id: task.job_id, task_id: taskId,
+            type: artifactType, producer_role: task.role, content: artifactContent,
+            evidence: [resultId, executionSessionId]
+          });
+        }
       }
       // Production syntax-check tasks used to create their typed artifact in a
       // second server/index.js write, after execution.completed. Persist it here
@@ -5097,15 +5246,18 @@ export class WorkflowStore {
   reviewerArtifactEvidence(task, plan, resultId) {
     const evidence = [resultId];
     if (String(task?.role || '').toLowerCase() !== 'reviewer' ||
-        !['engineering', 'standard-engineering'].includes(plan?.workflow_id) || plan.workflow_version < 2) return evidence;
-    const children = this.db.prepare('SELECT * FROM tasks WHERE job_id=? AND parent_task_id=?').all(task.job_id, task.parent_task_id);
+        !['engineering', 'standard-engineering', 'hybrid-engineering'].includes(plan?.workflow_id) || plan.workflow_version < 2) return evidence;
+    const children = this.db.prepare('SELECT * FROM tasks WHERE job_id=? AND parent_task_id=? ORDER BY created_at, rowid').all(task.job_id, task.parent_task_id);
     for (const type of getAgentInputArtifactTypes('reviewer')) {
-      const producerSpec = plan.children.find(spec => getAgentArtifactType(spec.role) === type);
+      const producerSpec = plan.children.find(spec => {
+        if (spec.execution?.output_artifact_type) return spec.execution.output_artifact_type === type;
+        try { return getAgentArtifactType(spec.role) === type; } catch { return false; }
+      });
       if (!producerSpec) throw new Error(`reviewer input ${type} has no producer in immutable workflow plan`);
-      const producer = children.find(child => {
+      const producer = children.filter(child => {
         try { return parseStrictJson(child.metadata_json || '{}').workflow_plan_task_id === producerSpec.id; }
         catch { return false; }
-      });
+      }).at(-1);
       if (!producer || producer.status !== 'completed' || producer.role !== producerSpec.role) {
         throw new Error(`reviewer input ${type} producer is not durably completed: ${producerSpec.id}`);
       }
@@ -6402,7 +6554,7 @@ export class WorkflowStore {
     return this.getSlackJobView(jobId);
   }
   getSlackJobView(jobId) { return this.db.prepare('SELECT * FROM slack_job_views WHERE job_id=?').get(jobId) || null; }
-  approve(jobId, rawText, actor = 'chat-on-steroids-user', { workspace = process.env.WORKFLOW_WORKSPACE, customWorkflow = null, successContract = undefined } = {}) {
+  approve(jobId, rawText, actor = 'chat-on-steroids-user', { workspace = process.env.WORKFLOW_WORKSPACE, customWorkflow = null, successContract = undefined, roleProfiles = [] } = {}) {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const job = this.getJob(jobId);
@@ -6430,7 +6582,7 @@ export class WorkflowStore {
       const runtime = this.getWorkflowRuntimeState(jobId);
       if (runtime?.phase === 'PROPOSED') this.transitionWorkflowPhase(jobId, 'APPROVED', { event: 'workflow.approved', payload: { actor } });
       this.recordEvent(jobId, 'approval.approved', { actor, rawText, proposalHash: proposal.proposalHash }, hash(`${rawText}|${proposal.proposalHash}`));
-      if (isSupportedWorkflow(this.getJob(jobId))) this.compileExecutionPlan(jobId, { workspace, customWorkflow, successContract: successContract ?? proposal.payload.success_contract });
+      if (isSupportedWorkflow(this.getJob(jobId))) this.compileExecutionPlan(jobId, { workspace, customWorkflow, successContract: successContract ?? proposal.payload.success_contract, roleProfiles });
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');

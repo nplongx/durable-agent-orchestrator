@@ -25,7 +25,7 @@ The host is deliberately restricted to loopback. A non-loopback host value is re
 
 - **Overview:** workflow/task counts, recent activity, runtime/database health, and a *Needs attention* queue.
 - **Workflows:** filter and inspect workflow status, phase, progress, tasks, approvals, transitions, results, artifacts, and reports.
-- **Roles & skills:** inspect custom-role versions, attached Agent Skills snapshots and hashes, and the precise role version pinned by each saved custom workflow. Built-in runtime roles are fixed contracts, not custom profiles.
+- **Roles & skills:** inspect custom-role versions, attached Agent Skills snapshots and hashes, exact role-version pins in custom workflows, and opt-in custom profile overlays proposed for built-in `standard-engineering` specialist tasks. Built-in runtime roles remain fixed contracts.
 - **Batch execution:** inspect durable `execution_batches` and `execution_batch_items` separately from individual task-level `ExecutionManager` records. An individual execution does not become a batch merely because it completed successfully.
 - **Event stream and artifacts:** search recorded events and inspect bounded artifact metadata/content previews.
 - **File explorer:** list and preview approved text/log files underneath the configured data directory.
@@ -44,7 +44,7 @@ The browser uses these read-only endpoints:
 | `GET /api/overview` | Aggregate status/count summaries |
 | `GET /api/jobs` | Filtered and paginated workflow registry |
 | `GET /api/jobs/:job_id` | One workflow and its bounded related records |
-| `GET /api/roles` | Custom role versions, skill snapshots and custom-workflow version pins |
+| `GET /api/roles` | Custom role versions, Skill snapshots, custom-workflow version pins, and `builtin_role_profile_pins` for exact built-in role/profile/version/hash references |
 | `GET /api/batches` | Durable batch and individual-execution ledgers |
 | `GET /api/events` | Filtered event stream |
 | `GET /api/artifacts` and `GET /api/artifacts/:artifact_id` | Artifact index and one artifact's bounded detail |
@@ -52,6 +52,10 @@ The browser uses these read-only endpoints:
 | `GET /api/files/preview?path=...` | Bounded preview of an allowed text/log file |
 
 Unknown routes return `404`. API requests using a method other than `GET` are rejected with `405`. The root HTML and local CSS/JavaScript assets are served from the bundled `dashboard/public/` directory; assets are not fetched from a CDN.
+
+### Built-in role profile overlays
+
+The **Built-in role profile overlays** table reads the latest proposal binding per workflow from the event ledger. It shows built-in role, custom profile identity/version, profile SHA-256, Skill names and workflow status. A row records proposal intent; it does **not** prove the workflow was approved, dispatched, or completed. The API exposes bounded metadata only, not raw system prompts, Skill contents, or local source paths. Overlay bindings are currently accepted only for `standard-engineering`; built-in contracts and runtime permissions remain authoritative.
 
 ## Security and data boundaries
 

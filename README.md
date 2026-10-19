@@ -65,6 +65,8 @@ The test creates a temporary SQLite database and workspace, exercises the MCP ha
 | `workflow_dispatch` | Start the local workflow and durable coordinator task |
 | `workflow_prepare_tasks` | Create/recover planned child tasks |
 | `workflow_next_task` | Return the next dependency-ready task and predecessor results |
+| `workflow_diagnose` | Read-only diagnosis of stuck tasks, reviewer findings, missing artifacts, and safe recovery actions |
+| `workflow_request_rework` | Create linked specialist task revisions for a blocked `standard-engineering` v2 review while preserving plan and gates |
 | `workflow_request_reviewer_revision` | Create a linked reviewer revision when a standard-engineering v2 review is accepted but blocked solely by documented `evidenceIssues` |
 | `workflow_complete_task` | Persist the real task result and typed artifact |
 | `task_execute_local` | Run an approved deterministic structured command locally |
@@ -86,6 +88,8 @@ The `engineering` (Engineering M4) and `standard-engineering` templates compile 
 Plan validation rejects a built-in engineering role input without a producer in its transitive dependency graph. The runtime does not issue the reviewer task until each of its seven required input artifacts is active, schema/hash-valid, and bound to exactly one successful producer result. The review artifact durably references those upstream artifacts and its own result. CTO synthesis and recovery verification re-check reviewer evidence provenance; an `accept` decision alone cannot bypass missing, substituted, or invalid evidence.
 
 For standard-engineering plan v2+, `workflow_request_reviewer_revision` is a narrowly scoped recovery path for a review that is otherwise accepted but remains blocked solely by a non-empty `evidenceIssues` list. The runtime checks approval, active CTO ownership, completed task state, reviewer provenance, and the accepted review fields; it then invalidates the prior active review artifact and creates a new linked reviewer task under the same immutable plan. The old task/result/artifact remains in history, while the revision chain is validated during task discovery, synthesis, and recovery. This tool cannot revise rejected reviews, clear implementation/security/blocking findings, change the plan, or bypass independent synthesis/success-contract gates. Report non-blocking test limitations in the revised review's `limitations` field and clear `evidenceIssues` only when the reviewer can substantiate that no required evidence remains missing or invalid.
+
+For a review with actual findings (`needs_changes` or `reject`), use `workflow_diagnose` first, then `workflow_request_rework` after the current specialist tasks are complete and their typed evidence passes provenance validation. The rework tool derives affected roles from the review flags, invalidates the affected active artifacts, and creates new tasks linked to the exact prior task/artifact IDs. It is idempotent for the current recovery cycle, carries the pinned role-profile execution metadata forward, and does not alter the approved plan hash or approve synthesis. Re-run the affected specialists and reviewer; the normal reviewer evidence, QA, CTO, and success-contract gates remain in force. Failed/cancelled execution attempts are diagnosed but are not silently retried by this tool.
 
 ## Goal, constraints, and success criteria (strict JSON predicates)
 
@@ -155,6 +159,8 @@ Custom role definitions are stored in the plugin's local SQLite database. They s
 
 Custom roles are stored as immutable versions. Their permissions are intentionally limited to `workspace.read` and `artifact.create`; declared tools come from a read-only allowlist. A role definition cannot grant shell execution or workspace-write permission.
 
+Built-in role profiles can also receive these custom role/Agent Skill snapshots as supplemental prompt overlays. The overlays pin the exact role version and Skill hashes into the immutable approved plan; they do not replace the built-in contract, executor, allowed tools, or permissions. For a workflow that combines this with genuine deterministic Batch Execution in the same plan, see [Hybrid engineering workflow](docs/hybrid-engineering-workflow.md).
+
 ### Attach Agent Skills to a role
 
 Pass `skills` as an optional array to `custom_role_create`, `custom_role_update`, or `custom_role_clone`. Each entry is either a local skill directory (absolute path, `~/...`, or relative to the configured workspace) or a public GitHub URL that identifies a skill directory:
@@ -212,6 +218,16 @@ The workflow must already be explicitly approved, dispatched, and in `EXECUTING`
 
 The returned evidence includes the durable batch ID/status/attempt, protocol summary, per-item task role/status/exit code/execution session, bounded redacted output previews, and an aggregate preview. The batch's recorded `initiator_role` is `system-workflow-coordinator`; task roles remain bound individually to the immutable plan. `execute_batch` is part of the current MCP `tools/list` and `tools/call` path, not just the legacy `server.js` adapter. It does not backfill or combine historical individual executions, and it rejects any task that already has an execution or batch ledger. The tool uses the batch manager's existing recovery semantics; it does not add a separate remote runner, cloud service, or cancellation API.
 
+### Hybrid engineering workflow
+
+The `hybrid-engineering` template combines nine specialist host-conversation stages with two code-authored deterministic syntax checks. Each check is dependent on the engineer result but independent from the other check, so once both are ready the scheduler sends them through one durable `execute_batch`. Security, QA, platform, writer, and reviewer stages wait for those results, and CTO synthesis waits for all children. Unlike an ordinary `standard-engineering` run, this template therefore places pinned custom role/Skill overlays and deterministic ExecutionManager tasks in the **same immutable plan**. The batch call remains restricted to plan-defined tasks; it cannot be used to turn arbitrary host tasks into shell commands. See [Hybrid engineering: custom roles, Agent Skills, and Batch Execution](docs/hybrid-engineering-workflow.md) for proposal JSON and the exact lifecycle.
+
+## Reusable workflow policy packs
+
+Operators can define versioned, reusable rule packs without editing plugin source. The `workflow_policy_catalog`, `workflow_policy_validate`, `workflow_policy_create`, `workflow_policy_list`, `workflow_policy_get`, `workflow_policy_update`, and `workflow_policy_attach` tools expose a closed JSON predicate catalog. Attach an exact version to an active, **unapproved** workflow proposal; approval compiles its policy snapshots, merged predicates, and their hashes into the immutable execution plan. Updating a policy creates a new immutable version and does not alter plans already pinned to older versions. `workflow_get` shows each proposal's policy attachments.
+
+Policies reuse the runtime's supported success-contract predicates: `all_tasks_completed`, `local_execution_only`, `workflow_id_equals`, `task_status_equals`, `execution_exit_code_equals`, `task_role_present`, `task_role_absent`, `artifact_exists`, `artifact_field_equals`, `artifact_field_includes`, and `artifact_field_non_empty`. The catalog documents each real enforcement point. Failed policy predicates are recorded as immutable, plan-bound violation events when independent synthesis evaluation blocks success. The read-only Dashboard checks stored policy/version hash integrity and shows recorded violations separately; a valid snapshot hash is not a blanket compliance assertion. Unsupported ideas such as a configurable retry limit are deliberately not offered until they have an actual runtime enforcement gate. Policies cannot grant permissions, run executable content, waive system rules, mutate an approved plan, or override independently evaluated evidence. See [Versioned workflow policy packs](docs/workflow-policies.md) for schemas, lifecycle, sample JSON, enforcement details, and limits.
+
 ## Local monitoring dashboard
 
 The optional **ORBIT / OPS** dashboard is a separate, read-only local web process. It does not change the MCP stdio entrypoint and exposes no workflow approval, dispatch, retry, or mutation controls. It reads the existing SQLite database, so it does not create a replacement database or change workflow records. Its workflow, role/skill, batch, event, artifact and file inspectors are documented in [ORBIT / OPS dashboard operations and security](docs/local-dashboard.md).
@@ -228,7 +244,7 @@ The server listens on loopback only. Use the environment variables listed in [th
 
 The local MCP workflow is suitable for controlled local development and testing. It is **not yet certified for production use**. Passing unit/integration tests does not establish autonomous specialist quality, real OpenClaw/Gateway execution, external delivery, or exactly-once external side effects. Experimental distributed-worker and M12 integration work is documented separately and is not enabled by the local plugin entrypoint.
 
-Release and benchmark gates remain blocked until the frozen release artifact is identified, exact-scope authorization and independent review are recorded, the CASE-06 policy disposition is verified, and the authorization audit trail is reconciled. See [Known issues and release blockers](docs/KNOWN_ISSUES.md) and the [M12 native specialist bridge boundary](docs/m12-native-specialist-bridge.md).
+The `1.0.9-rc.4` hybrid-engineering candidate has a recorded local bundle hash, but it is not the official frozen artifact and is not approved for release. Release and benchmark gates remain blocked until frozen artifact identity, signed exact-scope authorization, independent review, the CASE-06 policy disposition, static release-policy validation, and authorization-audit reconciliation are complete. See the [1.0.9-rc.4 review-candidate record](docs/review-candidate-1.0.9-rc.4.md), [known issues and release blockers](docs/KNOWN_ISSUES.md), and the [M12 native specialist bridge boundary](docs/m12-native-specialist-bridge.md).
 
 ## Source layout
 

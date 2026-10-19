@@ -6,6 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { roleProfileHash } from '../src/runtime/workflow/role-profiles.js';
+import { validateExecutionPlan } from '../src/runtime/workflow/plan.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-local-plugin-'));
@@ -514,9 +516,9 @@ try {
   const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
   assert.equal(init.result?.serverInfo?.name, 'chat-on-steroids-local-orchestrator');
   const listed = await rpc('tools/list');
-  assert.equal(listed.result.tools.length, 37);
+  assert.equal(listed.result.tools.length, 46);
   for (const name of ['workflow_coordinator_role', 'workflow_coordinator_step']) assert(listed.result.tools.some(tool => tool.name === name), `missing exposed tool ${name}`);
-  for (const name of ['workflow_e2e_run', 'workflow_recovery_verify', 'workflow_record_intervention', 'workflow_interventions', 'workflow_validate_artifact', 'workflow_access_diagnostics']) assert(listed.result.tools.some(tool => tool.name === name), `missing exposed tool ${name}`);
+  for (const name of ['workflow_e2e_run', 'workflow_recovery_verify', 'workflow_diagnose', 'workflow_request_rework', 'workflow_record_intervention', 'workflow_interventions', 'workflow_validate_artifact', 'workflow_access_diagnostics']) assert(listed.result.tools.some(tool => tool.name === name), `missing exposed tool ${name}`);
   for (const name of ['custom_role_create', 'custom_role_update', 'custom_role_get', 'custom_role_list', 'custom_role_clone']) assert(listed.result.tools.some(tool => tool.name === name), `missing exposed tool ${name}`);
   for (const name of ['custom_workflow_create', 'custom_workflow_update', 'custom_workflow_get', 'custom_workflow_list', 'custom_workflow_clone', 'custom_workflow_preview', 'custom_workflow_approve', 'custom_workflow_run_create']) assert(listed.result.tools.some(tool => tool.name === name), `missing exposed tool ${name}`);
   assert.ok(listed.result.tools.some(item => item.name === 'workflow_create'));
@@ -796,6 +798,385 @@ try {
   assert.deepEqual(clearedSkillRole.role.skills, [], 'skills: [] must remove attached skills in a new role version');
   assert.equal((await tool('custom_role_get', { role_id: 'workflow-documenter', version: 2 })).role.skills[0].sha256, originalSkillHash,
     'clearing skills in a new version must not mutate older role versions pinned by workflows');
+
+  // Built-in workflows can opt into a version-pinned custom profile overlay.
+  // The profile supplies guidance/Skills only; the built-in task contract stays
+  // authoritative and changing the latest profile version must not affect v1.
+  const architectureSkillDir = path.join(temp, 'skill-fixtures', 'architecture-evidence');
+  fs.mkdirSync(path.join(architectureSkillDir, 'references'), { recursive: true });
+  fs.writeFileSync(path.join(architectureSkillDir, 'SKILL.md'), [
+    '---', 'name: architecture-evidence', 'description: >-',
+    '  Check architecture interfaces, boundaries, and failure modes against supplied evidence.', '---', '',
+    '# Architecture evidence', 'Check component boundaries and failure modes; clearly separate verified facts from assumptions.'
+  ].join('\n'));
+  fs.writeFileSync(path.join(architectureSkillDir, 'references', 'checks.md'), 'Check API contracts, invalid inputs, recovery and failure isolation.\n');
+  const builtInArchitectProfile = await tool('custom_role_create', {
+    role_id: 'builtin-architect-profile', name: 'Built-in Architect Profile',
+    description: 'Supplementary architecture methodology for the fixed architect role.',
+    system_prompt: 'Use evidence-led architecture analysis. This prompt must not replace the built-in architect contract.',
+    input_contract: ['job.request', 'requirements', 'research'], output_artifact_type: 'architecture',
+    allowed_capabilities: ['architecture.design'], permissions: ['workspace.read', 'artifact.create'],
+    skills: [architectureSkillDir]
+  });
+  assert.equal(builtInArchitectProfile.role.version, 1);
+  const builtInArchitectProfileHash = roleProfileHash(builtInArchitectProfile.role);
+  const profileBoundWorkflow = await tool('workflow_create', {
+    title: 'Pinned Architect Profile Overlay Test',
+    task: 'Verify an exact custom profile and Skill snapshot can supplement the built-in architect task without changing its role contract.',
+    workflow: 'standard-engineering', workspace,
+    role_bindings: [{ role: 'architect', custom_role_id: 'builtin-architect-profile', custom_role_version: 1 }]
+  });
+  assert.equal(profileBoundWorkflow.created, true);
+  assert.equal(profileBoundWorkflow.role_profile_bindings[0].role, 'architect');
+  assert.equal(profileBoundWorkflow.role_profile_bindings[0].profile_hash, builtInArchitectProfileHash);
+  assert.equal(profileBoundWorkflow.requires_explicit_approval, true);
+  const changedArchitectProfile = await tool('custom_role_update', {
+    role_id: 'builtin-architect-profile',
+    system_prompt: 'Version 2 instructions: the already-created workflow must remain pinned to version 1.'
+  });
+  assert.equal(changedArchitectProfile.role.version, 2);
+  const overlayPolicy = await tool('workflow_policy_create', {
+    policy_id: 'overlay-local-only', name: 'Overlay local-only',
+    description: 'Policy attachment must preserve exact built-in profile overlay pins.',
+    constraints: [{ id: 'local-only', type: 'local_execution_only' }]
+  });
+  assert.equal(overlayPolicy.policy.version, 1);
+  const overlayPolicyAttach = await tool('workflow_policy_attach', {
+    job_id: profileBoundWorkflow.job_id, policy_id: 'overlay-local-only', version: 1
+  });
+  assert.equal(overlayPolicyAttach.attached, true, 'policy attachment must compile preview with the proposal profile binding');
+  const profileBoundApproval = await tool('workflow_approve', {
+    job_id: profileBoundWorkflow.job_id,
+    confirmation: 'Approve the local regression fixture for exact built-in role-profile overlay pinning.'
+  });
+  assert.equal(profileBoundApproval.approved, true);
+  const architectPlanTask = profileBoundApproval.plan.children.find(item => item.role === 'architect');
+  assert.ok(architectPlanTask, 'built-in architect task remains present');
+  assert.equal(architectPlanTask.id, 'standard-architect');
+  assert.equal(architectPlanTask.capability, 'architecture.design');
+  assert.deepEqual(architectPlanTask.dependencies, ['standard-product-owner', 'standard-researcher']);
+  assert.equal(architectPlanTask.execution.role_profile_overlay.role_id, 'builtin-architect-profile');
+  assert.equal(architectPlanTask.execution.role_profile_overlay.version, 1, 'plan must use the explicitly pinned old version, not latest v2');
+  assert.equal(architectPlanTask.execution.role_profile_overlay.profile_hash, builtInArchitectProfileHash);
+  assert.equal(profileBoundApproval.plan.policy_packs[0].policy_id, 'overlay-local-only');
+  assert.equal(architectPlanTask.execution.role_profile_overlay.system_prompt, builtInArchitectProfile.role.system_prompt);
+  assert.equal(architectPlanTask.execution.role_profile_overlay.skills[0].name, 'architecture-evidence');
+  assert.equal(architectPlanTask.execution.role_profile_overlay.skills[0].sha256, builtInArchitectProfile.role.skills[0].sha256);
+  assert.match(profileBoundApproval.plan.plan_hash, /^[a-f0-9]{64}$/);
+  const tamperedOverlayPlan = structuredClone(profileBoundApproval.plan);
+  tamperedOverlayPlan.children.find(item => item.role === 'architect').execution.role_profile_overlay.system_prompt += '\nTampered after approval.';
+  assert.throws(() => validateExecutionPlan(tamperedOverlayPlan), /overlay hash mismatch/i,
+    'changing profile content inside an immutable plan must fail hash validation');
+  assert.equal(Object.hasOwn(architectPlanTask.execution, 'custom_role_permissions'), false,
+    'profile permission declarations must not replace built-in runtime permissions');
+  await tool('workflow_dispatch', { job_id: profileBoundWorkflow.job_id });
+  const profileBoundChildren = await tool('workflow_prepare_tasks', { job_id: profileBoundWorkflow.job_id });
+  const architectChild = profileBoundChildren.tasks.find(item => item.plan_task_id === 'standard-architect');
+  assert.ok(architectChild);
+  assert.equal(architectChild.role, 'architect', 'overlay must not change the durable task role');
+  assert.match(architectChild.description, /Built-in Architect Profile \(builtin-architect-profile@1\)/);
+  assert.match(architectChild.description, /This prompt must not replace the built-in architect contract/);
+  assert.match(architectChild.description, /Pinned profile snapshot SHA-256/);
+  assert.match(architectChild.description, /Check component boundaries and failure modes/);
+  assert.match(architectChild.description, /references\/checks\.md/);
+  assert.doesNotMatch(architectChild.description, /Version 2 instructions/);
+  assert.match(architectChild.description, /Completion criteria: components_defined; interfaces_defined; failure_modes_defined; implementation_boundary_defined/);
+  assert.match(architectChild.description, /profile permissions and allowed_tools do not grant runtime access/i);
+  const recoveredProfileBoundWorkflow = await tool('workflow_get', { job_id: profileBoundWorkflow.job_id });
+  const recoveredArchitectTask = recoveredProfileBoundWorkflow.plan.children.find(item => item.role === 'architect');
+  assert.equal(recoveredArchitectTask.execution.role_profile_overlay.profile_hash, builtInArchitectProfileHash,
+    'workflow read/recovery must preserve the exact approved profile snapshot hash');
+  assert.equal(recoveredProfileBoundWorkflow.plan.plan_hash, profileBoundApproval.plan.plan_hash,
+    'workflow plan readback must preserve the approved immutable plan hash after policy attachment and dispatch');
+  const profileOverlayRecovery = await tool('workflow_recovery_verify', { job_id: profileBoundWorkflow.job_id });
+  assert.equal(profileOverlayRecovery.status, 'PASS',
+    'profile-bound workflow recovery verification must preserve its exact approved plan and overlay snapshot: ' + JSON.stringify(profileOverlayRecovery.checks));
+  assert.equal(profileOverlayRecovery.plan_hash, profileBoundApproval.plan.plan_hash,
+    'fresh-process recovery verification must read back the same profile-bound plan hash');
+
+  // The hybrid workflow keeps the nine host-conversation specialist contracts
+  // and their pinned profile/Skill snapshots, while adding two independent,
+  // code-authored ExecutionManager checks to the same immutable plan. Once the
+  // engineer finishes, workflow_next_task must submit both ready checks through
+  // one real durable execute_batch before handing work to security/QA/platform.
+  const hybridEvidenceSkillDir = path.join(temp, 'skill-fixtures', 'hybrid-evidence-check');
+  const hybridTddSkillDir = path.join(temp, 'skill-fixtures', 'hybrid-tdd-check');
+  fs.mkdirSync(hybridEvidenceSkillDir, { recursive: true });
+  fs.mkdirSync(hybridTddSkillDir, { recursive: true });
+  fs.writeFileSync(path.join(hybridEvidenceSkillDir, 'SKILL.md'), [
+    '---', 'name: hybrid-evidence-check', 'description: Evidence-focused checks for hybrid workflow tests.', '---', '',
+    '# Hybrid evidence check', 'Keep immutable plan evidence, producer identity and test output separate from assumptions.'
+  ].join('\n'));
+  fs.writeFileSync(path.join(hybridTddSkillDir, 'SKILL.md'), [
+    '---', 'name: hybrid-tdd-check', 'description: Small test-first checks for hybrid workflow tests.', '---', '',
+    '# Hybrid TDD check', 'Prefer a precise failing regression check, then verify the fix and rerun the focused suite.'
+  ].join('\n'));
+  // The test instance uses an isolated workspace. Stage the exact source files
+  // that the immutable local syntax-check contracts will inspect.
+  const hybridWorkspace = path.join(temp, 'hybrid-workspace');
+  fs.mkdirSync(hybridWorkspace, { recursive: true });
+  for (const relative of ['server/index.js', 'src/runtime/workflow/compiler.js']) {
+    const staged = path.join(hybridWorkspace, relative);
+    fs.mkdirSync(path.dirname(staged), { recursive: true });
+    fs.copyFileSync(path.join(root, relative), staged);
+  }
+
+  const hybridProfileDefinitions = [
+    { role: 'product-owner', role_id: 'hybrid-product-profile', input_contract: ['job.request'], output_artifact_type: 'requirements', capability: 'product.requirements', skills: [hybridEvidenceSkillDir] },
+    { role: 'researcher', role_id: 'hybrid-research-profile', input_contract: ['job.request', 'requirements'], output_artifact_type: 'research', capability: 'research.collect', skills: [hybridEvidenceSkillDir] },
+    { role: 'architect', role_id: 'hybrid-architect-profile', input_contract: ['job.request', 'requirements', 'research'], output_artifact_type: 'architecture', capability: 'architecture.design', skills: [hybridEvidenceSkillDir] },
+    { role: 'engineer', role_id: 'hybrid-engineer-profile', input_contract: ['requirements', 'architecture'], output_artifact_type: 'implementation', capability: 'code.modify', skills: [hybridTddSkillDir, hybridEvidenceSkillDir] },
+    { role: 'security', role_id: 'hybrid-security-profile', input_contract: ['requirements', 'architecture', 'implementation'], output_artifact_type: 'security-review', capability: 'security.audit', skills: [hybridEvidenceSkillDir] },
+    { role: 'qa', role_id: 'hybrid-qa-profile', input_contract: ['requirements', 'architecture', 'implementation'], output_artifact_type: 'qa-report', capability: 'code.verify', skills: [hybridTddSkillDir] },
+    { role: 'platform', role_id: 'hybrid-platform-profile', input_contract: ['architecture', 'implementation'], output_artifact_type: 'platform-review', capability: 'infrastructure.verify', skills: [hybridEvidenceSkillDir] },
+    { role: 'writer', role_id: 'hybrid-writer-profile', input_contract: ['requirements', 'implementation'], output_artifact_type: 'documentation', capability: 'documentation.write', skills: [hybridEvidenceSkillDir] },
+    { role: 'reviewer', role_id: 'hybrid-reviewer-profile', input_contract: ['requirements', 'architecture', 'implementation', 'security-review', 'qa-report', 'platform-review', 'documentation'], output_artifact_type: 'review', capability: 'change.review', skills: [hybridTddSkillDir, hybridEvidenceSkillDir] }
+  ];
+  for (const profile of hybridProfileDefinitions) {
+    const createdProfile = await tool('custom_role_create', {
+      role_id: profile.role_id,
+      name: `Hybrid ${profile.role} profile`,
+      description: `Pinned supplemental profile for the built-in ${profile.role} role in the hybrid integration test.`,
+      system_prompt: `Use evidence-led ${profile.role} reasoning, preserve the built-in ${profile.role} contract, and do not claim unobserved execution.`,
+      input_contract: profile.input_contract,
+      output_artifact_type: profile.output_artifact_type,
+      allowed_capabilities: [profile.capability],
+      permissions: ['workspace.read', 'artifact.create'],
+      skills: profile.skills
+    });
+    assert.equal(createdProfile.role.version, 1, `${profile.role} profile must be pinned at version 1`);
+  }
+  const hybridRoleBindings = hybridProfileDefinitions.map(profile => ({
+    role: profile.role, custom_role_id: profile.role_id, custom_role_version: 1
+  }));
+  const hybridWorkflow = await tool('workflow_create', {
+    // A generic title must still resolve through the stable template prefix;
+    // do not make workflow matching depend on the phrase "custom role".
+    title: 'Fix a bug',
+    task: 'Verify one immutable workflow combines all pinned built-in role/Skill overlays with multiple dependency-ready deterministic local tasks that execute in one batch.',
+    workflow: 'hybrid-engineering', workspace: hybridWorkspace,
+    role_bindings: hybridRoleBindings
+  });
+  assert.equal(hybridWorkflow.created, true);
+  assert.equal(hybridWorkflow.workflow, 'hybrid-engineering');
+  assert.equal(hybridWorkflow.title, 'Hybrid Batch Execution: Fix a bug');
+  assert.equal(hybridWorkflow.role_profile_bindings.length, 9);
+  assert.ok(hybridWorkflow.role_profile_bindings.every(binding => /^[a-f0-9]{64}$/.test(binding.profile_hash)));
+
+  // Advance the registry after proposal creation. The approved plan must still
+  // resolve the exact version/hash/skills captured by role_bindings above.
+  const updatedHybridArchitect = await tool('custom_role_update', {
+    role_id: 'hybrid-architect-profile',
+    system_prompt: 'Version 2 prompt must not replace the version 1 snapshot already pinned by this workflow.'
+  });
+  assert.equal(updatedHybridArchitect.role.version, 2);
+  const hybridApproval = await tool('workflow_approve', {
+    job_id: hybridWorkflow.job_id,
+    confirmation: 'I approve the hybrid local integration test with pinned role Skills and two immutable deterministic checks.'
+  });
+  assert.equal(hybridApproval.plan.workflow_id, 'hybrid-engineering');
+  assert.equal(hybridApproval.plan.workflow_version, 2);
+  assert.equal(hybridApproval.plan.children.length, 11);
+  assert.equal(hybridApproval.plan.children.filter(item => item.execution?.role_profile_overlay).length, 9);
+  assert.equal(hybridApproval.plan.children.filter(item => item.execution?.deterministic === true && item.execution?.executor === 'ExecutionManager').length, 2);
+  assert.deepEqual(hybridApproval.plan.children.filter(item => item.execution?.deterministic).map(item => item.id), [
+    'hybrid-server-syntax-check', 'hybrid-workflow-compiler-syntax-check'
+  ]);
+  const pinnedHybridArchitect = hybridApproval.plan.children.find(item => item.role === 'architect');
+  assert.equal(pinnedHybridArchitect.execution.role_profile_overlay.role_id, 'hybrid-architect-profile');
+  assert.equal(pinnedHybridArchitect.execution.role_profile_overlay.version, 1);
+  assert.equal(pinnedHybridArchitect.execution.role_profile_overlay.system_prompt,
+    'Use evidence-led architect reasoning, preserve the built-in architect contract, and do not claim unobserved execution.');
+  assert.equal(pinnedHybridArchitect.execution.role_profile_overlay.skills[0].name, 'hybrid-evidence-check');
+  assert.equal(pinnedHybridArchitect.execution.role_profile_overlay.skills[0].sha256,
+    hybridApproval.plan.children.find(item => item.role === 'architect').execution.role_profile_overlay.skills[0].sha256);
+  const hybridDeterministicIds = hybridApproval.plan.children.filter(item => item.execution?.deterministic).map(item => item.id);
+  for (const id of hybridDeterministicIds) {
+    const check = hybridApproval.plan.children.find(item => item.id === id);
+    assert.deepEqual(check.dependencies, ['standard-engineer']);
+    assert.equal(check.execution.output_artifact_type, 'documentation');
+    assert.equal(check.execution.cwd, hybridWorkspace);
+    assert.equal(check.execution.executable, 'node');
+    assert.equal(check.execution.args[0], '--check');
+  }
+  const hybridReviewerPlanTask = hybridApproval.plan.children.find(item => item.role === 'reviewer');
+  for (const id of hybridDeterministicIds) assert.ok(hybridReviewerPlanTask.dependencies.includes(id), 'reviewer must wait for both batch checks');
+  assert.deepEqual(hybridApproval.plan.synthesis.dependencies, hybridApproval.plan.children.map(item => item.id),
+    'CTO synthesis must depend on every host and deterministic task in the immutable hybrid plan');
+  assert.match(hybridApproval.plan.plan_hash, /^[a-f0-9]{64}$/);
+
+  await tool('workflow_dispatch', { job_id: hybridWorkflow.job_id });
+  const preparedHybrid = await tool('workflow_prepare_tasks', { job_id: hybridWorkflow.job_id });
+  assert.equal(preparedHybrid.count, 11);
+  assert.match(preparedHybrid.tasks.find(item => item.role === 'engineer').description, /Attached Agent Skills \(2\)/);
+  assert.match(preparedHybrid.tasks.find(item => item.role === 'engineer').description, /hybrid-tdd-check/);
+  assert.match(preparedHybrid.tasks.find(item => item.plan_task_id === hybridDeterministicIds[0]).description, /Immutable execution contract: node --check/);
+
+  const hybridReadOnlyDb = new DatabaseSync(path.join(dataDir, 'workflow.db'));
+  const hybridCheckTasks = hybridDeterministicIds.map(id => preparedHybrid.tasks.find(task => task.plan_task_id === id));
+  assert.ok(hybridCheckTasks.every(Boolean));
+  try {
+    const forgedBatch = await rawRpc({ jsonrpc: '2.0', id: 'hybrid-forged-task', method: 'tools/call', params: {
+      name: 'execute_batch', arguments: { job_id: hybridWorkflow.job_id, task_ids: ['not-a-planned-hybrid-task'] }
+    } });
+    assert.equal(forgedBatch.result?.isError, true, 'hybrid execute_batch must reject task IDs not bound to the approved plan');
+    assert.match(forgedBatch.result?.content?.[0]?.text || '', /task not found/i);
+    assert.equal(hybridReadOnlyDb.prepare('SELECT COUNT(*) AS count FROM execution_batches WHERE job_id=?').get(hybridWorkflow.job_id).count, 0,
+      'a forged task ID must be rejected before creating any durable batch rows');
+
+    // Change only the prepared child metadata to prove batch preflight compares
+    // it with the immutable plan. Restore the exact original bytes in finally;
+    // the approved plan itself is never modified.
+    const tamperedCheck = hybridCheckTasks[0];
+    const originalRow = hybridReadOnlyDb.prepare('SELECT metadata_json FROM tasks WHERE task_id=?').get(tamperedCheck.task_id);
+    const originalMetadata = JSON.parse(originalRow.metadata_json);
+    const tamperedMetadata = { ...originalMetadata, command: `${originalMetadata.command} --tampered` };
+    try {
+      hybridReadOnlyDb.prepare('UPDATE tasks SET metadata_json=? WHERE task_id=?').run(JSON.stringify(tamperedMetadata), tamperedCheck.task_id);
+      const mismatchedContractBatch = await rawRpc({ jsonrpc: '2.0', id: 'hybrid-mismatched-contract', method: 'tools/call', params: {
+        name: 'execute_batch', arguments: { job_id: hybridWorkflow.job_id, task_ids: hybridCheckTasks.map(task => task.task_id) }
+      } });
+      assert.equal(mismatchedContractBatch.result?.isError, true, 'batch preflight must refuse command metadata that differs from the immutable execution contract');
+      assert.match(mismatchedContractBatch.result?.content?.[0]?.text || '', /immutable|execution|command|contract|metadata/i);
+      assert.equal(hybridReadOnlyDb.prepare('SELECT COUNT(*) AS count FROM execution_batches WHERE job_id=?').get(hybridWorkflow.job_id).count, 0,
+        'a mismatched execution contract must be rejected before creating a batch record');
+    } finally {
+      hybridReadOnlyDb.prepare('UPDATE tasks SET metadata_json=? WHERE task_id=?').run(originalRow.metadata_json, tamperedCheck.task_id);
+    }
+  } finally {
+    hybridReadOnlyDb.close();
+  }
+
+  const completeHybridRole = async (expectedRole, suppliedNext = null) => {
+    const next = suppliedNext || await tool('workflow_next_task', { job_id: hybridWorkflow.job_id });
+    assert.equal(next.stage, 'task', `expected host specialist ${expectedRole}, got ${next.stage}: ${JSON.stringify(next)}`);
+    assert.equal(next.task.role, expectedRole, `expected ${expectedRole}, got ${next.task.role}`);
+    const result = await tool('workflow_complete_task', {
+      task_id: next.task.task_id,
+      content: `Hybrid integration test completed the ${expectedRole} assignment using the supplied immutable plan and actual persisted predecessor evidence.`,
+      artifact: artifactFor(expectedRole)
+    });
+    assert.equal(result.completed, true);
+    return { next, result };
+  };
+  await completeHybridRole('product-owner');
+  await completeHybridRole('researcher');
+  await completeHybridRole('architect');
+  await completeHybridRole('engineer');
+
+  const afterHybridEngineer = await tool('workflow_next_task', { job_id: hybridWorkflow.job_id });
+  assert.equal(afterHybridEngineer.stage, 'task', `expected security handoff after durable batch, got ${afterHybridEngineer.stage}`);
+  assert.equal(afterHybridEngineer.task.role, 'security');
+  assert.equal(afterHybridEngineer.batch_executions?.length, 1,
+    'scheduler must batch both independent deterministic checks before issuing security work');
+  const hybridBatchEvidence = afterHybridEngineer.batch_executions[0];
+  assert.equal(hybridBatchEvidence.completed, true, JSON.stringify(hybridBatchEvidence));
+  assert.equal(hybridBatchEvidence.items.length, 2);
+  assert.equal(hybridBatchEvidence.summary.total, 2);
+  assert.equal(hybridBatchEvidence.summary.passed, 2);
+  assert.equal(hybridBatchEvidence.summary.failed, 0);
+  assert.ok(hybridBatchEvidence.items.every(item => item.status === 'COMPLETED' && item.exit_code === 0 && item.execution_session_id),
+    'both deterministic tasks must return actual successful local execution session evidence');
+
+  const hybridBatchDb = new DatabaseSync(path.join(dataDir, 'workflow.db'), { readOnly: true });
+  try {
+    const durableBatch = hybridBatchDb.prepare('SELECT batch_id,job_id,parent_task_id,role,status,attempt,aggregate_content FROM execution_batches WHERE batch_id=?')
+      .get(hybridBatchEvidence.batch_id);
+    assert.ok(durableBatch);
+    assert.equal(durableBatch.job_id, hybridWorkflow.job_id);
+    assert.equal(durableBatch.status, 'COMPLETED');
+    assert.equal(durableBatch.role, 'system-workflow-coordinator');
+    assert.equal(durableBatch.parent_task_id, preparedHybrid.parent_task_id);
+    assert.match(durableBatch.aggregate_content || '', /protocol_result_json:/);
+    const durableItems = hybridBatchDb.prepare('SELECT task_id,status,exit_code,execution_session_id FROM execution_batch_items WHERE batch_id=?')
+      .all(hybridBatchEvidence.batch_id);
+    assert.equal(durableItems.length, 2);
+    for (const item of durableItems) {
+      assert.equal(item.status, 'COMPLETED');
+      assert.equal(item.exit_code, 0);
+      assert.ok(item.execution_session_id);
+      const taskRow = hybridBatchDb.prepare('SELECT status,execution_status,execution_exit_code FROM tasks WHERE task_id=?').get(item.task_id);
+      assert.equal(taskRow.status, 'completed');
+      assert.equal(taskRow.execution_status, 'completed');
+      assert.equal(taskRow.execution_exit_code, 0);
+      const artifactRow = hybridBatchDb.prepare("SELECT kind,evidence_json FROM artifacts WHERE job_id=? AND task_id=? AND status='active'").get(hybridWorkflow.job_id, item.task_id);
+      assert.equal(artifactRow.kind, 'documentation', 'successful deterministic hybrid task must persist its immutable typed output artifact');
+      const evidence = JSON.parse(artifactRow.evidence_json);
+      assert.ok(evidence.some(reference => String(reference).startsWith('result_')));
+      assert.ok(evidence.includes(item.execution_session_id));
+    }
+  } finally {
+    hybridBatchDb.close();
+  }
+  assert.ok(afterHybridEngineer.completed_results.some(item => item.role === 'hybrid-server-syntax-check' && item.artifacts?.some(artifact => artifact.type === 'documentation')),
+    'the following security specialist must receive the batch result and its typed artifact');
+  await completeHybridRole('security', afterHybridEngineer);
+  for (const role of ['qa', 'platform', 'writer', 'reviewer']) {
+    const { next } = await completeHybridRole(role);
+    if (role === 'qa') {
+      assert.ok(next.completed_results.some(item => item.role === 'hybrid-workflow-compiler-syntax-check' && item.artifacts?.some(artifact => artifact.type === 'documentation')),
+        'QA must be issued the successful deterministic batch evidence');
+    }
+  }
+  const hybridSynthesisReady = await tool('workflow_next_task', { job_id: hybridWorkflow.job_id });
+  assert.equal(hybridSynthesisReady.stage, 'synthesis', `hybrid synthesis must wait for all 11 children: ${JSON.stringify(hybridSynthesisReady)}`);
+  assert.equal(hybridSynthesisReady.completed_results.length, 11);
+  const hybridTerminal = await tool('workflow_complete_synthesis', {
+    job_id: hybridWorkflow.job_id,
+    content: 'The hybrid integration run completed nine pinned custom role/Skill specialist tasks and two independent deterministic checks in one actual durable local batch. The batch, typed artifacts, immutable plan, and result/session evidence were verified; no remote execution was used.',
+    artifact: artifactFor('cto')
+  });
+  assert.equal(hybridTerminal.terminalized, true, `hybrid workflow failed to terminalize after all evidence gates: ${JSON.stringify(hybridTerminal)}`);
+  const hybridCompleted = await tool('workflow_get', { job_id: hybridWorkflow.job_id });
+  assert.equal(hybridCompleted.job.state, 'COMPLETED');
+  assert.equal(hybridCompleted.plan.plan_hash, hybridApproval.plan.plan_hash);
+  assert.equal(hybridCompleted.plan.children.filter(item => item.execution?.deterministic === true).length, 2);
+  const hybridRecovery = await tool('workflow_recovery_verify', { job_id: hybridWorkflow.job_id });
+  assert.equal(hybridRecovery.status, 'PASS', `hybrid plan/task/batch evidence must survive fresh-process recovery: ${JSON.stringify(hybridRecovery.checks)}`);
+  assert.equal(hybridRecovery.plan_hash, hybridApproval.plan.plan_hash);
+  console.log('Hybrid role/Skill + deterministic Batch Execution E2E: PASS (9 pinned overlays; 2 independent tasks executed in one durable batch; mismatch rejection; typed evidence and fresh-process recovery verified)');
+
+  const duplicateOverlayBinding = await rpc('tools/call', { name: 'workflow_create', arguments: {
+    title: 'Reject Duplicate Role Profile Binding', task: 'A built-in role may have at most one profile binding.', workflow: 'standard-engineering', workspace,
+    role_bindings: [
+      { role: 'architect', custom_role_id: 'builtin-architect-profile', custom_role_version: 1 },
+      { role: 'architect', custom_role_id: 'builtin-architect-profile', custom_role_version: 1 }
+    ]
+  } });
+  assert.equal(duplicateOverlayBinding.result.isError, true, 'duplicate built-in role bindings must be rejected');
+  assert.match(duplicateOverlayBinding.result.content[0].text, /duplicate role profile binding/i);
+
+  const badOverlayVersion = await rpc('tools/call', { name: 'workflow_create', arguments: {
+    title: 'Reject Missing Role Version', task: 'This proposal must not be accepted.', workflow: 'standard-engineering', workspace,
+    role_bindings: [{ role: 'architect', custom_role_id: 'builtin-architect-profile', custom_role_version: 99 }]
+  } });
+  assert.equal(badOverlayVersion.result.isError, true, 'an explicit missing profile version must fail closed');
+  assert.match(badOverlayVersion.result.content[0].text, /custom role version not found/i);
+  const badOverlayRole = await rpc('tools/call', { name: 'workflow_create', arguments: {
+    title: 'Reject CTO Overlay', task: 'The coordinator/CTO cannot be replaced by a user profile.', workflow: 'standard-engineering', workspace,
+    role_bindings: [{ role: 'cto', custom_role_id: 'builtin-architect-profile', custom_role_version: 1 }]
+  } });
+  assert.equal(badOverlayRole.result.isError, true, 'system synthesis roles cannot receive profile overlays');
+  const badOverlayContract = await rpc('tools/call', { name: 'workflow_create', arguments: {
+    title: 'Reject Incompatible Architect Profile', task: 'The profile does not provide required built-in inputs.', workflow: 'standard-engineering', workspace,
+    role_bindings: [{ role: 'architect', custom_role_id: 'workflow-documenter', custom_role_version: 3 }]
+  } });
+  assert.equal(badOverlayContract.result.isError, true, 'profile input/output mismatch must not be silently ignored');
+  assert.match(badOverlayContract.result.content[0].text, /output type|input contract/i);
+  const overlayUnsupportedWorkflow = await rpc('tools/call', { name: 'workflow_create', arguments: {
+    title: 'Reject Overlay on Unsupported Template', task: 'Profile overlay scope is intentionally bounded.', workflow: 'engineering', workspace,
+    role_bindings: [{ role: 'architect', custom_role_id: 'builtin-architect-profile', custom_role_version: 1 }]
+  } });
+  assert.equal(overlayUnsupportedWorkflow.result.isError, true, 'unsupported workflow template must reject the binding explicitly');
+  assert.match(overlayUnsupportedWorkflow.result.content[0].text, /only for standard-engineering and hybrid-engineering workflows/i);
+
+  const unboundCompatibility = await tool('workflow_create', {
+    title: 'Legacy Built-in Contract Compatibility', task: 'Legacy workflow without a role binding remains unchanged.',
+    workflow: 'standard-engineering', workspace
+  });
+  const unboundApproval = await tool('workflow_approve', { job_id: unboundCompatibility.job_id, confirmation: 'Approve no-overlay regression fixture.' });
+  assert.equal(unboundApproval.plan.children.some(item => Object.hasOwn(item.execution || {}, 'role_profile_overlay')), false,
+    'omitting role_bindings must preserve built-in plan behavior');
 
   // Full local MCP acceptance chain for CASE-01: task completion must bind the
   // typed artifact to a durable snapshot, and CTO synthesis must reuse that
@@ -1701,7 +2082,7 @@ try {
   const qaBatchItem = productionBatch.items.find(item => item.role === 'qa');
   assert.ok(qaBatchItem, 'the batch result must return the actual packaged behavioral-QA item');
   for (const marker of [
-    'PRODUCTION QA MCP INITIALIZE/37-TOOL DISCOVERY PASS',
+    'PRODUCTION QA MCP INITIALIZE/46-TOOL DISCOVERY PASS',
     'PRODUCTION QA BEHAVIORAL ARTIFACT VALIDATION PASS',
     'PRODUCTION QA APPROVAL/DISPATCH/IMMUTABLE-PLAN NEXT-TASK PASS'
   ]) assert.ok(qaBatchItem.stdout_preview.includes(marker), `packaged behavioral QA output missing marker: ${marker}`);
@@ -1759,7 +2140,7 @@ try {
     assert.equal(qaArtifact.decision, 'accept', `only exact-plan packaged behavioral QA may be accepted; artifact=${JSON.stringify(qaArtifact)}`);
     assert.ok(qaArtifact.results.includes('execution_scope=packaged-behavioral-e2e'));
     for (const marker of [
-      'PRODUCTION QA MCP INITIALIZE/37-TOOL DISCOVERY PASS',
+      'PRODUCTION QA MCP INITIALIZE/46-TOOL DISCOVERY PASS',
       'PRODUCTION QA BEHAVIORAL ARTIFACT VALIDATION PASS',
       'PRODUCTION QA APPROVAL/DISPATCH/IMMUTABLE-PLAN NEXT-TASK PASS'
     ]) assert.ok(qaArtifact.results.includes(`pass_marker=${marker}`), `durable QA artifact missing marker: ${marker}`);
@@ -1813,6 +2194,7 @@ try {
     const artifact = artifactFor(next.task.role);
     if (next.task.role === 'reviewer') {
       artifact.decision = 'needs_changes';
+      artifact.qaAccepted = false;
       artifact.blockingIssues = ['Release gate must remain blocked.'];
     }
     await tool('workflow_complete_task', { task_id: next.task.task_id, content: `Recorded test evidence for ${next.task.role}.`, artifact });
@@ -1827,6 +2209,31 @@ try {
   const stillBlocked = await tool('workflow_get', { job_id: rejectedReview.job_id });
   assert.equal(stillBlocked.job.status, 'active');
   assert.equal(stillBlocked.job.state, 'EXECUTING');
+  const diagnosis = await tool('workflow_diagnose', { job_id: rejectedReview.job_id });
+  assert.equal(diagnosis.read_only, true);
+  assert.equal(diagnosis.reviewer.decision, 'needs_changes');
+  assert.ok(diagnosis.suggested_actions.some(action => action.tool === 'workflow_request_rework'));
+  const requestedRework = await tool('workflow_request_rework', { job_id: rejectedReview.job_id, reason: 'The reviewer finding is addressed; rerun the reviewer against current specialist evidence without weakening any gate.' });
+  assert.equal(requestedRework.prepared, true);
+  assert.equal(requestedRework.idempotent, false);
+  assert.deepEqual(requestedRework.targetRoles, ['engineer', 'qa', 'reviewer']);
+  assert.equal(requestedRework.immutable_plan_preserved, true);
+  assert.equal(requestedRework.synthesis_allowed, false);
+  const duplicateRework = await tool('workflow_request_rework', { job_id: rejectedReview.job_id, reason: 'Retry must resolve to the same active recovery cycle.' });
+  assert.equal(duplicateRework.idempotent, true);
+  assert.deepEqual(duplicateRework.createdTasks, requestedRework.createdTasks);
+  for (const role of ['engineer', 'qa', 'reviewer']) {
+    const reworkTask = await tool('workflow_next_task', { job_id: rejectedReview.job_id });
+    assert.equal(reworkTask.stage, 'task', `expected ${role} recovery task: ${JSON.stringify(reworkTask)}`);
+    assert.equal(reworkTask.task.role, role);
+    await tool('workflow_complete_task', { task_id: reworkTask.task.task_id, content: `Re-executed ${role} against the current recovery cycle evidence.`, artifact: artifactFor(role) });
+  }
+  const afterRework = await tool('workflow_next_task', { job_id: rejectedReview.job_id });
+  assert.equal(afterRework.stage, 'synthesis', JSON.stringify(afterRework));
+  const reworkRecovery = await tool('workflow_recovery_verify', { job_id: rejectedReview.job_id });
+  assert.equal(reworkRecovery.status, 'PASS', JSON.stringify(reworkRecovery.checks));
+  assert.equal(reworkRecovery.checks.find(check => check.name === 'completed_tasks_have_result_and_typed_artifact')?.pass, true);
+  assert.equal(reworkRecovery.checks.find(check => check.name === 'reviewer_evidence_bound_to_dependency_producers')?.pass, true);
 
   const reviewRevision = await tool('workflow_create', {
     title: 'reviewer evidence limitation revision flow',

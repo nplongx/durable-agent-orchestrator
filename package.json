@@ -1,6 +1,6 @@
 {
   "name": "chat-on-steroids-local-orchestrator",
-  "version": "1.0.9-rc.2",
+  "version": "1.0.9-rc.4",
   "description": "Local-only Chat On Steroids MCP plugin for approval-gated durable agent workflows, typed evidence, and local execution.",
   "license": "MIT",
   "repository": {
@@ -27,7 +27,7 @@
   "scripts": {
     "start": "node server/index.js",
     "dashboard": "node dashboard/server.js",
-    "test": "node tests/test-agent-skills.js && node tests/test-success-contract.js && node tests/test-chat-on-steroids-plugin.js && node tests/test-dashboard.js",
+    "test": "node tests/test-agent-skills.js && node tests/test-success-contract.js && node tests/test-policy-contract.js && node tests/test-workflow-policies-mcp.js && node tests/test-chat-on-steroids-plugin.js && node tests/test-dashboard.js",
     "test:dashboard": "node tests/test-dashboard.js",
     "test:phase2-security-regressions": "node tests/test-secure-filesystem-boundary.js && node tests/test-worker-filesystem-boundary.js && node tests/test-execution-verifier.js && node tests/test-execution-verifier-output-commit-binding-20261017.js && node tests/test-github-actions-provider.js && node benchmarks/plugin-workflow-benchmark/test-create-phase2-candidate-inventory.mjs && node tests/test-dispatch-lease-quarantine.js && node tests/test-provider-pre-send-recovery.js && node tests/test-provider-run-quarantine-reconciliation.js && node tests/test-provider-status-quarantine-sqlite-integration-20261018.js && node tests/test-execution-contract.js && node tests/test-execution-control-process-boundary.js && node tests/test-github-actions-dispatch-concurrency.js && node tests/test-github-actions-lifecycle-boundary.js && node tests/test-task-lease-expiry-race.js && node tests/test-strict-json-safe-integer.js && node tests/test-openclaw-message-receipt.js && node tests/test-openclaw-transport-byte-contract.js && node tests/test-slack-projection-uncertain.js && node tests/test-m12-runner-agent.js && node tests/test-mcp-eof-shutdown-framing-20261017.js",
     "test:provider-pre-send-recovery": "node tests/test-provider-pre-send-recovery.js",

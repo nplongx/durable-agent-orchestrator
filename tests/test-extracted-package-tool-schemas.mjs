@@ -137,6 +137,18 @@ try {
   assert.equal(executeBatch.properties.task_ids.uniqueItems, true,
     'execute_batch must declare unique task IDs as part of its public schema');
 
+  for (const name of ['workflow_policy_catalog', 'workflow_policy_create', 'workflow_policy_list', 'workflow_policy_get', 'workflow_policy_update', 'workflow_policy_validate', 'workflow_policy_attach']) {
+    assert.ok(byName.has(name), `policy contract tool ${name} must ship in the extracted runtime`);
+    assert.equal(schemaFor(name).additionalProperties, false, `${name} must keep a closed input contract`);
+  }
+  assertRequired('workflow_policy_create', ['policy_id', 'name']);
+  assert.equal(schemaFor('workflow_policy_create').properties.policy_id.maxLength, 38);
+  assert.equal(schemaFor('workflow_policy_create').properties.constraints.items.oneOf.length, 11,
+    'policy rules must use the finite, documented supported predicate catalog');
+  assertRequired('workflow_policy_attach', ['job_id', 'policy_id']);
+  assert.deepEqual(Object.keys(schemaFor('workflow_policy_attach').properties).sort(), ['job_id', 'policy_id', 'version']);
+  assert.equal(schemaFor('workflow_policy_attach').properties.version.minimum, 1);
+
   const completeTask = schemaFor('workflow_complete_task');
   assertRequired('workflow_complete_task', ['task_id', 'content', 'artifact']);
   assert.equal(completeTask.properties.content.type, 'string');
