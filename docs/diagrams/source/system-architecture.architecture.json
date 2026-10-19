@@ -1,0 +1,285 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Durable Agent Orchestrator — System Architecture",
+    "subtitle": "Local MCP plugin runtime, durable workflow state, deterministic execution and a separate read-only dashboard.",
+    "output": "docs/diagrams/rendered/system-architecture.html",
+    "quality_profile": "showcase",
+    "visual_preset": "blueprint",
+    "repository": {
+      "url": "git@github.com:nplongx/durable-agent-orchestrator.git",
+      "link_mode": "local-only",
+      "revision": "74a2e7426c1ecc9618ffb0eea8943fa250fec268"
+    }
+  },
+  "components": [
+    {
+      "id": "host",
+      "type": "external",
+      "label": "Chat / MCP Host",
+      "sublabel": "tool requests + specialist conversations",
+      "sources": [
+        {
+          "path": "server/index.js",
+          "line": 48,
+          "end_line": 67,
+          "label": "runtime composition"
+        }
+      ],
+      "pos": [
+        40,
+        230
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "mcp",
+      "type": "backend",
+      "label": "MCP Server",
+      "sublabel": "tool boundary + validation",
+      "sources": [
+        {
+          "path": "server/index.js",
+          "line": 2381,
+          "end_line": 2418,
+          "label": "coordinator tool boundary"
+        }
+      ],
+      "pos": [
+        270,
+        230
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "compiler",
+      "type": "backend",
+      "label": "Workflow Runtime",
+      "sublabel": "catalog · compiler · policy gates",
+      "sources": [
+        {
+          "path": "src/runtime/workflow/compiler.js",
+          "line": 1,
+          "end_line": 18,
+          "label": "plan compiler"
+        },
+        {
+          "path": "src/runtime/workflow/catalog/hybrid-engineering.js",
+          "line": 1,
+          "end_line": 27,
+          "label": "hybrid task catalog"
+        }
+      ],
+      "pos": [
+        500,
+        230
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "store",
+      "type": "database",
+      "label": "SQLite Workflow Store",
+      "sublabel": "jobs · tasks · plans · events",
+      "sources": [
+        {
+          "path": "src/runtime/job-store.js",
+          "line": 130,
+          "end_line": 180,
+          "label": "store initialization"
+        }
+      ],
+      "pos": [
+        800,
+        230
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "exec",
+      "type": "backend",
+      "label": "Execution Manager",
+      "sublabel": "leases + deterministic local batches",
+      "sources": [
+        {
+          "path": "server/index.js",
+          "line": 48,
+          "end_line": 52,
+          "label": "execution manager import"
+        }
+      ],
+      "pos": [
+        270,
+        405
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "policy",
+      "type": "security",
+      "label": "Policy Contract",
+      "sublabel": "immutable versions + attachment audit",
+      "sources": [
+        {
+          "path": "src/runtime/workflow/policy-contract.js",
+          "line": 252,
+          "end_line": 300,
+          "label": "policy schema and immutability"
+        }
+      ],
+      "pos": [
+        500,
+        405
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "dashboard",
+      "type": "backend",
+      "label": "Local Dashboard",
+      "sublabel": "GET-only / SQLite read-only",
+      "sources": [
+        {
+          "path": "dashboard/server.js",
+          "line": 730,
+          "end_line": 748,
+          "label": "read-only database and HTTP gate"
+        },
+        {
+          "path": "dashboard/server.js",
+          "line": 750,
+          "end_line": 765,
+          "label": "read-only API routes"
+        }
+      ],
+      "pos": [
+        800,
+        405
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "docs",
+      "type": "external",
+      "label": "Docs + Benchmarks",
+      "sublabel": "design, evidence, release gates",
+      "sources": [
+        {
+          "path": "README.md",
+          "line": 1,
+          "end_line": 45,
+          "label": "project entry point"
+        }
+      ],
+      "pos": [
+        40,
+        405
+      ],
+      "size": [
+        170,
+        72
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "host-mcp",
+      "from": "host",
+      "to": "mcp",
+      "label": "MCP tool calls",
+      "variant": "emphasis"
+    },
+    {
+      "id": "mcp-compiler",
+      "from": "mcp",
+      "to": "compiler",
+      "label": "compile / coordinate"
+    },
+    {
+      "id": "mcp-exec",
+      "from": "mcp",
+      "to": "exec",
+      "label": "local batch"
+    },
+    {
+      "id": "compiler-store",
+      "from": "compiler",
+      "to": "store",
+      "label": "persist state"
+    },
+    {
+      "id": "policy-compiler",
+      "from": "policy",
+      "to": "compiler",
+      "label": "compose contract"
+    },
+    {
+      "id": "policy-store",
+      "from": "policy",
+      "to": "store",
+      "label": "versions + audit ledger"
+    },
+    {
+      "id": "dashboard-store",
+      "from": "dashboard",
+      "to": "store",
+      "label": "read-only SQL",
+      "variant": "dashed"
+    },
+    {
+      "id": "docs-host",
+      "from": "docs",
+      "to": "host",
+      "label": "operator guidance",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Control plane",
+      "items": [
+        "The MCP server validates tool requests and coordinates workflow transitions.",
+        "The compiler turns workflow definitions and pinned contracts into an execution plan."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Durable state",
+      "items": [
+        "SQLite stores workflow state and policy audit records.",
+        "The dashboard opens the database read-only and accepts GET requests only."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Trust boundary",
+      "items": [
+        "The host-conversation roles run through the host; deterministic local execution is a separate path.",
+        "A successful local smoke test is not release authorization."
+      ]
+    }
+  ]
+}

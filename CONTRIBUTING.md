@@ -28,6 +28,8 @@ git diff --check
 
 For execution, lease, filesystem, recovery, or package changes, also run the corresponding focused tests under `tests/`. Do not claim a check passed unless you ran it and observed a successful exit status. Mention tests that could not be run and the reason.
 
+For changes that alter architecture, workflow dependencies, policy enforcement, or repository structure, review the [visual documentation index](docs/diagrams/README.md) and update the corresponding Archify source under `docs/diagrams/source/`. If Archify is available, regenerate and validate the diagrams with `ARCHIFY_BIN=/path/to/archify/bin/archify.mjs scripts/render-doc-diagrams.sh`; commit the refreshed HTML and PNG previews, not the generated receipts.
+
 ## Safety and evidence
 
 - Keep changes scoped to the intended feature. Avoid unrelated reformatting and generated snapshots.

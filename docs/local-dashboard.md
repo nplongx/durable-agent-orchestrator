@@ -2,6 +2,8 @@
 
 ORBIT / OPS is an optional, local-only, read-only web interface for inspecting the Local Agent Orchestrator's existing SQLite records. It runs as a separate process from the MCP stdio server, does not create a second workflow database, and does not expose workflow approval, dispatch, retry, or mutation operations.
 
+The dashboard's trust boundary is shown in the [system architecture diagram](diagrams/rendered/system-architecture.html): it is a separate process and opens the workflow database read-only. Browse the [visual documentation index](diagrams/README.md) for related runtime diagrams.
+
 ## Start and configure
 
 From the repository root, run:

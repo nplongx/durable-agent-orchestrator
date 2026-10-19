@@ -1,5 +1,11 @@
 # Architecture Notes
 
+See the [interactive system architecture](diagrams/rendered/system-architecture.html) and [repository map](diagrams/rendered/repository-map.html), or browse all visuals in the [visual documentation index](diagrams/README.md).
+
+![System architecture](diagrams/rendered/system-architecture.png)
+
+![Repository map](diagrams/rendered/repository-map.png)
+
 ## Durable state machine
 
 A Job moves through approval, execution, evidence validation, synthesis, terminalization, and projection. SQLite is the source of truth.

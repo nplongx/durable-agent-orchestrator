@@ -12,6 +12,8 @@ Include the affected commit/version, impact, prerequisites, a minimal safe repro
 
 ## Security design notes
 
+The [system architecture diagram](docs/diagrams/rendered/system-architecture.html) and [workflow policy lifecycle](docs/diagrams/rendered/workflow-policy-lifecycle.html) provide visual context for the runtime and policy boundaries. The [visual documentation index](docs/diagrams/README.md) links to all diagrams; code and enforcement tests remain authoritative.
+
 - Workflow plan approval and execution approval are separate gates.
 - Durable SQLite state and validated evidence, not model prose alone, determine terminal workflow status.
 - Local execution contracts are structured and bounded; do not assume the plugin is an operating-system sandbox.
