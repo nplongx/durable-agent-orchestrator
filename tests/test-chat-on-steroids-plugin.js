@@ -2258,6 +2258,33 @@ try {
   const reviewBlocked = await tool('workflow_next_task', { job_id: reviewRevision.job_id });
   assert.equal(reviewBlocked.stage, 'blocked');
   assert.match(reviewBlocked.reason, /reviewer has not accepted all required evidence/i);
+  const evidenceOnlyDiagnosis = await tool('workflow_diagnose', { job_id: reviewRevision.job_id });
+  assert.ok(evidenceOnlyDiagnosis.suggested_actions.some(action => action.tool === 'workflow_request_reviewer_revision'),
+    'diagnosis should suggest reviewer revision when evidence limitations are the only findings');
+  // Simulate a review that has both documented evidence limitations and a
+  // security finding. The diagnostic must not suggest a revision operation
+  // whose runtime guard will reject the same artifact.
+  const reviewerIssueDb = new DatabaseSync(path.join(dataDir, 'workflow.db'));
+  let originalReviewerContent;
+  let originalReviewerContentHash;
+  const reviewerIssueRow = reviewerIssueDb.prepare("SELECT artifact_id,content,content_hash FROM artifacts WHERE job_id=? AND kind='review' AND status='active'").get(reviewRevision.job_id);
+  assert.ok(reviewerIssueRow, 'the active reviewer artifact must exist for the diagnostic regression');
+  originalReviewerContent = reviewerIssueRow.content;
+  originalReviewerContentHash = reviewerIssueRow.content_hash;
+  const reviewWithSecurityFinding = { ...JSON.parse(originalReviewerContent), securityIssues: ['A security finding still requires disposition.'] };
+  const reviewWithSecurityFindingJson = JSON.stringify(reviewWithSecurityFinding);
+  try {
+    reviewerIssueDb.prepare('UPDATE artifacts SET content=?,content_hash=? WHERE artifact_id=?')
+      .run(reviewWithSecurityFindingJson, crypto.createHash('sha256').update(reviewWithSecurityFindingJson).digest('hex'), reviewerIssueRow.artifact_id);
+    const mixedFindingsDiagnosis = await tool('workflow_diagnose', { job_id: reviewRevision.job_id });
+    assert.deepEqual(mixedFindingsDiagnosis.reviewer.securityIssues, ['A security finding still requires disposition.']);
+    assert.ok(!mixedFindingsDiagnosis.suggested_actions.some(action => action.tool === 'workflow_request_reviewer_revision'),
+      'diagnosis must not suggest reviewer revision when security findings remain');
+  } finally {
+    reviewerIssueDb.prepare('UPDATE artifacts SET content=?,content_hash=? WHERE artifact_id=?')
+      .run(originalReviewerContent, originalReviewerContentHash, reviewerIssueRow.artifact_id);
+    reviewerIssueDb.close();
+  }
   const revisionRequest = await tool('workflow_request_reviewer_revision', {
     job_id: reviewRevision.job_id,
     reason: 'Rerun the reviewer decision against the Batch Execution acceptance-specific tests; keep the repository-wide benchmark inventory failure explicitly documented as a limitation unless it is found to invalidate required evidence.'
