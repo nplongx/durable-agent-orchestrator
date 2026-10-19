@@ -1,6 +1,6 @@
-# 1.0.9-rc.4 — Release notes draft
+# Local Agent Orchestrator 1.0.9-rc.4 (Testing Pre-release)
 
-> **Publication status:** draft for a testing-only GitHub pre-release; no GitHub Release or version tag has been created. The pre-release tier uses the minimum checks in [Release policy](RELEASE_POLICY.md); this build is not production-approved and is not the project's official frozen artifact. Before publishing, rebuild or reconfirm the package against the exact intended tag commit and update the hash below if it changes.
+> **TESTING ONLY — NOT FOR PRODUCTION.** This candidate is an experimental GitHub pre-release under the [tiered release policy](https://github.com/nplongx/durable-agent-orchestrator/blob/main/docs/RELEASE_POLICY.md). It is not the official frozen artifact and has not passed the formal Phase 2 production/deployment readiness audit.
 
 ## Highlights
 
@@ -16,20 +16,21 @@
 - Bundle MCP initialization and tool discovery passed: 46/46 manifest tools.
 - Extracted-package tool-schema validation passed: 46/46.
 - Package-path lease-fencing, stdio framing/backpressure/shutdown, hybrid-engineering E2E, CASE-01 recovery, and local plugin E2E checks passed.
-- Repository-level documentation and regression checks recorded for the source commit are listed in the [candidate review dossier](review-candidate-1.0.9-rc.4.md).
+- Repository-level documentation and regression checks recorded for the source commit are listed in the [candidate review dossier](https://github.com/nplongx/durable-agent-orchestrator/blob/main/docs/review-candidate-1.0.9-rc.4.md).
 
-## Artifact prepared for a potential release attachment
+## Release artifact
 
-- Filename: `chat-on-steroids-local-orchestrator-1.0.9-rc.4-candidate-20261019T064500Z.mcpb`
-- Size: `324398` bytes
-- SHA-256: `dc40671ff74f9238bb8cbd89658e0dc72972fa4940951108f5469fd829c7b2a8`
-- Source commit: `ade73e69626e3ce6d10386d97599765e47df8079`
-- Candidate inventory: `benchmarks/plugin-workflow-benchmark/phase2-candidate-inventory-ade73e6-20261019T064655Z.json` (local ignored evidence file; SHA-256 `77f54e62e1c87fd6c63d37aeac605e08e12fed79d00351d007d44d58e83ced74`).
+- Filename: `chat-on-steroids-local-orchestrator-1.0.9-rc.4.mcpb`
+- Size: `324541` bytes
+- SHA-256: `bfb68c11317dc394f6d1ea85368a801dc9f6f473974e34e96d02736747776552`
+- Source identity: release tag `v1.0.9-rc.4` (the archive and source inventory were built from the tag target commit).
+- Checksum sidecar: `chat-on-steroids-local-orchestrator-1.0.9-rc.4.mcpb.sha256`
+- Candidate inventory: `benchmarks/plugin-workflow-benchmark/phase2-candidate-inventory-v1.0.9-rc.4-20261019.json` (supplemental evidence only; marked unapproved and not an independent review or authorization record).
 
-The `.mcpb` is a local ignored build output and is not committed to the repository. The exact file must be transferred and its SHA-256 independently verified before any review or attachment.
+Download the `.mcpb` and `.sha256` sidecar from this release and verify them together before installing. The package is not the official frozen artifact.
 
 ## Limitations and release status
 
-- The formal Phase 2 readiness audit is still blocked. The official frozen artifact is absent, independent candidate review and CASE-06 policy disposition are missing, fresh exact-scope authorization is not established, and authorization-audit reconciliation remains outstanding.
-- No production-readiness claim is made. Real Gateway-backed integration acceptance remains separate from local package tests.
-- The strict Phase 2 `BLOCKED_NOT_READY` result remains in force for formal deployment/production release. Under the tiered [release policy](RELEASE_POLICY.md), that audit result alone does not prohibit a clearly labeled testing pre-release when all minimum checks pass. Do not describe the outstanding formal gates as passed, do not edit official audit/authorization records, and do not claim production readiness.
+- The formal Phase 2 readiness audit remains `BLOCKED_NOT_READY` for production/deployment use. Outstanding blockers include official frozen-artifact custody, independent review, fresh exact-scope authorization, CASE-06 policy disposition, host preflight/static deployment validation, and authorization-audit reconciliation. This pre-release does not claim any of those gates passed.
+- No production-readiness claim is made. This candidate passed local package runtime smoke, 46/46 tool discovery/schema checks, package regressions and local plugin E2E, but it has not undergone an independent installation-and-acceptance test against a live OpenClaw Gateway for this exact RC. Real Gateway-backed integration acceptance remains a separate gate.
+- The strict Phase 2 `BLOCKED_NOT_READY` result remains in force for formal deployment/production release. Under the tiered [release policy](https://github.com/nplongx/durable-agent-orchestrator/blob/main/docs/RELEASE_POLICY.md), that audit result does not alone veto a testing pre-release once minimum checks pass. Do not describe outstanding formal gates as passed, edit official audit/authorization records, or claim production readiness.
