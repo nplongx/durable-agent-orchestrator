@@ -1,0 +1,102 @@
+name: Inspect outstanding issues
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 1-5'
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'docs/**'
+      - 'site/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/workflows/inspect-open-issues.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: inspect-outstanding-issues-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Inspect repository health and issue backlog
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        id: install
+        continue-on-error: true
+        run: npm ci 2>&1 | tee "$RUNNER_TEMP/npm-ci.log"
+
+      - name: Check documentation and local links
+        id: docs
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: npm run docs:check 2>&1 | tee "$RUNNER_TEMP/docs-check.log"
+
+      - name: Check static website
+        id: site
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: npm run site:check 2>&1 | tee "$RUNNER_TEMP/site-check.log"
+
+      - name: Run primary acceptance tests
+        id: npm_test
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: npm test 2>&1 | tee "$RUNNER_TEMP/npm-test.log"
+
+      - name: Run durable batch execution tests
+        id: batch
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: npm run test:batch 2>&1 | tee "$RUNNER_TEMP/batch-tests.log"
+
+      - name: Verify package reproducibility
+        id: reproducibility
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: npm run test:package-reproducibility 2>&1 | tee "$RUNNER_TEMP/package-reproducibility.log"
+
+      - name: Check readiness-audit regression tests
+        id: readiness
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: npm run test:phase2-readiness-audit 2>&1 | tee "$RUNNER_TEMP/phase2-readiness-audit.log"
+
+      - name: Create or refresh issues from verified failures
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          INSPECTION_LOG_DIR: ${{ runner.temp }}
+          RESULT_NPM_CI: ${{ steps.install.outcome }}
+          RESULT_DOCS: ${{ steps.docs.outcome }}
+          RESULT_SITE: ${{ steps.site.outcome }}
+          RESULT_NPM_TEST: ${{ steps.npm_test.outcome }}
+          RESULT_BATCH: ${{ steps.batch.outcome }}
+          RESULT_REPRO: ${{ steps.reproducibility.outcome }}
+          RESULT_READINESS: ${{ steps.readiness.outcome }}
+        run: node scripts/inspect-open-issues.mjs
