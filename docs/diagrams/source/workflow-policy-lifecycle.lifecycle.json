@@ -1,0 +1,186 @@
+{
+  "schema_version": 3,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "Workflow Policy Pack Lifecycle",
+    "subtitle": "Versioned policy packs are immutable; attach only to an active, unapproved proposal; violations append idempotent audit evidence.",
+    "output": "docs/diagrams/rendered/workflow-policy-lifecycle.html",
+    "quality_profile": "showcase",
+    "visual_preset": "blueprint",
+    "repository": {
+      "url": "git@github.com:nplongx/durable-agent-orchestrator.git",
+      "link_mode": "local-only",
+      "revision": "74a2e7426c1ecc9618ffb0eea8943fa250fec268"
+    }
+  },
+  "mainPath": [
+    "draft",
+    "versioned",
+    "attached",
+    "compiled",
+    "evaluated"
+  ],
+  "states": [
+    {
+      "id": "draft",
+      "type": "start",
+      "label": "Draft + Check",
+      "sublabel": "schema + conflict validation",
+      "sources": [
+        {
+          "path": "src/runtime/workflow/policy-contract.js",
+          "line": 252,
+          "end_line": 286,
+          "label": "policy tables"
+        }
+      ]
+    },
+    {
+      "id": "versioned",
+      "type": "active",
+      "label": "Version",
+      "sublabel": "immutable hash + version"
+    },
+    {
+      "id": "attached",
+      "type": "active",
+      "label": "Attach",
+      "sublabel": "before approval / compile",
+      "sources": [
+        {
+          "path": "src/runtime/workflow/policy-contract.js",
+          "line": 422,
+          "end_line": 450,
+          "label": "attachment gate"
+        }
+      ]
+    },
+    {
+      "id": "compiled",
+      "type": "active",
+      "label": "Compile",
+      "sublabel": "pinned plan snapshot"
+    },
+    {
+      "id": "evaluated",
+      "type": "success",
+      "label": "Evaluate",
+      "sublabel": "runtime predicates"
+    },
+    {
+      "id": "rejected",
+      "type": "failure",
+      "label": "Rejected",
+      "sublabel": "invalid or conflicting rule"
+    },
+    {
+      "id": "blocked",
+      "type": "failure",
+      "label": "Blocked",
+      "sublabel": "already approved / compiled"
+    },
+    {
+      "id": "violation",
+      "type": "failure",
+      "label": "Violation",
+      "sublabel": "plan hash + predicate",
+      "sources": [
+        {
+          "path": "src/runtime/workflow/policy-contract.js",
+          "line": 485,
+          "end_line": 511,
+          "label": "idempotent violation audit"
+        }
+      ]
+    },
+    {
+      "id": "events",
+      "type": "neutral",
+      "label": "Audit Log",
+      "sublabel": "append-only evidence"
+    }
+  ],
+  "transitions": [
+    {
+      "id": "draft-versioned",
+      "from": "draft",
+      "to": "versioned",
+      "label": "valid"
+    },
+    {
+      "id": "version-attach",
+      "from": "versioned",
+      "to": "attached"
+    },
+    {
+      "id": "attach-block",
+      "from": "versioned",
+      "to": "blocked",
+      "label": "approval or plan exists",
+      "variant": "security"
+    },
+    {
+      "id": "attach-compile",
+      "from": "attached",
+      "to": "compiled"
+    },
+    {
+      "id": "compile-evaluate",
+      "from": "compiled",
+      "to": "evaluated"
+    },
+    {
+      "id": "evaluate-violation",
+      "from": "evaluated",
+      "to": "violation",
+      "label": "predicate fails",
+      "variant": "security"
+    },
+    {
+      "id": "version-events",
+      "from": "versioned",
+      "to": "events",
+      "label": "created event",
+      "variant": "dashed"
+    },
+    {
+      "id": "attached-events",
+      "from": "attached",
+      "to": "events",
+      "label": "attachment event",
+      "variant": "dashed"
+    },
+    {
+      "id": "violation-events",
+      "from": "violation",
+      "to": "events",
+      "label": "append evidence",
+      "variant": "dashed"
+    },
+    {
+      "id": "draft-rejected",
+      "from": "draft",
+      "to": "rejected",
+      "label": "invalid rule / conflict",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Immutability",
+      "items": [
+        "Version rows and attachments reject update/delete.",
+        "Each attachment pins policy ID, version and content hash."
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Enforcement",
+      "items": [
+        "Attach is permitted only before approval and plan compilation.",
+        "A violation record binds the policy snapshot to the execution plan hash and predicate."
+      ]
+    }
+  ]
+}

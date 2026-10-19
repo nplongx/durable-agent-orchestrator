@@ -4,6 +4,10 @@
 
 The template is selected by the stable `Hybrid Batch Execution:` title prefix emitted by `workflow_create`. The remainder of the title is arbitrary user text (for example, `Hybrid Batch Execution: Fix a bug`); it does not need to include phrases such as “custom role” or “skills”.
 
+See the [interactive Archify workflow](diagrams/rendered/hybrid-engineering.html) or the static preview below. It summarizes the gate sequence; the task table and immutable plan remain authoritative for exact dependencies.
+
+![Hybrid engineering workflow](diagrams/rendered/hybrid-engineering.png)
+
 ## What runs in the workflow
 
 The approved plan contains eleven children:

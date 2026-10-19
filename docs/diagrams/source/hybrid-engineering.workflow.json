@@ -1,0 +1,214 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Hybrid Engineering Workflow",
+    "subtitle": "Nine host-conversation specialist roles plus two deterministic syntax-check tasks; final synthesis follows review and evidence validation.",
+    "output": "docs/diagrams/rendered/hybrid-engineering.html",
+    "quality_profile": "showcase",
+    "visual_preset": "blueprint",
+    "repository": {
+      "url": "git@github.com:nplongx/durable-agent-orchestrator.git",
+      "link_mode": "local-only",
+      "revision": "74a2e7426c1ecc9618ffb0eea8943fa250fec268"
+    }
+  },
+  "lanes": [
+    {
+      "id": "control",
+      "label": "Coordinator / Gates"
+    },
+    {
+      "id": "specialists",
+      "label": "Host-conversation specialists"
+    },
+    {
+      "id": "checks",
+      "label": "Deterministic local checks"
+    },
+    {
+      "id": "evidence",
+      "label": "Evidence + terminal result",
+      "variant": "exception"
+    }
+  ],
+  "mainPath": [
+    "proposal",
+    "approval",
+    "cto",
+    "specialistsWork",
+    "evidenceGate",
+    "synthesis",
+    "terminal"
+  ],
+  "nodes": [
+    {
+      "id": "proposal",
+      "lane": "control",
+      "col": 0,
+      "type": "external",
+      "label": "Proposal",
+      "sublabel": "scope + success contract",
+      "sources": [
+        {
+          "path": "src/runtime/workflow/definitions/hybrid-engineering.js",
+          "line": 1,
+          "end_line": 24,
+          "label": "phase contract"
+        }
+      ]
+    },
+    {
+      "id": "approval",
+      "lane": "control",
+      "col": 1,
+      "type": "security",
+      "label": "Approval Gate",
+      "sublabel": "approved plan required"
+    },
+    {
+      "id": "cto",
+      "lane": "control",
+      "col": 2,
+      "type": "backend",
+      "label": "CTO Coordinator",
+      "sublabel": "assign + supervise",
+      "sources": [
+        {
+          "path": "server/index.js",
+          "line": 2381,
+          "end_line": 2418,
+          "label": "coordinator handoff"
+        }
+      ]
+    },
+    {
+      "id": "specialistsWork",
+      "lane": "specialists",
+      "col": 3,
+      "type": "backend",
+      "label": "Specialist Work",
+      "sublabel": "9 specialist roles",
+      "sources": [
+        {
+          "path": "src/runtime/workflow/catalog/hybrid-engineering.js",
+          "line": 1,
+          "end_line": 24,
+          "label": "required task catalog"
+        }
+      ]
+    },
+    {
+      "id": "checks",
+      "lane": "checks",
+      "col": 4,
+      "type": "backend",
+      "label": "Deterministic Checks",
+      "sublabel": "node --check server/index.js + compiler.js",
+      "sources": [
+        {
+          "path": "src/runtime/workflow/catalog/hybrid-engineering.js",
+          "line": 1,
+          "end_line": 24,
+          "label": "deterministic task IDs"
+        }
+      ]
+    },
+    {
+      "id": "evidenceGate",
+      "lane": "evidence",
+      "col": 4,
+      "type": "backend",
+      "label": "Evidence Gate",
+      "sublabel": "all planned tasks settled"
+    },
+    {
+      "id": "synthesis",
+      "lane": "control",
+      "col": 5,
+      "type": "backend",
+      "label": "CTO Synthesis",
+      "sublabel": "aggregate verified results"
+    },
+    {
+      "id": "terminal",
+      "lane": "evidence",
+      "col": 5,
+      "type": "backend",
+      "label": "Terminal Report",
+      "sublabel": "completed or explicit failure"
+    }
+  ],
+  "edges": [
+    {
+      "id": "p-a",
+      "from": "proposal",
+      "to": "approval",
+      "label": "review scope"
+    },
+    {
+      "id": "a-cto",
+      "from": "approval",
+      "to": "cto",
+      "label": "approved plan",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cto-specialists",
+      "from": "cto",
+      "to": "specialistsWork",
+      "label": "assign host tasks"
+    },
+    {
+      "id": "cto-checks",
+      "from": "cto",
+      "to": "checks",
+      "label": "parallel local checks",
+      "variant": "dashed"
+    },
+    {
+      "id": "specialists-evidence",
+      "from": "specialistsWork",
+      "to": "evidenceGate",
+      "label": "role outputs + review"
+    },
+    {
+      "id": "checks-evidence",
+      "from": "checks",
+      "to": "evidenceGate",
+      "label": "exit status + output"
+    },
+    {
+      "id": "evidence-synthesis",
+      "from": "evidenceGate",
+      "to": "synthesis",
+      "label": "all tasks complete",
+      "variant": "emphasis"
+    },
+    {
+      "id": "synthesis-terminal",
+      "from": "synthesis",
+      "to": "terminal",
+      "label": "persist report",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Execution modes",
+      "items": [
+        "Nine specialist roles run as host conversations: Product Owner, Researcher, Architect, Engineer, Security, QA, Platform, Writer and Reviewer.",
+        "Two additional tasks run deterministic local syntax checks for the server and workflow compiler."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Guardrails",
+      "items": [
+        "Approval and current-plan checks precede task-result acceptance.",
+        "Synthesis waits until every planned child is complete and runtime gates permit it."
+      ]
+    }
+  ]
+}

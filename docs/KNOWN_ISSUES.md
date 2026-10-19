@@ -2,6 +2,8 @@
 
 **Status as of 2026-10-19:** the repository supports controlled local development and test execution. A strict Phase 2 readiness audit returned `BLOCKED_NOT_READY`; it did not authorize execution or release. A separate `1.0.9-rc.4` review candidate has since been built and reproducibility-checked, but that does not close any of the formal release gates below. See [the exact candidate record](review-candidate-1.0.9-rc.4.md). This list is intentionally conservative and does not include local database contents, credentials, or machine-specific evidence files.
 
+For codebase orientation, see the [visual documentation index](diagrams/README.md). The diagrams are explanatory views only; they do not close any release or authorization blocker listed here.
+
 ## Release and governance blockers
 
 1. **Frozen release artifact identity is not established.** The locally built `1.0.9-rc.4` candidate has a recorded filename and SHA-256, but the official frozen bundle is not present in the working tree, so the release process cannot prove that the candidate under review is the authorized frozen artifact. Resolve through the authorized bundle custodian; do not recreate or overwrite the frozen path as a workaround.

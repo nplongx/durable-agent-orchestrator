@@ -21,6 +21,12 @@ Local Agent Orchestrator plugin
 
 There is no cloud worker, GitHub Actions dispatch, remote runner, external model API, or HTTP listener in the plugin entrypoint. Reasoning happens in Chat On Steroids; local code/file tools do the actual workspace work; the plugin owns durable workflow state and evidence. It does not invent OpenClaw session or run IDs.
 
+### Visual documentation
+
+The [visual documentation index](docs/diagrams/README.md) contains interactive Archify diagrams and static previews for the [system architecture](docs/diagrams/rendered/system-architecture.html), [hybrid engineering workflow](docs/diagrams/rendered/hybrid-engineering.html), [versioned policy lifecycle](docs/diagrams/rendered/workflow-policy-lifecycle.html), and [repository map](docs/diagrams/rendered/repository-map.html).
+
+![Durable Agent Orchestrator system architecture](docs/diagrams/rendered/system-architecture.png)
+
 ## Install as a local plugin
 
 In Chat On Steroids:

@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "diagram_type": "tree",
+  "meta": {
+    "title": "Repository Map",
+    "subtitle": "Navigation view of the main maintained code and documentation areas; historical benchmark evidence is grouped, not expanded file-by-file.",
+    "output": "docs/diagrams/rendered/repository-map.html",
+    "quality_profile": "showcase",
+    "visual_preset": "blueprint",
+    "repository": {
+      "url": "git@github.com:nplongx/durable-agent-orchestrator.git",
+      "link_mode": "local-only",
+      "revision": "74a2e7426c1ecc9618ffb0eea8943fa250fec268"
+    }
+  },
+  "layout": {
+    "direction": "down"
+  },
+  "nodes": [
+    {
+      "id": "repo",
+      "label": "durable-agent-orchestrator",
+      "sublabel": "Node.js · local-first MCP plugin",
+      "sources": [
+        {
+          "path": "README.md",
+          "line": 1,
+          "end_line": 45,
+          "label": "project overview"
+        }
+      ]
+    },
+    {
+      "id": "server",
+      "label": "server/",
+      "parent": "repo",
+      "sublabel": "MCP entrypoint + tool boundary",
+      "sources": [
+        {
+          "path": "server/index.js",
+          "line": 1,
+          "end_line": 68,
+          "label": "runtime bootstrap"
+        }
+      ]
+    },
+    {
+      "id": "runtime",
+      "label": "src/runtime/",
+      "parent": "repo",
+      "sublabel": "execution, workflow and persistence"
+    },
+    {
+      "id": "workflow",
+      "label": "workflow/",
+      "parent": "runtime",
+      "sublabel": "compiler · definitions · contracts"
+    },
+    {
+      "id": "catalog",
+      "label": "catalog/ + definitions/",
+      "parent": "workflow",
+      "sublabel": "built-in workflow graphs"
+    },
+    {
+      "id": "policy",
+      "label": "policy-contract.js",
+      "parent": "workflow",
+      "sublabel": "versioned policies + audit"
+    },
+    {
+      "id": "store",
+      "label": "job-store.js",
+      "parent": "runtime",
+      "sublabel": "SQLite-backed durable state"
+    },
+    {
+      "id": "exec",
+      "label": "execution-manager.js",
+      "parent": "runtime",
+      "sublabel": "local execution + lease safety"
+    },
+    {
+      "id": "dashboard",
+      "label": "dashboard/",
+      "parent": "repo",
+      "sublabel": "local read-only observability",
+      "sources": [
+        {
+          "path": "dashboard/server.js",
+          "line": 730,
+          "end_line": 765,
+          "label": "read-only server + routes"
+        }
+      ]
+    },
+    {
+      "id": "protocol",
+      "label": "protocol/",
+      "parent": "repo",
+      "sublabel": "COS-AP wire contracts"
+    },
+    {
+      "id": "plugin",
+      "label": "plugin/",
+      "parent": "repo",
+      "sublabel": "manifest + packaged plugin"
+    },
+    {
+      "id": "tests",
+      "label": "tests/",
+      "parent": "repo",
+      "sublabel": "unit, integration and regression suites"
+    },
+    {
+      "id": "docs",
+      "label": "docs/",
+      "parent": "repo",
+      "sublabel": "architecture, milestones, runbooks"
+    },
+    {
+      "id": "diagrams",
+      "label": "diagrams/",
+      "parent": "docs",
+      "sublabel": "Archify source + rendered visuals"
+    },
+    {
+      "id": "bench",
+      "label": "benchmarks/plugin-workflow-benchmark/",
+      "parent": "repo",
+      "sublabel": "Phase 1/2 evidence + readiness audits"
+    },
+    {
+      "id": "examples",
+      "label": "examples/",
+      "parent": "repo",
+      "sublabel": "reference applications and docs"
+    },
+    {
+      "id": "scripts",
+      "label": "scripts/",
+      "parent": "repo",
+      "sublabel": "packaging, audits and developer tools"
+    },
+    {
+      "id": "readme",
+      "label": "README.md",
+      "parent": "repo",
+      "sublabel": "entrypoint + links to detailed docs"
+    }
+  ]
+}

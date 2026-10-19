@@ -2,14 +2,16 @@
 
 **Status:** candidate prepared for independent review; not a published GitHub Release, not the official frozen artifact, and not approved for production release.
 
+For code and workflow context, see the [system architecture](diagrams/rendered/system-architecture.html), [hybrid engineering workflow](diagrams/rendered/hybrid-engineering.html), and [visual documentation index](diagrams/README.md). These diagrams explain the implementation; they do not satisfy any of the formal release blockers below.
+
 ## Candidate identity
 
 - Package version: `1.0.9-rc.4` in `package.json`, `package-lock.json`, and `plugin/manifest.json`.
-- Bundle filename: `chat-on-steroids-local-orchestrator-1.0.9-rc.4-review-candidate-20261019T024611Z-hybrid-engineering.mcpb`.
-- Bundle size: `325107` bytes.
-- Bundle SHA-256: `efbe0fe095613488f97969a45f66d8bf064ab725b994607aa80cd0f78e61cd6a`.
+- Bundle filename: `chat-on-steroids-local-orchestrator-1.0.9-rc.4-candidate-20261019T031150Z.mcpb`.
+- Bundle size: `325270` bytes.
+- Bundle SHA-256: `6910f1902b18b1c0a504a7c68a0c8f62b9d1243b2380e9da4b25ec54d24dd19c`.
 - Prepared from branch: `prep/local-orchestrator-1.0.9-rc.4`.
-- Candidate source: `prep/local-orchestrator-1.0.9-rc.4` branch content. The final commit containing these review-documentation updates is part of the same PR; rerun reproducibility checks on the pushed head before accepting the candidate as the exact review input.
+- Candidate source: `prep/local-orchestrator-1.0.9-rc.4` branch content including the updated root README. Two independent validated builds of these package inputs produced the same bundle SHA-256; the stable input SHA-256 is recorded below. The final docs-only commit does not change those package inputs; reviewers should still verify the received bundle bytes against the digest above.
 
 The `.mcpb` bundle is a local, ignored build output and is intentionally not committed to the repository. Reviewers must obtain the exact candidate bytes through an agreed artifact handoff and verify the SHA-256 before reviewing it. A hash establishes byte identity only; it does not establish authorization, provenance, correctness, or release readiness.
 
@@ -28,7 +30,7 @@ The following local checks completed successfully on the candidate source snapsh
 - `npm run test:protocol`
 - `npm run test:workflow-m4`
 - `npm test`
-- `npm run test:package-reproducibility` — two independent validated builds were byte-identical; stable input SHA-256 `7c5e839021ffaf2dc1eb8c270470afa724bc7c50945b843c5b7b84620673431e`.
+- `npm run test:package-reproducibility` — two independent validated builds were byte-identical; stable input SHA-256 `ce5a86d863d75720375312638c1e1f18087dc60181e4e28d0ce40d98753870d1`.
 - Packaged MCP runtime smoke and strict extracted-package schema validation: 46/46 manifest tools.
 - Lease-fencing, stdio framing/backpressure/shutdown regressions and hybrid-engineering E2E in the package validation path.
 - A separately installed local runtime check confirmed that its 44 package entries matched the earlier `1.0.9-rc.3` candidate, and a fresh `hybrid-engineering` workflow completed 11/11 tasks, ran both approved syntax checks with exit code `0`, and passed 11/11 recovery invariants. That runtime check was against the installed `1.0.9-rc.3` bundle, not this `1.0.9-rc.4` artifact; do not present it as an installation test of this candidate.
