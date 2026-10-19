@@ -145,6 +145,19 @@ function check() {
         const details = statSync(resolved);
         if (!details.isFile() && !details.isDirectory()) {
           errors.push(`${markdownFile}:${line}: local target is not a file or directory: ${rawTarget}`);
+          continue;
+        }
+
+        // A file that only exists in the current checkout but is ignored by
+        // Git will not exist for GitHub readers or in a clean CI checkout.
+        // For directory links, at least one committed or unignored file must
+        // exist underneath that directory so the target is present in Git.
+        const relativeTarget = relativeResolved.split(path.sep).join('/');
+        const targetAvailableInGit = allFiles.has(relativeTarget) || (
+          details.isDirectory() && [...allFiles].some((file) => file.startsWith(`${relativeTarget.replace(/\/$/, '')}/`))
+        );
+        if (!targetAvailableInGit) {
+          errors.push(`${markdownFile}:${line}: local target exists only in the workspace or is ignored by Git: ${rawTarget}`);
         }
       } catch {
         errors.push(`${markdownFile}:${line}: could not inspect local target: ${rawTarget}`);
