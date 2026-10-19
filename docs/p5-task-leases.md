@@ -1,5 +1,7 @@
 # P5 — Durable Task Lease / Heartbeat / Recovery
 
+> **Document type:** Historical implementation-phase record. It describes the scope/contracts of that phase; confirm current behavior in the shipped source and tests before using it as an operational reference.
+
 P5 adds task ownership leases to the control-plane SQLite database.
 
 ## Semantics

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#f2f4f3">
-  <title>ORBIT / OPS — Local Workflow Monitor</title>
+  <title>Local Workflow Monitor</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/ux-overrides.css">
   <script src="/app.js" defer></script>
@@ -15,7 +15,7 @@
     <aside class="sidebar">
       <div class="brand-lockup">
         <div class="brand-mark" aria-hidden="true">O</div>
-        <div><div class="brand-name">ORBIT<span> / </span>OPS</div><div class="brand-caption">LOCAL ORCHESTRATOR</div></div>
+        <div><div class="brand-name">WORKFLOW<span> / </span>MONITOR</div><div class="brand-caption">LOCAL ORCHESTRATOR</div></div>
       </div>
       <div class="workspace-label">WORKSPACE <span class="mini-live"><b></b> LOCAL</span></div>
       <nav class="primary-nav" aria-label="Primary navigation">
@@ -31,13 +31,13 @@
       <div class="sidebar-bottom">
         <div class="secure-card"><div class="secure-icon">⌑</div><div><strong>LOCAL-FIRST</strong><span>Read-only inspection</span></div><span class="secure-check">✓</span></div>
         <div class="source-foot"><span class="source-dot"></span><span>SQLITE SOURCE OF TRUTH</span></div>
-        <div class="sidebar-version">ORBIT DASHBOARD <span>v1.0</span></div>
+        <div class="sidebar-version">LOCAL DASHBOARD <span>v1.0</span></div>
       </div>
     </aside>
 
     <main class="main-column">
       <header class="topbar">
-        <div class="breadcrumb"><span>ORBIT</span><b>/</b><strong id="crumb-current">Overview</strong></div>
+        <div class="breadcrumb"><span>LOCAL</span><b>/</b><strong id="crumb-current">Overview</strong></div>
         <div class="top-actions">
           <label class="global-search"><span>⌕</span><input id="global-search" type="search" placeholder="Search workflows…" aria-label="Search workflows (press Enter to open registry)" autocomplete="off"><kbd>↵</kbd></label>
           <button class="icon-button" id="refresh-button" title="Refresh dashboard" aria-label="Refresh dashboard">↻</button>
@@ -141,7 +141,7 @@
           <div class="file-layout"><article class="panel file-browser"><div class="file-pathbar"><span class="path-icon">▤</span><span id="file-breadcrumb">/</span><button id="file-up" class="small-button" disabled>↑ Up</button><button id="file-refresh" class="small-button">↻ Refresh</button></div><div id="file-list" class="file-list"><div class="table-empty">Loading local directory…</div></div><div class="file-footnote"><span>⌑</span> Files are never modified or served as downloads. Database and binary files are excluded.</div></article><article class="panel file-preview-panel"><div class="preview-head"><div><div class="panel-kicker">TEXT PREVIEW</div><h3 id="file-preview-title">No file selected</h3></div><span class="preview-limit">MAX 64 KB</span></div><div class="preview-meta" id="file-preview-meta">Choose a log or text file to inspect it.</div><pre id="file-preview-content" class="file-code"><span class="code-placeholder">// Your selected file will appear here.</span></pre></article></div>
         </section>
 
-        <footer class="page-footer"><div>ORBIT <span class="footer-separator">/</span> LOCAL WORKFLOW MONITOR</div><div><span class="footer-lock">⌑</span> READ-ONLY <span class="footer-separator">·</span> LOOPBACK ONLY <span class="footer-separator">·</span> <span id="footer-clock">—</span></div></footer>
+        <footer class="page-footer"><div>LOCAL <span class="footer-separator">/</span> WORKFLOW MONITOR</div><div><span class="footer-lock">⌑</span> READ-ONLY <span class="footer-separator">·</span> LOOPBACK ONLY <span class="footer-separator">·</span> <span id="footer-clock">—</span></div></footer>
       </div>
     </main>
   </div>

@@ -1,5 +1,7 @@
 # M12 Phase 1b — Gateway-side narrow admission
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 Status: IMPLEMENTED AS ISOLATED GATEWAY-SIDE CONTRACT
 
 ## Scope

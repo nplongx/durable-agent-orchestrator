@@ -26,6 +26,7 @@
   "type": "module",
   "scripts": {
     "start": "node server/index.js",
+    "docs:generate-reference": "node scripts/generate-mcp-reference.mjs",
     "docs:check": "node scripts/check-docs.mjs",
     "dashboard": "node dashboard/server.js",
     "test": "node tests/test-agent-skills.js && node tests/test-success-contract.js && node tests/test-policy-contract.js && node tests/test-workflow-policies-mcp.js && node tests/test-chat-on-steroids-plugin.js && node tests/test-dashboard.js",

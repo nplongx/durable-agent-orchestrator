@@ -1,5 +1,7 @@
 # M12 Phase 1b — OpenClaw core hook
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 This is the final OpenClaw-side integration required to turn the already-tested
 Gateway admission contract into a native cloud-worker admission primitive.
 

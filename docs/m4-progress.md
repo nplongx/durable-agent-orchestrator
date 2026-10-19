@@ -1,5 +1,7 @@
 # M4 Progress Snapshot
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 > Cập nhật: 2026-09-29
 > Trạng thái: đang hoàn thiện và xác minh E2E native; chưa có kết luận pass cuối cùng cho run mới nhất.
 

@@ -1,5 +1,7 @@
 # P9 — Resumable Long-Running Execution
 
+> **Document type:** Historical implementation-phase record. It describes the scope/contracts of that phase; confirm current behavior in the shipped source and tests before using it as an operational reference.
+
 P9 changes timeout recovery from **retry from scratch** to **checkpoint + resume**.
 
 ```text

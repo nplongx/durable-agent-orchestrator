@@ -1,5 +1,7 @@
 # P12 — Observability
 
+> **Document type:** Historical implementation-phase record. It describes the scope/contracts of that phase; confirm current behavior in the shipped source and tests before using it as an operational reference.
+
 P12 makes the existing durable event stream queryable instead of introducing another service.
 
 ## Durable timeline

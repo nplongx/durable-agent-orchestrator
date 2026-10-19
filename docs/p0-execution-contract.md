@@ -1,5 +1,7 @@
 # P0 — Execution Contract
 
+> **Document type:** Historical implementation-phase record. It describes the scope/contracts of that phase; confirm current behavior in the shipped source and tests before using it as an operational reference.
+
 P0 khóa contract giữa **control plane** và mọi execution provider.
 
 ## Request

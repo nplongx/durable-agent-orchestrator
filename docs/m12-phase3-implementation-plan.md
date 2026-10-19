@@ -1,5 +1,7 @@
 # M12 Phase 3 — Native specialist session implementation plan
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 ## Goal
 
 Move M12 from Phase 2 (real ephemeral OpenClaw node admission/bootstrap/reclaim) to a real native specialist execution lifecycle:

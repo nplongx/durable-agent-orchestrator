@@ -1,5 +1,7 @@
 # GitHub Actions Distributed Worker — Implementation Plan
 
+> **Document type:** Historical proposal or design record. Treat it as rationale/scope for the proposed work, not as a declaration that the proposal is currently implemented.
+
 > Implementation plan for the `$0` execution-provider architecture. This document is intentionally kept in the repository working tree but is **not added to Git** by this implementation.
 
 ## Target

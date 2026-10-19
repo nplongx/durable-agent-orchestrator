@@ -1,5 +1,7 @@
 # P3 — GitHub Actions Worker Protocol
 
+> **Document type:** Historical implementation-phase record. It describes the scope/contracts of that phase; confirm current behavior in the shipped source and tests before using it as an operational reference.
+
 P3 turns the P2 provider lifecycle into an actual worker contract.
 
 ## Protocol

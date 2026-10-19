@@ -1,5 +1,7 @@
 # M10 — Observability
 
+> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+
 M10 extends the existing workflow observability surface without changing legacy workflow behavior.
 
 ## Contract

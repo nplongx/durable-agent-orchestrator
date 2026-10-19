@@ -1,5 +1,7 @@
 # P2 — GitHubActionsProvider
 
+> **Document type:** Historical implementation-phase record. It describes the scope/contracts of that phase; confirm current behavior in the shipped source and tests before using it as an operational reference.
+
 P2 adds the control-plane adapter for GitHub Actions. It is provider-specific and does not change the provider-neutral execution contract.
 
 ## API
