@@ -74,9 +74,10 @@ benchmarks/plugin-workflow-benchmark/phase2-pnpm-lock-before-reconcile*.yaml
 /tmp/
 *.tmp
 
-# Archify diagram verification receipts are reproducible local evidence. Commit
-# the source JSON, interactive HTML, and selected PNG previews instead.
+# Diagram verification receipts and generated interactive HTML are local render
+# intermediates. Commit only useful, GitHub-renderable documentation and previews.
 docs/diagrams/receipts/
+docs/diagrams/rendered/*.html
 docs/diagrams/rendered/*.delivery.json
 docs/diagrams/rendered/*.finalize.json
 docs/diagrams/rendered/*.finalize-summary.json

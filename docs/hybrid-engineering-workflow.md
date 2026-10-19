@@ -4,7 +4,7 @@
 
 The template is selected by the stable `Hybrid Batch Execution:` title prefix emitted by `workflow_create`. The remainder of the title is arbitrary user text (for example, `Hybrid Batch Execution: Fix a bug`); it does not need to include phrases such as “custom role” or “skills”.
 
-See the [interactive Archify workflow](diagrams/rendered/hybrid-engineering.html) or the static preview below. It summarizes the gate sequence; the task table and immutable plan remain authoritative for exact dependencies.
+The [architecture illustrations](diagrams/README.md) include a static overview of this workflow. The task table and immutable plan remain authoritative for exact dependencies.
 
 ![Hybrid engineering workflow](diagrams/rendered/hybrid-engineering.png)
 
@@ -80,7 +80,7 @@ Approval is a prerequisite, not a claim that execution succeeded. The runtime in
 - A valid content hash demonstrates snapshot integrity, not correctness of the task output. Review and QA use actual results, typed artifact lineage and independent runtime checks.
 - The current built-in checks are syntax checks for two known files. They are not a substitute for the full test suite; QA must run the checks appropriate to the proposed change and report anything not run as unverified.
 
-See [the root README](../README.md#hybrid-engineering-workflow) for how this mode relates to the broader local workflow, and [durable Batch Execution](../README.md#durable-batch-execution-through-the-shipped-mcp-runtime) for the batch protocol details.
+See [the root README](../README.md#how-a-workflow-runs) for how this mode relates to the broader local lifecycle, and [Durable batch execution](batch-execution.md) for the exact `execute_batch` input contract and operational checks.
 
 ## Candidate and release status
 

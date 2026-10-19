@@ -28,7 +28,14 @@ git diff --check
 
 For execution, lease, filesystem, recovery, or package changes, also run the corresponding focused tests under `tests/`. Do not claim a check passed unless you ran it and observed a successful exit status. Mention tests that could not be run and the reason.
 
-For changes that alter architecture, workflow dependencies, policy enforcement, or repository structure, review the [visual documentation index](docs/diagrams/README.md) and update the corresponding Archify source under `docs/diagrams/source/`. If Archify is available, regenerate and validate the diagrams with `ARCHIFY_BIN=/path/to/archify/bin/archify.mjs scripts/render-doc-diagrams.sh`; commit the refreshed HTML and PNG previews, not the generated receipts.
+For user-visible or architectural changes, update the canonical documentation page and the [documentation index](docs/README.md). Follow the [documentation rewrite workflow](docs/DOCUMENTATION_WORKFLOW.md) to choose the page type, verify claims against code and tests, and check links. Diagrams are optional supporting material; do not add a diagram unless it makes a concept materially easier to understand. GitHub-renderable Markdown or static PNGs are preferred over standalone HTML.
+
+Before opening a documentation-only pull request, run:
+
+```bash
+npm run docs:check
+git diff --check
+```
 
 ## Safety and evidence
 

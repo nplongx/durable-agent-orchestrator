@@ -2,7 +2,7 @@
 
 This directory contains benchmark protocol files, preparation evidence, and the single authorized CASE-01 pilot record. The pilot failed/unverified in the plugin condition; no rubric score or Phase 2 go decision is recorded.
 
-For navigation across the code, docs and evidence folders, see the [repository map](../../docs/diagrams/rendered/repository-map.html). The [system architecture](../../docs/diagrams/rendered/system-architecture.html) and [hybrid engineering workflow](../../docs/diagrams/rendered/hybrid-engineering.html) are explanatory views only; they do not change benchmark authorization, CASE-06 policy disposition, or readiness status.
+For navigation across code, docs, and evidence, see the [documentation index](../../docs/README.md) and [architecture illustrations](../../docs/diagrams/README.md). These illustrations do not change benchmark authorization, CASE-06 policy disposition, or readiness status.
 
 For each case and condition, create a new run directory using a unique timestamp/ID and copy `run-manifest.template.json` to `run-manifest.json`. Keep evidence artifacts in that run directory, not inside the temporary execution workspace. Do not place credentials, personal data, or customer data here.
 
