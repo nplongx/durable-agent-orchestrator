@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" role="img" aria-labelledby="title">
+  <title id="title">Runalith logo</title>
+  <rect width="40" height="40" rx="11" fill="#c7f36a"/>
+  <g fill="none" stroke="#18231f" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10 11h9v8h11M10 29h9v-8h11"/>
+    <circle cx="10" cy="11" r="3"/>
+    <circle cx="10" cy="29" r="3"/>
+    <circle cx="30" cy="19" r="3"/>
+  </g>
+</svg>

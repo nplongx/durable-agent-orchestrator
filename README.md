@@ -1,4 +1,18 @@
-# Runalith
+<p align="center">
+  <img src="site/logo.svg" alt="Runalith logo" width="88" height="88" />
+</p>
+
+<h1 align="center">Runalith</h1>
+
+<p align="center"><strong>Durable, local-first MCP workflows for agents.</strong></p>
+
+<p align="center">
+  <a href="https://nplongx.github.io/runalith/">Website</a> ·
+  <a href="https://github.com/nplongx/runalith/releases">Releases</a> ·
+  <a href="docs/README.md">Documentation</a>
+</p>
+
+---
 
 **Durable, local-first MCP workflows for agents.** [Project website](https://nplongx.github.io/runalith/) · [Releases](https://github.com/nplongx/runalith/releases). Runalith turns an agent's multi-step work into an explicit, inspectable workflow: approved immutable plans, dependency-aware tasks, typed evidence, durable SQLite state, bounded local execution, and recovery records.
 

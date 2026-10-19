@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const siteRoot = path.join(root, 'site');
-const required = ['index.html', 'styles.css', '404.html', '.nojekyll'];
+const required = ['index.html', 'styles.css', 'logo.svg', '404.html', '.nojekyll'];
 for (const name of required) {
   const file = path.join(siteRoot, name);
   assert.ok(fs.existsSync(file) && fs.statSync(file).isFile(), `missing static site asset: ${name}`);
@@ -19,6 +19,7 @@ assert.match(html, /<link rel="canonical" href="https:\/\/nplongx\.github\.io\/r
 assert.match(html, /\.mcpb/, 'site should explain the MCP bundle format');
 assert.match(html, /https:\/\/github\.com\/nplongx\/runalith/, 'site must link to the renamed repository');
 assert.match(html, /href="styles\.css"/, 'site should use a relative stylesheet path');
+assert.match(html, /src="logo\.svg"/, 'site should use the shared Runalith logo asset');
 assert.match(notFound, /href="\.\/"/, '404 page should link back to the static site root');
 assert.doesNotMatch(`${html}\n${notFound}\n${css}`, /chat on steroids|chat-on-steroids/i, 'public site must use neutral Runalith branding');
 assert.doesNotMatch(html, /<script\b|cdn\./i, 'landing page should be static and not require client-side frameworks/CDN assets');
