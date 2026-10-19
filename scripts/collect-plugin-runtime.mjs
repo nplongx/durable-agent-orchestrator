@@ -34,9 +34,11 @@ const queue = [
   'src/runtime/workflow/case01-artifact-acceptance.js',
   'src/runtime/workflow/custom-roles.js',
   'src/runtime/workflow/custom-workflows.js',
-  // The immutable system coordinator is loaded through runtimePrefix in the
-  // server entry point, so keep this dynamic-import dependency explicit.
-  'src/runtime/workflow/system-coordinator.js'
+  // The immutable system coordinator and specialist prompt helper are loaded
+  // through runtimePrefix in the server entry point, so keep these dynamic
+  // import dependencies explicit in the packaged runtime closure.
+  'src/runtime/workflow/system-coordinator.js',
+  'src/runtime/workflow/specialist-role-guidance.js'
 ];
 const visited = new Set();
 // Include static imports, dynamic imports, and side-effect-only imports. If a

@@ -6,6 +6,8 @@ For codebase orientation, see the [visual documentation index](diagrams/README.m
 
 ## Release and governance blockers
 
+- **The recorded `1.0.9-rc.4` bundle is stale relative to the current checkout.** Additional workflow recovery, specialist guidance, documentation checker, tests, and documentation edits have been made after the recorded candidate was built. Its old bundle digest must not be presented as the identity of the current source. Rebuild and reproduce a fresh candidate, then complete all required authorization and independent-review gates before considering publication.
+
 1. **Frozen release artifact identity is not established.** The locally built `1.0.9-rc.4` candidate has a recorded filename and SHA-256, but the official frozen bundle is not present in the working tree, so the release process cannot prove that the candidate under review is the authorized frozen artifact. Resolve through the authorized bundle custodian; do not recreate or overwrite the frozen path as a workaround.
 2. **Fresh exact-scope authorization and gate approval are missing.** No execution is permitted until the designated authorization authority supplies a valid, signed, scope-bound record and the gate custodian opens the correct gate.
 3. **Independent candidate review is missing.** An authorized reviewer must independently review the precise `1.0.9-rc.4` candidate bundle and inventory hashes recorded in [the candidate record](review-candidate-1.0.9-rc.4.md). Self-verification and CI results are not substitutes for this review.
@@ -18,7 +20,7 @@ For codebase orientation, see the [visual documentation index](diagrams/README.m
 - **Real autonomous specialist execution is not yet proven.** The successful local workflow evidence used scripted/prevalidated host task payloads. It proves workflow persistence and typed-evidence checks under that harness, not the quality or reliability of autonomous model workers.
 - **Real OpenClaw/Gateway integration E2E is still required for M12.** Unit/contract tests do not prove native session/run identity, worker placement, cancellation/fencing, teardown, or recovery against a live isolated Gateway.
 - **External delivery and exactly-once side effects are unproven.** Do not infer that durable local task completion guarantees a remote message/action was delivered exactly once.
-- **Installed runtime and candidate source may differ.** Do not assume the local candidate has been installed or deployed just because it builds and passes extracted-package tests.
+- **Installed bundle identity has a narrower verification boundary.** After the latest reinstall, health reports runtime version `1.0.9-rc.4`, and the installed `server/index.js` and `src/runtime/job-store.js` SHA-256 values matched this checkout during recovery verification. The host does not expose the exact installed `.mcpb` archive hash, so this does not establish identity with any separately frozen/authorized release bundle.
 - **The local plugin is not an OS sandbox.** Workspace boundaries and structured command checks are defense-in-depth, not a replacement for a separately reviewed OS/container sandbox.
 - **Legacy host-specific paths remain.** Some root-level compatibility/runtime scripts and older tests still refer to `/home/long/...`; the plugin entrypoint is `server/index.js`, but a broader portability cleanup needs targeted tests and should not be mixed with release-gate changes.
 

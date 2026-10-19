@@ -73,8 +73,11 @@ Before merging documentation changes:
 ```bash
 npm run docs:generate-reference   # after MCP tools/schemas change
 npm run docs:check
+npm run docs:check:external       # optional network-enabled HTTP(S) status check
 git diff --check
 ```
+
+`docs:check` validates inline and reference-style Markdown links, local files, heading anchors, generated MCP-reference parity, and the reference generator's path isolation. `docs:check:external` additionally contacts unique HTTP(S) targets; it is opt-in because network reachability and rate limits can vary. A 401/403/429 response is reported as reachable but content-unverified; 404/410, server errors, timeouts, and network failures fail that optional check. Record any temporary or access-controlled destination as a limitation rather than claiming it was verified.
 
 When a page documents behavior affected by code changes, run the relevant focused test and report the exact command and outcome. For user procedures, verify commands and defaults against the current checkout; for schema/API changes, compare the docs with the source schema and regression tests. Do not rely only on a spelling/Markdown linter.
 

@@ -2325,7 +2325,63 @@ try {
   assert.equal(revisionRecovery.checks.find(check => check.name === 'completed_tasks_have_result_and_typed_artifact')?.pass, true);
   assert.equal(revisionRecovery.checks.find(check => check.name === 'reviewer_evidence_bound_to_dependency_producers')?.pass, true);
 
-  console.log('chat-on-steroids local plugin E2E: PASS (stdio MCP, approval, versioned custom-role CRUD/clone/validation, custom-workflow CRUD/clone/version pinning, DAG contract/cycle validation, immutable plan preview/approval, separate execution approval, custom workflow DAG execution and typed artifacts, 9-task built-in DAG, evidence-provenance rejection/restoration, deterministic local execution, production checks, reviewer rejection guard and provenance-preserving reviewer revision, failure terminalization, synthesis, terminalization; no cloud/API key)');
+  const mixedFindingRepair = await tool('workflow_create', {
+    title: 'accepted review with mixed findings recovery guard',
+    task: 'Verify an accept-labelled review with evidence and security findings is routed to formal specialist rework and never to evidence-only reviewer revision.',
+    workflow: 'standard-engineering', workspace
+  });
+  await tool('workflow_approve', { job_id: mixedFindingRepair.job_id, confirmation: 'Approve isolated local mixed-review recovery regression test.' });
+  await tool('workflow_dispatch', { job_id: mixedFindingRepair.job_id });
+  await tool('workflow_prepare_tasks', { job_id: mixedFindingRepair.job_id });
+  for (const role of ['product-owner', 'researcher', 'architect', 'engineer', 'security', 'qa', 'platform', 'writer']) {
+    const next = await tool('workflow_next_task', { job_id: mixedFindingRepair.job_id });
+    assert.equal(next.stage, 'task', `mixed findings fixture expected ${role}: ${JSON.stringify(next)}`);
+    assert.equal(next.task.role, role);
+    await tool('workflow_complete_task', {
+      task_id: next.task.task_id,
+      content: `Verified predecessor evidence for mixed-review recovery: ${role}.`,
+      artifact: artifactFor(role)
+    });
+  }
+  const mixedReviewerTask = await tool('workflow_next_task', { job_id: mixedFindingRepair.job_id });
+  assert.equal(mixedReviewerTask.stage, 'task');
+  assert.equal(mixedReviewerTask.task.role, 'reviewer');
+  const mixedReview = artifactFor('reviewer');
+  mixedReview.evidenceIssues = ['Release evidence lacks a current binary digest.'];
+  mixedReview.securityIssues = ['MCP reference generator security remediation needs fresh verification.'];
+  await tool('workflow_complete_task', {
+    task_id: mixedReviewerTask.task.task_id,
+    content: 'Recorded an inconsistent accept label with outstanding evidence and security findings for recovery regression coverage.',
+    artifact: mixedReview
+  });
+  const mixedBlocked = await tool('workflow_next_task', { job_id: mixedFindingRepair.job_id });
+  assert.equal(mixedBlocked.stage, 'blocked', 'an accept label must not bypass non-empty security/evidence finding arrays');
+  assert.match(mixedBlocked.reason, /reviewer has not accepted all required evidence/i);
+  assert.equal(mixedBlocked.terminalized, false);
+
+  const beforeMixedDiagnosis = await tool('workflow_get', { job_id: mixedFindingRepair.job_id });
+  const mixedDiagnosis = await tool('workflow_diagnose', { job_id: mixedFindingRepair.job_id });
+  assert.equal(mixedDiagnosis.read_only, true);
+  assert.ok(mixedDiagnosis.suggested_actions.some(action => action.tool === 'workflow_request_rework'),
+    'accepted reviews with substantive findings must recommend formal rework');
+  assert.ok(!mixedDiagnosis.suggested_actions.some(action => action.tool === 'workflow_request_reviewer_revision'),
+    'mixed findings must not be routed to evidence-only reviewer revision');
+  const afterMixedDiagnosis = await tool('workflow_get', { job_id: mixedFindingRepair.job_id });
+  assert.equal(afterMixedDiagnosis.job.state, beforeMixedDiagnosis.job.state,
+    'workflow_diagnose must remain read-only for mixed reviewer findings');
+  assert.equal(afterMixedDiagnosis.job.active_task_id, beforeMixedDiagnosis.job.active_task_id,
+    'workflow_diagnose must not change the active task');
+
+  const mixedRework = await tool('workflow_request_rework', {
+    job_id: mixedFindingRepair.job_id,
+    reason: 'The accepted review still contains evidence and security findings; rerun the relevant specialist roles and reviewer while preserving the immutable plan and all synthesis gates.'
+  });
+  assert.equal(mixedRework.prepared, true, JSON.stringify(mixedRework));
+  assert.equal(mixedRework.immutable_plan_preserved, true);
+  assert.equal(mixedRework.synthesis_allowed, false);
+  assert.deepEqual(mixedRework.targetRoles, ['engineer', 'security', 'qa', 'writer', 'reviewer']);
+
+  console.log('chat-on-steroids local plugin E2E: PASS (stdio MCP, approval, versioned custom-role CRUD/clone/validation, custom-workflow CRUD/clone/version pinning, DAG contract/cycle validation, immutable plan preview/approval, separate execution approval, custom workflow DAG execution and typed artifacts, 9-task built-in DAG, evidence-provenance rejection/restoration, deterministic local execution, production checks, reviewer rejection guard and provenance-preserving reviewer revision, mixed-finding rework routing, failure terminalization, synthesis, terminalization; no cloud/API key)');
 } finally {
   child.stdin.end();
   await new Promise(resolve => {

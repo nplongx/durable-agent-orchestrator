@@ -123,4 +123,4 @@ The local dashboard's **Roles & skills → Built-in role profile overlays** view
 
 - [Agent Skills specification](https://github.com/agentskills/agentskills) — the `SKILL.md` format and directory convention.
 - [OpenAI: Skills](https://developers.openai.com/api/docs/guides/tools-skills/) — how skills differ from MCP servers and tools.
-- [OpenAI: Build skills](https://developers.openai.com/api/docs/guides/tools-skills/build-skills/) — guidance on triggers, inputs, steps, outputs, and limits.
+- [OpenAI: Build skills](https://developers.openai.com/plugins/build/skills) — guidance on triggers, inputs, steps, outputs, and limits.

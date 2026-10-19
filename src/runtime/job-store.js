@@ -727,8 +727,20 @@ export class WorkflowStore {
       if (!reviewRow) throw new Error('workflow rework requires an active reviewer artifact');
       const reviewArtifact = this.hydrateArtifact(reviewRow);
       const review = reviewArtifact.content || {};
-      if (!['needs_changes', 'reject'].includes(review.decision)) throw new Error('workflow rework requires a reviewer decision of needs_changes or reject');
-      if (Array.isArray(review.securityIssues) && review.securityIssues.length && review.securityAccepted !== false) throw new Error('review findings are internally inconsistent; resolve security review data before rework');
+      const hasSubstantiveFindings = ['implementationIssues', 'securityIssues', 'blockingIssues']
+        .some(field => Array.isArray(review[field]) && review[field].length > 0);
+      const substantiveFindingsUnderAccept = review.decision === 'accept' && hasSubstantiveFindings;
+      if (!['needs_changes', 'reject'].includes(review.decision) && !substantiveFindingsUnderAccept) {
+        throw new Error('workflow rework requires a reviewer decision of needs_changes/reject or an accepted review with unresolved implementation/security/blocking findings');
+      }
+      // An accept label plus substantive findings (or securityAccepted=true
+      // alongside securityIssues) is contradictory review evidence. Permit this
+      // tool only as a recovery path that invalidates affected artifacts and
+      // creates new specialist/reviewer tasks; the normal synthesis gate still
+      // rejects every non-empty finding array.
+      if (Array.isArray(review.securityIssues) && review.securityIssues.length && review.securityAccepted !== false && !substantiveFindingsUnderAccept) {
+        throw new Error('review findings are internally inconsistent; resolve security review data before rework');
+      }
       const children = this.db.prepare('SELECT * FROM tasks WHERE job_id=? AND parent_task_id=? ORDER BY created_at ASC, rowid ASC').all(jobId, parent.task_id);
       const unsettled = children.filter(task => task.status !== 'completed');
       if (unsettled.length) throw new Error(`workflow rework requires all current specialist tasks to be completed: ${unsettled.map(task => `${task.role}:${task.status}`).join(', ')}`);
@@ -744,6 +756,8 @@ export class WorkflowStore {
       if (review.documentationAccepted === false) ['engineer', 'writer'].forEach(role => roles.add(role));
       if (Array.isArray(review.implementationIssues) && review.implementationIssues.length) roles.add('engineer');
       if (Array.isArray(review.securityIssues) && review.securityIssues.length) ['engineer', 'security'].forEach(role => roles.add(role));
+      if (Array.isArray(review.evidenceIssues) && review.evidenceIssues.length) ['qa', 'writer'].forEach(role => roles.add(role));
+      if (Array.isArray(review.blockingIssues) && review.blockingIssues.length) ['engineer', 'qa'].forEach(role => roles.add(role));
       const targetSpecs = specs.filter(spec => roles.has(String(spec.role).toLowerCase()));
       if (!targetSpecs.some(spec => String(spec.role).toLowerCase() === 'reviewer')) throw new Error('immutable plan does not include a reviewer task');
       const latestTaskForSpec = spec => children.filter(task => {

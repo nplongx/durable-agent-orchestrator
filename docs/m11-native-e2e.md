@@ -1,6 +1,6 @@
 # M11 — Runner-owned native 9-agent E2E
 
-> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+> **Document type:** Historical milestone record. Status labels and claims describe the original milestone scope and time only; they have not been independently revalidated against today's source/runtime as a whole and do not certify current deployment or release readiness. Verify current behavior against source and tests before relying on it.
 
 M11 moves `standard-engineering` specialist lifecycle ownership off the local OpenClaw account and onto the worker boundary.
 
