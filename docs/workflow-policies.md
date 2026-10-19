@@ -2,7 +2,7 @@
 
 Workflow policy packs let operators reuse deterministic constraints and success criteria across workflow proposals without changing plugin source code. They are a second layer over the fixed system safety and approval gates, not a replacement for them.
 
-The [interactive policy lifecycle diagram](diagrams/rendered/workflow-policy-lifecycle.html) illustrates version immutability, the pre-approval attachment boundary, runtime evaluation, and audit recording. See the [visual documentation index](diagrams/README.md) for the system architecture and repository map as well.
+The [architecture illustrations](diagrams/README.md) include a static overview of policy versioning, the pre-approval attachment boundary, runtime evaluation, and audit recording. This page defines the supported predicates and enforcement behavior.
 
 ![Workflow policy pack lifecycle](diagrams/rendered/workflow-policy-lifecycle.png)
 
