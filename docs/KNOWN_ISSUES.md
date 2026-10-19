@@ -1,19 +1,22 @@
 # Known issues and release blockers
 
-**Status as of 2026-10-19:** the repository supports controlled local development and test execution. A strict Phase 2 readiness audit returned `BLOCKED_NOT_READY`; it did not authorize execution or release. A separate `1.0.9-rc.4` review candidate has since been built and reproducibility-checked, but that does not close any of the formal release gates below. See [the exact candidate record](review-candidate-1.0.9-rc.4.md). This list is intentionally conservative and does not include local database contents, credentials, or machine-specific evidence files.
+**Status as of 2026-10-19:** the repository supports controlled local development and test execution. The strict Phase 2 readiness audit returned `BLOCKED_NOT_READY` for its formal deployment/production scope. Under the separate [release policy](RELEASE_POLICY.md), that result does not alone prevent a clearly labeled testing-only GitHub pre-release when its minimum package, test, identity, and disclosure checks pass. It continues to block any claim that the candidate is the official frozen artifact, production-ready, or deployment-authorized. See [the exact candidate record](review-candidate-1.0.9-rc.4.md). This list is intentionally conservative and does not include local database contents, credentials, or machine-specific evidence files.
 
 For codebase orientation, see the [visual documentation index](diagrams/README.md). The diagrams are explanatory views only; they do not close any release or authorization blocker listed here.
 
-## Release and governance blockers
+## Production/frozen-release blockers
 
-- **The recorded `1.0.9-rc.4` bundle is stale relative to the current checkout.** Additional workflow recovery, specialist guidance, documentation checker, tests, and documentation edits have been made after the recorded candidate was built. Its old bundle digest must not be presented as the identity of the current source. Rebuild and reproduce a fresh candidate, then complete all required authorization and independent-review gates before considering publication.
+The blockers below apply to calling the candidate official/frozen, using it for the formal Phase 2 deployment lane, or claiming production readiness. They do not by themselves veto an experimental pre-release under [the separate minimum standard](RELEASE_POLICY.md). Keep every status accurate; do not forge, silently waive, or report formal blockers as passed.
 
-1. **Frozen release artifact identity is not established.** The locally built `1.0.9-rc.4` candidate has a recorded filename and SHA-256, but the official frozen bundle is not present in the working tree, so the release process cannot prove that the candidate under review is the authorized frozen artifact. Resolve through the authorized bundle custodian; do not recreate or overwrite the frozen path as a workaround.
-2. **Fresh exact-scope authorization and gate approval are missing.** No execution is permitted until the designated authorization authority supplies a valid, signed, scope-bound record and the gate custodian opens the correct gate.
-3. **Independent candidate review is missing.** An authorized reviewer must independently review the precise `1.0.9-rc.4` candidate bundle and inventory hashes recorded in [the candidate record](review-candidate-1.0.9-rc.4.md). Self-verification and CI results are not substitutes for this review.
-4. **CASE-06 policy disposition is unresolved.** A valid signed disposition and verification against a trusted public-key anchor are required from the policy/specification authority.
-5. **Static release-policy validation is blocked by prerequisites.** Re-run only after frozen identity and prerequisite review/authorization conditions are satisfied; passing unrelated unit tests does not close this gate.
-6. **Authorization audit reconciliation is outstanding.** The one-shot authorization has been consumed and the audit metadata is stale. The authorized audit/authorization custodian must reconcile the official history; do not edit official records locally to manufacture a clean result.
+The recorded `1.0.9-rc.4` package has an exact digest in the candidate dossier, but that package was built from an earlier source/package snapshot. Do not present its digest as the identity of a later tag or source commit. For a new pre-release, rebuild and verify the artifact from the exact intended tag commit and update all release notes if its identity changes.
+
+1. **Frozen release artifact identity is not established.** The official frozen bundle is not present in the working tree, so the formal process cannot prove that the candidate under review is the authorized frozen artifact. Resolve this through the authorized bundle custodian; do not recreate or overwrite the frozen path as a workaround.
+2. **Fresh exact-scope authorization and gate approval are missing.** The formal deployment lane requires a valid, signed, scope-bound record from the designated authorization authority and the correct gate transition by its custodian.
+3. **Independent candidate review is missing.** An authorized reviewer must independently review the precise bundle and inventory hashes before a frozen/production release. Self-verification and CI results are not substitutes for this review.
+4. **CASE-06 policy disposition is unresolved.** A valid signed disposition and verification against a trusted public-key anchor are required from the policy/specification authority for the formal release lane.
+5. **Fresh Phase 2 host preflight is blocked.** Re-run the preflight in the intended host environment and satisfy its disk/resource requirements before formal Phase 2 deployment.
+6. **Static release-policy validation is blocked by prerequisites.** Re-run after frozen identity, review, authorization, and host-preflight prerequisites are satisfied; unrelated unit tests do not close this gate.
+7. **Authorization audit reconciliation is outstanding.** The one-shot authorization has been consumed and the audit metadata is stale. The authorized audit/authorization custodian must reconcile the official history before formal production/deployment approval; do not edit official records locally to manufacture a clean result.
 
 ## Runtime and acceptance gaps
 
@@ -26,4 +29,4 @@ For codebase orientation, see the [visual documentation index](diagrams/README.m
 
 ## Exit criteria
 
-Release blockers close only when the required authorized records and independent verification exist for the exact candidate identity. Runtime gaps close only with reproducible isolated integration evidence. Keep unavailable, ambiguous, or stale evidence marked blocked/unverified; never reinterpret it as a pass.
+For a testing pre-release, satisfy the minimum checklist in [the release policy](RELEASE_POLICY.md), identify the exact tagged source/package, attach a checksum-verified artifact, and disclose these open limitations. Formal production/frozen-release blockers close only when the required authorized records and independent verification exist for the exact candidate identity. Runtime gaps close only with reproducible isolated integration evidence. Keep unavailable, ambiguous, or stale evidence marked blocked/unverified; never reinterpret it as a pass.
