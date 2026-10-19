@@ -1,31 +1,75 @@
 <p align="center">
-  <img src="site/logo.svg" alt="Runalith logo" width="88" height="88" />
+  <img src="docs/assets/readme-banner.svg" alt="Runalith — durable, local-first MCP workflows for agents" width="100%" />
 </p>
 
-<h1 align="center">Runalith</h1>
-
-<p align="center"><strong>Durable, local-first MCP workflows for agents.</strong></p>
+<p align="center">
+  <a href="https://github.com/nplongx/runalith/actions/workflows/ci.yml"><img src="https://github.com/nplongx/runalith/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status" /></a>
+  <a href="https://github.com/nplongx/runalith/actions/workflows/pages.yml"><img src="https://github.com/nplongx/runalith/actions/workflows/pages.yml/badge.svg?branch=main" alt="GitHub Pages deploy status" /></a>
+  <a href="https://github.com/nplongx/runalith/releases"><img src="https://img.shields.io/github/v/release/nplongx/runalith?include_prereleases&label=latest%20testing%20release" alt="Latest testing release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/nplongx/runalith" alt="MIT license" /></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white" alt="Node.js 22 or newer" /></a>
+</p>
 
 <p align="center">
   <a href="https://nplongx.github.io/runalith/">Website</a> ·
   <a href="https://github.com/nplongx/runalith/releases">Releases</a> ·
-  <a href="docs/README.md">Documentation</a>
+  <a href="docs/README.md">Docs</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a> ·
+  <a href="SECURITY.md">Security</a>
 </p>
 
----
+> [!WARNING]
+> **Testing pre-release — not production-certified.** The strict Phase 2 readiness gate remains `BLOCKED_NOT_READY` (`execution_permitted=false`). Read the [latest release notes](https://github.com/nplongx/runalith/releases/tag/v1.0.9-rc.5) and [release policy](docs/RELEASE_POLICY.md) before evaluating or installing a candidate.
 
-**Durable, local-first MCP workflows for agents.** [Project website](https://nplongx.github.io/runalith/) · [Releases](https://github.com/nplongx/runalith/releases). Runalith turns an agent's multi-step work into an explicit, inspectable workflow: approved immutable plans, dependency-aware tasks, typed evidence, durable SQLite state, bounded local execution, and recovery records.
+Runalith turns multi-step agent work into an explicit, inspectable workflow: approved immutable plans, dependency-aware tasks, typed evidence, durable SQLite state, bounded local execution, and recovery records.
 
 Runalith is a runtime, not a hosted model or remote execution service. Reasoning is supplied by the MCP client/assistant; supported deterministic commands run locally under a plan-bound contract. The installable `.mcpb` is a standard bundle container for compatible clients, not a proprietary Runalith-only format.
 
-## What it provides
+## Contents
 
-- **Explicit approval.** Creating a proposal does not authorize dispatch. Approval and execution are distinct steps.
-- **Durable state.** Plans, tasks, approvals, results, typed artifacts, execution sessions and audit events are stored in SQLite.
-- **Dependency-aware orchestration.** Tasks become eligible only when their planned dependencies and evidence are satisfied.
-- **Evidence-based completion.** Runtime gates validate supported success predicates, typed artifact schemas, hashes, and producer lineage; a narrative claim is not proof.
-- **Reusable workflow policy.** Versioned policy packs can pin supported constraints and success predicates before approval.
-- **Local observability.** An optional loopback-only dashboard provides read-only inspection of workflow state.
+- [Why Runalith](#why-runalith)
+- [Capabilities](#capabilities)
+- [Workflow lifecycle](#workflow-lifecycle)
+- [Quick start](#quick-start)
+- [Connect an MCP client](#connect-an-mcp-client-directly)
+- [How a workflow runs](#how-a-workflow-runs)
+- [Documentation](#documentation)
+- [Development commands](#development-commands)
+- [Security and project status](#security-and-project-status)
+
+## Why Runalith
+
+Agent reasoning can be flexible; execution should still be reviewable. Runalith separates the assistant's reasoning from the runtime's persisted plans, approvals, task execution, and evidence checks.
+
+| Principle | Runtime behavior |
+|---|---|
+| **Approval before execution** | A proposal is not authorization. Dispatch requires an explicitly approved, immutable plan. |
+| **Durability by default** | Workflow state, task transitions, artifacts, and audit events are persisted in SQLite for inspection and recovery. |
+| **Evidence over assertion** | Completion gates examine supported success predicates, artifact schemas, hashes, and producer lineage—not narrative claims alone. |
+| **Local-first boundaries** | The stdio MCP server does not open an HTTP listener; deterministic local commands run under plan-bound contracts. |
+
+## Capabilities
+
+- **Dependency-aware orchestration:** tasks become eligible only when planned dependencies and required evidence are satisfied.
+- **Reusable workflow policy:** versioned policy packs can pin supported constraints and success predicates before approval.
+- **Local observability:** an optional loopback-only dashboard provides read-only inspection of workflow state.
+- **MCP-native integration:** connect compatible clients over stdio or install the `.mcpb` bundle in a client that supports it.
+
+## Workflow lifecycle
+
+```mermaid
+flowchart TD
+    A[Propose workflow] --> B{Explicitly approved?}
+    B -- No --> C[Remain proposed or blocked]
+    B -- Yes --> D[Compile immutable plan]
+    D --> E[Dispatch dependency-ready tasks]
+    E --> F[Validate artifacts and provenance]
+    F --> G{Success contract satisfied?}
+    G -- No --> H[Persist failure and recovery state]
+    G -- Yes --> I[Complete with evidence]
+```
+
+The `workflow_coordinator_step` API can drive much of this lifecycle one high-level step at a time, but it does not bypass approval or replace the client assistant's reasoning. See the [workflow lifecycle and recovery guide](docs/workflow-lifecycle.md).
 
 ## Quick start
 
@@ -81,7 +125,7 @@ The exact configuration syntax varies by client. Keep the data directory private
 4. **Inspect and recover:** use workflow, event, artifact and diagnosis tools to inspect durable state. Failed or incomplete work remains failed or blocked until it is actually resolved.
 5. **Synthesize:** `workflow_complete_synthesis` applies reviewer, artifact, provenance and success-contract gates before terminalizing the workflow.
 
-The built-in `workflow_coordinator_step` API can drive much of this lifecycle one high-level step at a time. It does not bypass approval or replace the client assistant's reasoning. See the [documentation index](docs/README.md).
+See the [documentation index](docs/README.md) for architecture, tool schemas, policies, and operational guides.
 
 ## Documentation
 
@@ -116,7 +160,7 @@ The built-in `workflow_coordinator_step` API can drive much of this lifecycle on
 
 ## Security and project status
 
-Runalith is designed for controlled local development and testing; it is **not certified for production use**. Structured execution and filesystem checks are defense-in-depth, not an operating-system sandbox. The dashboard is not an authenticated remote admin service, and output redaction cannot guarantee that every secret is detected.
+Runalith is designed for controlled local development and testing; it is **not certified for production use**. Structured execution and filesystem checks are defense-in-depth, not an operating-system sandbox. The dashboard is a loopback-only read-only view, not an authenticated remote admin service, and output redaction cannot guarantee that every secret is detected.
 
 Published packages are experimental testing candidates, not production certifications. Use the [Releases page](https://github.com/nplongx/runalith/releases) for available packages, verify the checksum, and read the corresponding notes before installation. Formal production/frozen-release gates remain separate from the minimum standard for a testing pre-release; see [release policy](docs/RELEASE_POLICY.md) and [known issues](docs/KNOWN_ISSUES.md).
 
