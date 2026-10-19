@@ -244,7 +244,7 @@ The server listens on loopback only. Use the environment variables listed in [th
 
 The local MCP workflow is suitable for controlled local development and testing. It is **not yet certified for production use**. Passing unit/integration tests does not establish autonomous specialist quality, real OpenClaw/Gateway execution, external delivery, or exactly-once external side effects. Experimental distributed-worker and M12 integration work is documented separately and is not enabled by the local plugin entrypoint.
 
-Release and benchmark gates remain blocked until the frozen release artifact is identified, exact-scope authorization and independent review are recorded, the CASE-06 policy disposition is verified, and the authorization audit trail is reconciled. See [Known issues and release blockers](docs/KNOWN_ISSUES.md) and the [M12 native specialist bridge boundary](docs/m12-native-specialist-bridge.md).
+The `1.0.9-rc.4` hybrid-engineering candidate has a recorded local bundle hash, but it is not the official frozen artifact and is not approved for release. Release and benchmark gates remain blocked until frozen artifact identity, signed exact-scope authorization, independent review, the CASE-06 policy disposition, static release-policy validation, and authorization-audit reconciliation are complete. See the [1.0.9-rc.4 review-candidate record](docs/review-candidate-1.0.9-rc.4.md), [known issues and release blockers](docs/KNOWN_ISSUES.md), and the [M12 native specialist bridge boundary](docs/m12-native-specialist-bridge.md).
 
 ## Source layout
 

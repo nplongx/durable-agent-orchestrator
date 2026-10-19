@@ -1,12 +1,12 @@
 # Known issues and release blockers
 
-**Status as of 2026-10-18:** the repository supports controlled local development and test execution. A strict Phase 2 readiness audit returned `BLOCKED_NOT_READY`; it did not authorize execution or release. This list is intentionally conservative and does not include local database contents, credentials, or machine-specific evidence files.
+**Status as of 2026-10-19:** the repository supports controlled local development and test execution. A strict Phase 2 readiness audit returned `BLOCKED_NOT_READY`; it did not authorize execution or release. A separate `1.0.9-rc.4` review candidate has since been built and reproducibility-checked, but that does not close any of the formal release gates below. See [the exact candidate record](review-candidate-1.0.9-rc.4.md). This list is intentionally conservative and does not include local database contents, credentials, or machine-specific evidence files.
 
 ## Release and governance blockers
 
-1. **Frozen release artifact identity is not established.** The official frozen bundle is not present in the working tree, so the release process cannot prove that the artifact under review is exactly the frozen artifact. Resolve through the authorized bundle custodian; do not recreate or overwrite the frozen path as a workaround.
+1. **Frozen release artifact identity is not established.** The locally built `1.0.9-rc.4` candidate has a recorded filename and SHA-256, but the official frozen bundle is not present in the working tree, so the release process cannot prove that the candidate under review is the authorized frozen artifact. Resolve through the authorized bundle custodian; do not recreate or overwrite the frozen path as a workaround.
 2. **Fresh exact-scope authorization and gate approval are missing.** No execution is permitted until the designated authorization authority supplies a valid, signed, scope-bound record and the gate custodian opens the correct gate.
-3. **Independent candidate review is missing.** An authorized reviewer must independently review the precise candidate bundle and inventory hashes. Self-verification is not a substitute for this review.
+3. **Independent candidate review is missing.** An authorized reviewer must independently review the precise `1.0.9-rc.4` candidate bundle and inventory hashes recorded in [the candidate record](review-candidate-1.0.9-rc.4.md). Self-verification and CI results are not substitutes for this review.
 4. **CASE-06 policy disposition is unresolved.** A valid signed disposition and verification against a trusted public-key anchor are required from the policy/specification authority.
 5. **Static release-policy validation is blocked by prerequisites.** Re-run only after frozen identity and prerequisite review/authorization conditions are satisfied; passing unrelated unit tests does not close this gate.
 6. **Authorization audit reconciliation is outstanding.** The one-shot authorization has been consumed and the audit metadata is stale. The authorized audit/authorization custodian must reconcile the official history; do not edit official records locally to manufacture a clean result.

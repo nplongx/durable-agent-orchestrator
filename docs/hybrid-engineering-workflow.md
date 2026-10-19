@@ -77,3 +77,7 @@ Approval is a prerequisite, not a claim that execution succeeded. The runtime in
 - The current built-in checks are syntax checks for two known files. They are not a substitute for the full test suite; QA must run the checks appropriate to the proposed change and report anything not run as unverified.
 
 See [the root README](../README.md#hybrid-engineering-workflow) for how this mode relates to the broader local workflow, and [durable Batch Execution](../README.md#durable-batch-execution-through-the-shipped-mcp-runtime) for the batch protocol details.
+
+## Candidate and release status
+
+The current `1.0.9-rc.4` source candidate is documented in the [review-candidate record](review-candidate-1.0.9-rc.4.md). Its package build and deterministic/reproducibility checks passed, but the successful installed-runtime smoke evidence recorded there used the earlier `1.0.9-rc.3` installation. Do not treat that as a post-install test of the `rc.4` bundle. Independent candidate review and the formal release gates remain outstanding; see [known issues](KNOWN_ISSUES.md).

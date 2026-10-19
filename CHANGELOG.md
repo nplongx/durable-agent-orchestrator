@@ -9,7 +9,7 @@ Notable changes to this project are recorded here. This file summarizes reposito
 - Added regression coverage for the hybrid workflow, real batch evidence, tamper/mismatch rejection, package tool-schema parity, and deterministic package reproducibility.
 - Includes the reusable workflow-policy pack and read-only ORBIT / OPS Policies view from the preceding candidate work.
 - Local validation: `npm run test:protocol`, `npm run test:workflow-m4`, `npm test`, extracted MCP package smoke/schema validation, and package reproducibility. A post-install local workflow also completed 11/11 child tasks, both deterministic checks (exit code 0), and 11/11 durable recovery checks.
-- Review-candidate SHA-256: `689ad2c3dff0358d88afbfe461fb6f262431f0ee2a49848d4c9008d0ab007530`. This identifies the exact review candidate only; it is not a frozen artifact, authorized release, or production-readiness certification. Independent candidate review, formal exact-scope authorization, CASE-06 policy disposition, and authorization-audit reconciliation remain blocked; see [Known issues](docs/KNOWN_ISSUES.md).
+- Review-candidate SHA-256: `efbe0fe095613488f97969a45f66d8bf064ab725b994607aa80cd0f78e61cd6a` (`325107` bytes; [candidate record](docs/review-candidate-1.0.9-rc.4.md)). This identifies the exact review candidate only; it is not a frozen artifact, authorized release, or production-readiness certification. Independent candidate review, formal exact-scope authorization, CASE-06 policy disposition, and authorization-audit reconciliation remain blocked; see [Known issues](docs/KNOWN_ISSUES.md).
 
 
 # 1.0.9-rc.3 — 2026-10-19 (pre-release)
