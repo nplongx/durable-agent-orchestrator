@@ -39,6 +39,10 @@ The following local checks completed successfully on the candidate source snapsh
 
 These results are useful engineering evidence but do not replace independent review of the exact `1.0.9-rc.4` bytes or the formal release gates. The installed-runtime workflow is specifically identified above to avoid confusing its `rc.3` provenance with this `rc.4` package.
 
+## Current-checkout note
+
+This record identifies the historical `1.0.9-rc.4` candidate listed above, not the newer working-tree changes. Subsequent workflow recovery, specialist guidance, documentation-checker and test changes mean that the recorded bundle hash must not be used to identify or authorize the current checkout. A fresh reproducible candidate record is required before review or publication; all formal release blockers below remain in force.
+
 ## Outstanding release blockers
 
 The strict Phase 2 readiness audit remains `BLOCKED_NOT_READY`. Before creating a prerelease or calling this artifact frozen, the authorized process must establish all of the following for the exact candidate identity:

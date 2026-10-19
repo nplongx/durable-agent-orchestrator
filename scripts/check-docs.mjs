@@ -31,20 +31,46 @@ function removeCodeBlocks(markdown) {
     .replace(/(^|[^\\])`+[^`\n]*`+/g, '$1');
 }
 
-function findMarkdownLinks(markdown) {
-  // Intentionally checks inline Markdown links/images. Reference-style links are
-  // not parsed here; the checker is a guard against common broken local targets.
+export function findMarkdownLinks(markdown) {
   const withoutCode = removeCodeBlocks(markdown);
   const links = [];
-  const linkPattern = /!?\[[^\]]*\]\(\s*(<[^>]+>|[^)\s]+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g;
+  const references = new Map();
+  const lineOf = (source, offset) => source.slice(0, offset).split('\n').length;
+  const normalizeLabel = (label) => label.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
 
-  for (const match of withoutCode.matchAll(linkPattern)) {
-    const rawTarget = match[1].startsWith('<') && match[1].endsWith('>')
-      ? match[1].slice(1, -1)
-      : match[1];
+  // Capture and mask reference definitions so their targets are not counted
+  // as links on the definition line. Keep character offsets/newlines stable so
+  // diagnostics still point to the source link's line.
+  const definitionPattern = /^[ \t]{0,3}\[([^\]\n]+)\]:[ \t]*(?:<([^>\n]+)>|(\S+))(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^\)\n]*\))?)?[ \t]*$/gm;
+  const withoutDefinitions = withoutCode.replace(definitionPattern, (full, label, angleTarget, bareTarget, offset) => {
+    const normalized = normalizeLabel(label);
+    const target = angleTarget ?? bareTarget;
+    if (normalized && target && !references.has(normalized)) references.set(normalized, target);
+    return full.replace(/[^\n]/g, ' ');
+  });
+
+  const inlinePattern = /!?\[[^\]]*\]\(\s*(<[^>]+>|[^)\s]+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g;
+  // Mask inline links before looking for reference links. This prevents the
+  // label in `[text](target)` from being misread as shortcut-reference syntax.
+  const inlineMasked = withoutDefinitions.replace(inlinePattern, (full, capturedTarget, offset) => {
+    const target = capturedTarget.startsWith('<') && capturedTarget.endsWith('>')
+      ? capturedTarget.slice(1, -1)
+      : capturedTarget;
+    links.push({ target, line: lineOf(withoutDefinitions, offset) });
+    return full.replace(/[^\n]/g, ' ');
+  });
+
+  // Full `[text][label]`, collapsed `[label][]`, and shortcut `[label]`
+  // references are supported. Only treat a bracket form as a reference link
+  // when its normalized label has a matching definition in this document.
+  const referencePattern = /!?\[([^\]\n]+)\](?:\[([^\]\n]*)\])?/g;
+  for (const match of inlineMasked.matchAll(referencePattern)) {
     const offset = match.index ?? 0;
-    const line = withoutCode.slice(0, offset).split('\n').length;
-    links.push({ target: rawTarget, line });
+    const following = inlineMasked.slice(offset + match[0].length);
+    if (/^[ \t]*\(/.test(following)) continue;
+    const label = normalizeLabel(match[2] === undefined || match[2] === '' ? match[1] : match[2]);
+    const target = references.get(label);
+    if (target) links.push({ target, line: lineOf(inlineMasked, offset) });
   }
 
   return links;
@@ -62,7 +88,7 @@ function decodePath(target) {
   }
 }
 
-function githubHeadingSlugs(markdown) {
+export function githubHeadingSlugs(markdown) {
   const slugs = new Set();
   const occurrences = new Map();
   const headingPattern = /^#{1,6}\s+(.+?)\s*#*\s*$/gm;
@@ -87,7 +113,8 @@ function githubHeadingSlugs(markdown) {
   return slugs;
 }
 
-function check() {
+async function check() {
+  const checkExternalLinks = process.argv.includes('--check-external-links');
   const allFiles = new Set(gitFiles(['-co', '--exclude-standard']));
   const markdownFiles = [...allFiles]
     .filter((file) => file.toLowerCase().endsWith('.md'))
@@ -95,6 +122,8 @@ function check() {
     .sort();
   const trackedHtml = gitFiles(['-c', '--', 'docs/diagrams/rendered/*.html']);
   const errors = [];
+  const warnings = [];
+  const externalTargets = new Map();
   let linkCount = 0;
 
   for (const htmlFile of trackedHtml) {
@@ -107,7 +136,17 @@ function check() {
     const links = findMarkdownLinks(markdown);
 
     for (const { target: rawTarget, line } of links) {
-      if (!rawTarget || isExternal(rawTarget)) continue;
+      if (!rawTarget) continue;
+      if (isExternal(rawTarget)) {
+        if (checkExternalLinks && /^https?:\/\//i.test(rawTarget) && !/[<>]/.test(rawTarget) &&
+            !/\b(?:example\.(?:com|org|net)|your-domain|replace-me|owner\/repo)\b/i.test(rawTarget)) {
+          const normalizedUrl = new URL(rawTarget);
+          normalizedUrl.hash = '';
+          const key = normalizedUrl.toString();
+          if (!externalTargets.has(key)) externalTargets.set(key, { url: key, source: `${markdownFile}:${line}` });
+        }
+        continue;
+      }
       linkCount += 1;
 
       const target = decodePath(rawTarget);
@@ -165,6 +204,45 @@ function check() {
     }
   }
 
+  if (checkExternalLinks) {
+    const targets = [...externalTargets.values()];
+    let nextTarget = 0;
+    const concurrency = Math.min(6, targets.length);
+    const probe = async () => {
+      while (nextTarget < targets.length) {
+        const item = targets[nextTarget++];
+        let response;
+        try {
+          response = await fetch(item.url, {
+            method: 'HEAD',
+            redirect: 'follow',
+            headers: { 'user-agent': 'local-docs-link-check/1.0' },
+            signal: AbortSignal.timeout(10000),
+          });
+          if ([405, 501].includes(response.status)) {
+            response = await fetch(item.url, {
+              method: 'GET',
+              redirect: 'follow',
+              headers: { 'user-agent': 'local-docs-link-check/1.0', range: 'bytes=0-0' },
+              signal: AbortSignal.timeout(10000),
+            });
+          }
+        } catch (error) {
+          errors.push(`${item.source}: external URL could not be reached: ${item.url} (${error instanceof Error ? error.message : String(error)})`);
+          continue;
+        }
+        if ([401, 403, 429].includes(response.status)) {
+          warnings.push(`${item.source}: external URL responded HTTP ${response.status}; host is reachable but target content could not be verified: ${item.url}`);
+        } else if (response.status === 404 || response.status === 410 || response.status >= 500) {
+          errors.push(`${item.source}: external URL returned HTTP ${response.status}: ${item.url}`);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, () => probe()));
+    console.log(`External URL check: ${targets.length} unique HTTP(S) URLs inspected.`);
+    for (const warning of warnings) console.warn(`- WARNING: ${warning}`);
+  }
+
   // Exercise reference generation with conflicting inherited settings that
   // would point at a caller's database/workspace if the generator failed to
   // replace every environment override. The only permitted state is an
@@ -215,12 +293,13 @@ function check() {
     return;
   }
 
-  console.log(`Documentation check passed: ${markdownFiles.length} Markdown files and ${linkCount} local links checked.`);
+  console.log(`Documentation check passed: ${markdownFiles.length} Markdown files and ${linkCount} local links checked${checkExternalLinks ? `; ${externalTargets.size} unique external URLs checked` : ''}.`);
 }
 
-try {
-  check();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
+if (invokedPath === fileURLToPath(import.meta.url)) {
+  check().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
 }

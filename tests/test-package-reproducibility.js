@@ -22,6 +22,8 @@ assert.match(packagerSource, /node \"\$EXTRACTED\/tests\/test-chat-on-steroids-p
 assert.doesNotMatch(packagerSource, /node \"\$PAYLOAD\/(?:server\/index\.js|tests\/test-chat-on-steroids-plugin\.js)\"/, 'packager must not substitute the pre-archive staging tree for packaged E2E');
 assert.match(packagerSource, /test-extracted-package-tool-schemas\.mjs/, 'packager must validate schemas from the exact candidate archive');
 assert.match(packagerSource, /plugin-package-metadata\.mjs/, 'packager must project full-app metadata into the local-only runtime dependency closure');
+const serverSource = fs.readFileSync(path.join(root, 'server/index.js'), 'utf8');
+assert.match(serverSource, /getSpecialistRoleGuidance\(contract\.role\)/, 'built-in specialist prompt builder must wire the role-specific guidance helper');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-reproducibility-'));
 const outputs = [path.join(temp, 'first.mcpb'), path.join(temp, 'second.mcpb')];
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -220,9 +222,10 @@ try {
     assert.deepEqual(firstArchive.extracted.get(relative), bytes, `packaged entry must match exact source bytes: ${relative}`);
     assert.deepEqual(secondArchive.extracted.get(relative), bytes, `second packaged entry must match exact source bytes: ${relative}`);
   }
-  assert.equal(firstArchive.names.length, 44,
+  assert.equal(firstArchive.names.length, 45,
     'candidate payload must include the strict JSON parser dependency, hybrid workflow catalog/definition, pinned role-profile and policy runtime modules, packaged MCP stdio backpressure and shutdown regressions, pinned production behavioral QA harness, and exact runtime closure');
   assert.ok(firstArchive.extracted.has('src/runtime/strict-json.js'), 'strict JSON consumer hardening must ship its parser dependency in the MCP bundle');
+  assert.ok(firstArchive.extracted.has('src/runtime/workflow/specialist-role-guidance.js'), 'the runtimePrefix-loaded specialist prompt helper must ship in the extracted MCP bundle');
 
   // Exercise the collector against a disposable source tree containing a
   // side-effect-only static import. The package source closure must include

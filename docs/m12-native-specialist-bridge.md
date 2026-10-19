@@ -1,6 +1,6 @@
 # M12 native specialist bridge
 
-> **Document type:** Historical milestone record. It captures design, implementation, or validation context for that milestone; it is not by itself proof of current deployment or release readiness.
+> **Document type:** Historical milestone record. Status labels and claims describe the original milestone scope and time only; they have not been independently revalidated against today's source/runtime as a whole and do not certify current deployment or release readiness. Verify current behavior against source and tests before relying on it.
 
 `src/runtime/m12-native-specialist-bridge.js` is the durable adapter boundary for the fork's node-scoped `m12.specialist.start` and `m12.specialist.wait` RPCs.
 

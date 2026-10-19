@@ -27,6 +27,24 @@ flowchart TD
     P -- Yes --> Q[Durable terminal state]
 ```
 
+## Tool-selection decision guide
+
+Choose the tool based on the current lifecycle stage, not just the tool name. “Read-only” tools inspect state; “state-changing” tools persist approvals, tasks, revisions, or results. All runtime preconditions continue to apply.
+
+| Stage / question | Use this tool | Avoid / next action |
+|---|---|---|
+| Which built-in workflow template fits? | `workflow_catalog` (read-only) | Does not create a run; then draft a bounded request for `workflow_create`. |
+| Need a new local run proposal? | `workflow_create` (state-changing proposal) | Does not approve or dispatch; inspect the proposal and intended plan, then obtain explicit user approval. |
+| Have the proposal and immutable plan been inspected and explicitly approved? | `workflow_approve` (state-changing) | Do not approve based only on a valid input schema; after approval call `workflow_dispatch`. |
+| Approved workflow needs to start or planned child tasks need recovery? | `workflow_dispatch`, then `workflow_prepare_tasks` | Do not dispatch an unapproved proposal; preparing tasks is not executing them. |
+| Need the next dependency-ready work item? | `workflow_coordinator_step` for ordinary high-level orchestration, or `workflow_next_task` when handling a returned task explicitly | Do not skip dependencies. Specialist reasoning uses `workflow_complete_task`; deterministic work uses `task_execute_local` or eligible `execute_batch`. |
+| What is the current state or event sequence? | `workflow_get`, `workflow_events`, `workflow_artifacts` (read-only) | These do not repair state. Use `workflow_diagnose` to correlate a blocker. |
+| Is a candidate artifact structurally valid? | `workflow_validate_artifact` (read-only) | Schema validity does not establish result lineage, approval, or overall success; persist only through the task's valid completion path. |
+| Reviewer found implementation/security/blocking issues? | Diagnose first; use `workflow_request_rework` only when its supported review preconditions hold | Do not use reviewer revision to erase non-evidence findings. Rework invalidates affected active artifacts and still requires the gates to pass again. |
+| Accepted review is blocked solely by `evidenceIssues`? | `workflow_request_reviewer_revision`, only for eligible `standard-engineering` v2 state | Not valid for rejected reviews or remaining implementation/security/blocking issues; it never approves synthesis. |
+| Is all required work and evidence complete? | `workflow_complete_synthesis`, or `workflow_coordinator_step.synthesis` on the coordinator path | The runtime independently evaluates task state, artifact lineage, reviewer/QA gates, and declared predicates; a narrative claim cannot override a failed predicate. |
+| Need a custom workflow definition? | `custom_workflow_create` / `custom_workflow_update` → `custom_workflow_preview` → `custom_workflow_approve` → `custom_workflow_run_create` → `workflow_approve` → `workflow_dispatch` | Definition-preview approval and run approval are separate gates. None of the definition tools alone executes a run. |
+
 ## 1. Create and inspect a proposal
 
 Call `workflow_catalog` to discover available built-in workflow templates. Then create a proposal with `workflow_create`. The minimum shape is `title` and `task`; `workflow`, `workspace`, supported `role_bindings`, `goal`, `constraints`, and `success_criteria` are optional inputs defined in the live tool schema.
@@ -75,6 +93,14 @@ Use the following read-oriented tools when investigating state:
 | `workflow_recovery_verify` | Verify persisted workflow invariants and read the same SQLite state from a fresh Node process; this does not prove supervisor restart or all runtime behavior. |
 
 If work is blocked, investigate the durable state and the exact failed contract first. Do not call completion tools repeatedly with modified claims in an attempt to force a pass.
+
+### Resuming an approved workflow
+
+The orchestrator is host-driven. A job left in `EXECUTING` / `SPAWN_CTO` does not by itself prove that a worker crashed: the host conversation must re-enter `workflow_coordinator_step` to continue an approved workflow. Start with `workflow_get`, `workflow_events`, and `workflow_diagnose`; diagnosis is read-only and its `suggested_actions` are recommendations, not repairs.
+
+Do not bulk-call `workflow_next_task` against stale jobs. Depending on task state, it can start a pending specialist task, execute an approved deterministic batch, or terminalize a job whose child tasks failed/cancelled. Resume one reviewed job at a time through the coordinator path after checking the immutable plan, task state, and proposed action.
+
+If a review says `decision: "accept"` but still has non-empty `implementationIssues`, `securityIssues`, or `blockingIssues`, treat that review as unresolved and use the formal `workflow_request_rework` path when supported. It invalidates affected active evidence and creates linked revision tasks; it does not approve synthesis. An accepted review blocked solely by non-empty `evidenceIssues` remains eligible for the narrower `workflow_request_reviewer_revision` path. In both cases, the fresh review and runtime gates must pass before synthesis. Never use a reviewer-only revision to bypass substantive findings.
 
 ### Authorized rework paths
 

@@ -41,6 +41,12 @@ Notable changes to this project are recorded here. This file summarizes reposito
 
 ## Unreleased
 
+- Hardened workflow recovery and diagnosis: revision guidance now matches the reviewer-revision eligibility guard, and the supported rework path preserves immutable plan/approval gates while invalidating superseded active evidence.
+- Expanded documentation link validation to cover full, collapsed, and shortcut reference-style Markdown links; added an opt-in external HTTP(S) link check while keeping default documentation checks offline.
+- Added regression coverage for specialist role/tool guidance and reference-style Markdown link parsing, and documented safe workflow recovery, current installed-runtime verification limits, and the remaining release blockers.
+- Normalized historical milestone documentation so historical status claims are not mistaken for a current source/runtime audit; fixed the stale Agent Skills build-guide link.
+- These changes are newer than the previously recorded `1.0.9-rc.4` review-candidate bundle. The old candidate hash does not identify this checkout; rebuild and re-validate a new candidate before any release consideration. The formal release blockers below remain open.
+
 - Added a per-run goal plus closed JSON predicate contract for built-in and custom workflow runs; supported predicate types cover immutable-plan checks, task completion/exit status, roles, and provenance-validated typed artifact fields. The normalized contract is pinned into the immutable execution plan hash.
 - Added runtime PASS/FAIL evaluation at synthesis; claimed CTO statuses cannot override a failed predicate. Artifact predicates require matching active artifact IDs bound to successful durable results, while plan/task predicates are evaluated directly from the immutable plan and durable task rows.
 - Added regression coverage for unknown predicate types, invalid fields/operators, plan-hash pinning, false claimed PASS results, mismatch/invalid evidence references, and malformed MCP input schemas; documented supported predicates and limits.
