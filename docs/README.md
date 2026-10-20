@@ -7,6 +7,7 @@ This index is the starting point for users, operators, and contributors. Visit t
 - [Quickstart](quickstart.md) — build or connect the local MCP runtime and understand the first workflow steps.
 - [Root README](../README.md) — project purpose, capabilities, security boundaries, commands, and navigation.
 - [Testing pre-release notes for 1.0.9-rc.5](release-notes-1.0.9-rc.5.md) — Runalith package identity, compatibility and testing boundaries.
+- [Local RC.5 installation verification (2026-10-20)](installation-verification-1.0.9-rc.5-20261020.md) — evidence for a separate workspace-built candidate and installed file-content comparison; not the published release asset or release approval.
 
 ## Using the runtime
 
@@ -58,7 +59,7 @@ The remaining milestone (`m*`), phase (`p*`), proposal, implementation-plan, ben
 | Distributed provider integration | [GitHub Actions distributed-worker plan](github-actions-distributed-worker-implementation-plan.md), [GitHub Actions/OpenClaw contract matrix](github-actions-openclaw-contract-matrix.md) | The contract matrix explicitly records missing/unproven native Gateway requirements; do not infer a native provider from the presence of an adapter. |
 | Workflow benchmark | [Benchmark plan](plugin-workflow-benchmark-plan.md), [tracked benchmark repository README](../benchmarks/plugin-workflow-benchmark/README.md), [paired-host harness contract](../benchmarks/plugin-workflow-benchmark/paired-host-harness-contract.md) | Keep benchmark identity and authorization separate from general test results. Local, ignored phase-freeze/preflight copies are not links for GitHub readers. Consult [known issues](KNOWN_ISSUES.md) for current release blockers. |
 
-Use the [release policy](RELEASE_POLICY.md) to distinguish testing pre-releases from the production/frozen-release lane, [known issues](KNOWN_ISSUES.md) for current limitations, and the [`1.0.9-rc.4` candidate record](review-candidate-1.0.9-rc.4.md) for exact artifact evidence. A testing pre-release does not satisfy or override formal production release gates.
+Use the [release policy](RELEASE_POLICY.md) to distinguish testing pre-releases from the production/frozen-release lane, [known issues](KNOWN_ISSUES.md) for current limitations, the [`1.0.9-rc.4` candidate record](review-candidate-1.0.9-rc.4.md) for historical RC.4 artifact evidence, and the [local RC.5 installation verification](installation-verification-1.0.9-rc.5-20261020.md) for the separately built local candidate. A testing pre-release or successful post-install smoke check does not satisfy or override formal production release gates.
 
 ## Where facts come from
 
