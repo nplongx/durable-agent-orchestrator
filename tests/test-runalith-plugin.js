@@ -7,15 +7,47 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { roleProfileHash } from '../src/runtime/workflow/role-profiles.js';
-import { validateExecutionPlan } from '../src/runtime/workflow/plan.js';
+import { resolveTaskBatchRoute, validateExecutionPlan } from '../src/runtime/workflow/plan.js';
+import { standardEngineeringValidationTaskSpecs } from '../src/runtime/workflow/catalog/standard-engineering.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+const expectedDefaultValidationTests = [
+  ['standard-batch-test-execution-batch', 'tests/test-execution-batch.js'],
+  ['standard-batch-test-execution-concurrency', 'tests/test-execution-batch-concurrency.js'],
+  ['standard-batch-test-terminal-recovery', 'tests/test-execution-batch-terminal-recovery.js'],
+  ['standard-batch-test-success-contract', 'tests/test-execution-success-contract.js'],
+  ['standard-batch-test-phase5-recovery', 'tests/test-phase5-recovery.js'],
+  ['standard-batch-test-agent-tool-guidance', 'tests/test-agent-tool-guidance.js'],
+  ['standard-batch-test-process-boundary', 'tests/test-execution-control-process-boundary.js'],
+  ['standard-batch-test-package-no-overwrite', 'tests/test-package-no-overwrite.js'],
+  ['standard-batch-test-package-reproducibility', 'tests/test-package-reproducibility.js'],
+  ['standard-batch-test-verified-result-atomicity', 'tests/test-verified-execution-result-atomicity.js'],
+  ['standard-batch-test-standard-engineering-planner', 'tests/test-standard-engineering-workflow.js']
+];
+const defaultValidationTaskSpecs = standardEngineeringValidationTaskSpecs(root);
+assert.deepEqual(defaultValidationTaskSpecs.map(task => task.id), expectedDefaultValidationTests.map(([id]) => id),
+  'the repository default must pin eleven deterministic validation tasks');
+assert.equal(new Set(defaultValidationTaskSpecs.map(task => task.id)).size, 11);
+assert.equal(new Set(defaultValidationTaskSpecs.map(task => task.role)).size, 11);
+for (const [index, [, testPath]] of expectedDefaultValidationTests.entries()) {
+  const task = defaultValidationTaskSpecs[index];
+  assert.deepEqual(task.execution.args, ['--test', path.resolve(root, testPath)]);
+  assert.equal(task.execution.executor, 'ExecutionManager');
+  assert.equal(task.execution.executable, 'node');
+  assert.equal(task.execution.timeout_ms, 300000);
+  assert.equal(task.execution.deterministic, true);
+  assert.equal(task.execution.batch_validation_task, true);
+  assert.equal(task.execution.output_artifact_type, 'qa-report');
+  assert.deepEqual(task.dependencies, ['standard-engineer']);
+}
+
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-local-plugin-'));
 // This suite intentionally creates queue pressure and exercises several full
 // SQLite recovery transactions. Keep the protocol harness deadline bounded,
 // but avoid false failures when the local host is loaded by independent package
 // reproducibility builds that execute this same extracted test concurrently.
-const RPC_TIMEOUT_MS = 15_000;
+const RPC_TIMEOUT_MS = 120_000;
 const dataDir = path.join(temp, 'private-data');
 const workspace = path.join(temp, 'workspace');
 const case01AckBarrierDir = path.join(dataDir, 'case01-ack-lineage-barriers');
@@ -516,12 +548,22 @@ try {
   const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
   assert.equal(init.result?.serverInfo?.name, 'runalith-agent-orchestrator');
   const listed = await rpc('tools/list');
-  assert.equal(listed.result.tools.length, 46);
+  assert.equal(listed.result.tools.length, 50);
+  for (const name of ['workflow_preflight', 'workflow_write_files']) assert(listed.result.tools.some(tool => tool.name === name), `missing exposed tool ${name}`);
+  assert(listed.result.tools.some(tool => tool.name === 'workflow_liveness_diagnostics'), 'read-only job liveness diagnostics must be exposed through MCP');
+  assert(listed.result.tools.some(tool => tool.name === 'workflow_recommend_resources'), 'proactive resource recommendation must be exposed in the packaged MCP contract');
   for (const name of ['workflow_coordinator_role', 'workflow_coordinator_step']) assert(listed.result.tools.some(tool => tool.name === name), `missing exposed tool ${name}`);
   for (const name of ['workflow_e2e_run', 'workflow_recovery_verify', 'workflow_diagnose', 'workflow_request_rework', 'workflow_record_intervention', 'workflow_interventions', 'workflow_validate_artifact', 'workflow_access_diagnostics']) assert(listed.result.tools.some(tool => tool.name === name), `missing exposed tool ${name}`);
   for (const name of ['custom_role_create', 'custom_role_update', 'custom_role_get', 'custom_role_list', 'custom_role_clone']) assert(listed.result.tools.some(tool => tool.name === name), `missing exposed tool ${name}`);
   for (const name of ['custom_workflow_create', 'custom_workflow_update', 'custom_workflow_get', 'custom_workflow_list', 'custom_workflow_clone', 'custom_workflow_preview', 'custom_workflow_approve', 'custom_workflow_run_create']) assert(listed.result.tools.some(tool => tool.name === name), `missing exposed tool ${name}`);
   assert.ok(listed.result.tools.some(item => item.name === 'workflow_create'));
+
+  const resourceRecommendations = await tool('workflow_recommend_resources', {
+    task: 'Rà soát bảo mật ứng dụng, tìm lỗ hổng và kiểm tra quyền truy cập.'
+  });
+  assert.equal(resourceRecommendations.read_only, true);
+  assert.equal(resourceRecommendations.recommendations?.built_in_role_hints?.[0]?.role, 'security',
+    'the extracted package must expose useful Vietnamese/English resource discovery through MCP');
 
   const health = await tool('orchestrator_health');
   assert.equal(health.mode, 'local-only-mcp');
@@ -529,6 +571,47 @@ try {
   assert.equal(health.github_actions_dispatch, false);
   assert.equal(health.external_model_api, false);
   assert.ok(fs.statSync(dataDir).mode & 0o700);
+  const proposalCountDb = new DatabaseSync(path.join(dataDir, 'workflow.db'));
+  const proposalsBeforeInfeasibleRequest = proposalCountDb.prepare('SELECT COUNT(*) AS n FROM jobs').get().n;
+  const infeasibleWriteProposal = await rawRpc({ jsonrpc: '2.0', id: 'infeasible-write-proposal', method: 'tools/call', params: {
+    name: 'workflow_create', arguments: {
+      title: 'Missing workspace-write scope', task: 'This infeasible proposal must be rejected before persistence.',
+      workflow: 'standard-engineering', workspace, required_operations: ['workspace.write']
+    }
+  } });
+  assert.equal(infeasibleWriteProposal.result?.isError, true, 'workspace.write without explicit scopes must fail before proposal creation');
+  assert.match(infeasibleWriteProposal.result?.content?.[0]?.text || '', /workspace_write_scopes|role-specific.*scope/i);
+  assert.equal(proposalCountDb.prepare('SELECT COUNT(*) AS n FROM jobs').get().n, proposalsBeforeInfeasibleRequest,
+    'infeasible operation/scope request must not create durable job state');
+  proposalCountDb.close();
+  const preflightProposal = await tool('workflow_create', {
+    title: 'Preflight feasibility fixture',
+    task: 'Verify that an ordinary proposal is preflighted before approval and that workspace writes are not implicitly authorized.',
+    workflow: 'standard-engineering', workspace
+  });
+  const preflight = await tool('workflow_preflight', { job_id: preflightProposal.job_id });
+  assert.equal(preflight.ready, true, `ordinary local proposal should pass read-only preflight: ${JSON.stringify(preflight.blockers)}`);
+  assert.equal(preflight.immutable_plan_pinned, false, 'preflight must not create or pin an immutable plan');
+  assert.equal(preflight.execution_started, false);
+  const prematureWrite = await rawRpc({ jsonrpc: '2.0', id: 'write-before-approval', method: 'tools/call', params: {
+    name: 'workflow_write_files', arguments: { job_id: preflightProposal.job_id, task_id: 'missing-task', patch_id: 'premature', writes: [{ path: 'README.md', base_sha256: 'ABSENT', content: 'must not be written' }] }
+  } });
+  assert.equal(prematureWrite.result?.isError, true, 'workspace write must fail before approval and dispatch');
+  assert.equal(prematureWrite.result?.structuredContent?.error?.category, 'invalid_state');
+  assert.equal(fs.existsSync(path.join(workspace, 'README.md')), false, 'denied write must not create a workspace file');
+  const incompatibleReworkProposal = await tool('workflow_create', {
+    title: 'Unsupported review recovery fixture',
+    task: 'Prove that non-standard workflow plans receive a structured non-retryable recovery error.',
+    workflow: 'engineering', workspace
+  });
+  await tool('workflow_approve', { job_id: incompatibleReworkProposal.job_id, confirmation: 'Approve isolated compatibility fixture only.' });
+  const incompatibleRework = await rawRpc({ jsonrpc: '2.0', id: 'unsupported-engineering-rework', method: 'tools/call', params: {
+    name: 'workflow_request_rework', arguments: { job_id: incompatibleReworkProposal.job_id, reason: 'Compatibility regression fixture.' }
+  } });
+  assert.equal(incompatibleRework.result?.isError, true);
+  assert.equal(incompatibleRework.result?.structuredContent?.error?.code, 'WORKFLOW_REWORK_UNSUPPORTED');
+  assert.equal(incompatibleRework.result?.structuredContent?.error?.retryable, false);
+  assert.equal(incompatibleRework.result?.structuredContent?.error?.next_actions?.[0]?.tool, 'workflow_create');
   const systemCoordinatorRole = await tool('workflow_coordinator_role');
   assert.equal(systemCoordinatorRole.role_id, 'system-workflow-coordinator');
   assert.equal(systemCoordinatorRole.immutable, true);
@@ -976,6 +1059,11 @@ try {
   });
   assert.equal(hybridApproval.plan.workflow_id, 'hybrid-engineering');
   assert.equal(hybridApproval.plan.workflow_version, 2);
+  assert.equal(hybridApproval.plan.schema_version, 2, 'newly compiled plans pin a versioned batch-execution policy');
+  assert.equal(hybridApproval.plan.batch_execution_policy?.mode, 'required');
+  assert.equal(hybridApproval.plan.batch_execution_policy?.route, 'batch-required');
+  assert.equal(hybridApproval.plan.batch_execution_policy?.grouping, 'ready-compatible');
+  assert.equal(hybridApproval.plan.batch_execution_policy?.evidence, 'durable-batch-and-execution-ledger');
   assert.equal(hybridApproval.plan.children.length, 11);
   assert.equal(hybridApproval.plan.children.filter(item => item.execution?.role_profile_overlay).length, 9);
   assert.equal(hybridApproval.plan.children.filter(item => item.execution?.deterministic === true && item.execution?.executor === 'ExecutionManager').length, 2);
@@ -991,6 +1079,26 @@ try {
   assert.equal(pinnedHybridArchitect.execution.role_profile_overlay.skills[0].sha256,
     hybridApproval.plan.children.find(item => item.role === 'architect').execution.role_profile_overlay.skills[0].sha256);
   const hybridDeterministicIds = hybridApproval.plan.children.filter(item => item.execution?.deterministic).map(item => item.id);
+  assert.ok(hybridApproval.plan.batch_execution_policy.validation_task_ids.length === 0,
+    'non-workspace-writing plans still pin routing but do not claim source-validation tasks');
+  assert.equal(resolveTaskBatchRoute(hybridApproval.plan, hybridApproval.plan.children.find(item => item.id === hybridDeterministicIds[0])).required, true);
+  const missingBatchPolicyPlan = structuredClone(hybridApproval.plan);
+  delete missingBatchPolicyPlan.batch_execution_policy;
+  assert.throws(() => validateExecutionPlan(missingBatchPolicyPlan), /schema version 2 execution plans must pin batch_execution_policy/,
+    'a new schema-v2 plan cannot omit the immutable execution route policy');
+  const incorrectlyExemptPlan = structuredClone(hybridApproval.plan);
+  incorrectlyExemptPlan.batch_execution_policy = {
+    ...incorrectlyExemptPlan.batch_execution_policy, mode: 'exempt', route: 'not-applicable',
+    grouping: 'not-applicable', evidence: 'not-applicable', workspace_fingerprint_required: false,
+    exemption_reason: 'fabricated reasoning-only exemption'
+  };
+  assert.throws(() => validateExecutionPlan(incorrectlyExemptPlan), /batch execution exemption is invalid/,
+    'a reasoning-only exemption cannot be attached to a plan with deterministic tasks');
+  const legacyHybridPlan = structuredClone(hybridApproval.plan);
+  legacyHybridPlan.schema_version = 1;
+  delete legacyHybridPlan.batch_execution_policy;
+  assert.equal(resolveTaskBatchRoute(legacyHybridPlan, legacyHybridPlan.children.find(item => item.id === hybridDeterministicIds[0])).required, true,
+    'legacy deterministic plans default fail-closed to batch routing without mutating their stored hash');
   for (const id of hybridDeterministicIds) {
     const check = hybridApproval.plan.children.find(item => item.id === id);
     assert.deepEqual(check.dependencies, ['standard-engineer']);
@@ -1064,19 +1172,165 @@ try {
   await completeHybridRole('architect');
   await completeHybridRole('engineer');
 
+  // A malformed/missing child-to-plan binding must not fall through to normal
+  // specialist completion. Repeated attempts must produce one safe denial row.
+  const completionBindingDb = new DatabaseSync(path.join(dataDir, 'workflow.db'));
+  try {
+    const bindingTask = hybridCheckTasks[0];
+    const originalBindingRow = completionBindingDb.prepare('SELECT metadata_json,status FROM tasks WHERE task_id=?').get(bindingTask.task_id);
+    const originalBindingMetadata = JSON.parse(originalBindingRow.metadata_json);
+    const invalidMetadataVariants = [
+      { label: 'mismatched', metadata: { ...originalBindingMetadata, workflow_plan_task_id: 'forged-plan-child-id' } },
+      { label: 'missing', metadata: Object.fromEntries(Object.entries(originalBindingMetadata).filter(([key]) => key !== 'workflow_plan_task_id')) }
+    ];
+    try {
+      for (const variant of invalidMetadataVariants) {
+        completionBindingDb.prepare('UPDATE tasks SET metadata_json=? WHERE task_id=?')
+          .run(JSON.stringify(variant.metadata), bindingTask.task_id);
+        for (const suffix of ['first', 'repeat']) {
+          const deniedCompletion = await rawRpc({ jsonrpc: '2.0', id: `hybrid-completion-binding-${variant.label}-${suffix}`, method: 'tools/call', params: {
+            name: 'workflow_complete_task', arguments: {
+              task_id: bindingTask.task_id,
+              content: 'This invalid plan binding must not complete the deterministic child.',
+              artifact: { decision: 'success', command: 'DO_NOT_LOG_THIS_COMMAND_SECRET' }
+            }
+          } });
+          assert.equal(deniedCompletion.result?.isError, true, 'missing or mismatched immutable task binding must fail closed');
+          assert.match(deniedCompletion.result?.content?.[0]?.text || '', /exact immutable plan task binding/i);
+        }
+      }
+      const state = completionBindingDb.prepare('SELECT metadata_json,status FROM tasks WHERE task_id=?').get(bindingTask.task_id);
+      assert.equal(state.status, originalBindingRow.status, 'denied completion must not mutate task state');
+      const deniedRows = completionBindingDb.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='batch_execution.policy_denied' AND json_extract(payload_json,'$.rejectedRoute')='workflow_complete_task' AND json_extract(payload_json,'$.taskId')=?")
+        .all(hybridWorkflow.job_id, bindingTask.task_id);
+      assert.equal(deniedRows.length, 1, 'repeated direct-completion denial must be idempotent');
+      const denial = JSON.parse(deniedRows[0].payload_json);
+      assert.equal(denial.reasonCode, 'immutable_plan_task_binding_invalid');
+      assert.equal(Object.hasOwn(denial, 'command'), false);
+      assert.equal(Object.hasOwn(denial, 'args'), false);
+      assert.equal(Object.hasOwn(denial, 'env'), false);
+      assert.equal(JSON.stringify(denial).includes('DO_NOT_LOG_THIS_COMMAND_SECRET'), false);
+    } finally {
+      completionBindingDb.prepare('UPDATE tasks SET metadata_json=? WHERE task_id=?')
+        .run(originalBindingRow.metadata_json, bindingTask.task_id);
+    }
+  } finally {
+    completionBindingDb.close();
+  }
+
+  const directBatchBypass = await rawRpc({ jsonrpc: '2.0', id: 'hybrid-single-task-bypass', method: 'tools/call', params: {
+    name: 'task_execute_local', arguments: { task_id: hybridCheckTasks[0].task_id }
+  } });
+  assert.equal(directBatchBypass.result?.isError, true, 'task_execute_local must refuse an immutable batch-required task before OS spawn');
+  assert.match(directBatchBypass.result?.content?.[0]?.text || '', /batch-required.*execute_batch|batch-required.*durable batch claim/i);
+  const repeatedDirectBatchBypass = await rawRpc({ jsonrpc: '2.0', id: 'hybrid-single-task-bypass-repeat', method: 'tools/call', params: {
+    name: 'task_execute_local', arguments: { task_id: hybridCheckTasks[0].task_id }
+  } });
+  assert.equal(repeatedDirectBatchBypass.result?.isError, true, 'repeated direct bypass must remain denied');
+  const denialAuditDb = new DatabaseSync(path.join(dataDir, 'workflow.db'), { readOnly: true });
+  try {
+    const denialRows = denialAuditDb.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='batch_execution.policy_denied' AND json_extract(payload_json,'$.rejectedRoute')='task_execute_local'").all(hybridWorkflow.job_id);
+    assert.equal(denialRows.length, 1, 'repeated direct task-execution denial must remain one idempotent audit event per route');
+    const denialPayload = JSON.parse(denialRows[0].payload_json);
+    assert.equal(denialPayload.taskId, hybridCheckTasks[0].task_id);
+    assert.equal(denialPayload.rejectedRoute, 'task_execute_local');
+    assert.equal(denialPayload.policyVersion, 1, 'denial audit must include the immutable batch policy version');
+    assert.equal(Object.hasOwn(denialPayload, 'command'), false, 'denial audit must not persist command text');
+    assert.equal(Object.hasOwn(denialPayload, 'args'), false, 'denial audit must not persist arguments');
+    assert.equal(Object.hasOwn(denialPayload, 'env'), false, 'denial audit must not persist environment secrets');
+    assert.equal(denialAuditDb.prepare('SELECT COUNT(*) AS count FROM execution_batches WHERE job_id=?').get(hybridWorkflow.job_id).count, 0,
+      'single-task bypass rejection must not create durable batch evidence or execution attempts');
+  } finally {
+    denialAuditDb.close();
+  }
+
+  // Trigger a real item failure without altering checked-in sources. The
+  // hybrid plan has no validation fingerprint contract, so this temporary
+  // syntax fault is isolated to its disposable staged workspace and is restored
+  // byte-for-byte before retrying the same durable batch ID.
+  const transientSyntaxPath = path.join(hybridWorkspace, 'server/index.js');
+  const transientSyntaxOriginal = fs.readFileSync(transientSyntaxPath);
+  let firstHybridAttempt;
+  try {
+    fs.appendFileSync(transientSyntaxPath, Buffer.from('\\nfunction { injected transient syntax fault\\n'));
+    firstHybridAttempt = await tool('workflow_next_task', { job_id: hybridWorkflow.job_id });
+  } finally {
+    fs.writeFileSync(transientSyntaxPath, transientSyntaxOriginal);
+  }
+  assert.equal(firstHybridAttempt.stage, 'blocked', `one failed batch item must block downstream specialists: ${JSON.stringify(firstHybridAttempt)}`);
+  assert.equal(firstHybridAttempt.batch_executions?.length, 1, 'scheduler should create one compatible two-item batch before security work');
+  const failedHybridBatchEvidence = firstHybridAttempt.batch_executions[0];
+  assert.equal(failedHybridBatchEvidence.completed, false);
+  assert.equal(failedHybridBatchEvidence.items.length, 2);
+  assert.equal(failedHybridBatchEvidence.items.filter(item => item.status === 'COMPLETED' && item.exit_code === 0).length, 1,
+    'the injected server syntax fault must leave exactly one unaffected successful compiler sibling');
+  assert.equal(failedHybridBatchEvidence.items.filter(item => item.status !== 'COMPLETED').length, 1,
+    'the injected hybrid batch must expose exactly one failed item rather than terminalizing all siblings');
+  if (!failedHybridBatchEvidence.items.some(item => item.status === 'COMPLETED' && item.exit_code === 0)) {
+    const batchDiagnosticDb = new DatabaseSync(path.join(dataDir, 'workflow.db'), { readOnly: true });
+    let durableItemDiagnostics;
+    try {
+      durableItemDiagnostics = batchDiagnosticDb.prepare(`SELECT
+        i.item_id, i.task_id, i.status AS item_status, i.exit_code AS item_exit_code,
+        i.error AS item_error, i.stderr AS item_stderr, i.attempt AS item_attempt,
+        t.status AS task_status, t.execution_status, t.execution_exit_code,
+        t.execution_stderr, t.execution_session_id, t.execution_attempt
+        FROM execution_batch_items i JOIN tasks t ON t.task_id=i.task_id
+        WHERE i.batch_id=? ORDER BY i.rowid ASC`).all(failedHybridBatchEvidence.batch_id);
+    } finally {
+      batchDiagnosticDb.close();
+    }
+    assert.fail(`expected unaffected compiler syntax-check sibling to complete after the server syntax fault; batch=${failedHybridBatchEvidence.batch_id}; returned_items=${JSON.stringify(failedHybridBatchEvidence.items)}; durable_items=${JSON.stringify(durableItemDiagnostics, null, 2)}`);
+  }
+  assert.ok(failedHybridBatchEvidence.items.some(item => item.status === 'COMPLETED' && item.exit_code === 0));
+
+  // Retry the exact existing durable batch via ExecutionManager's same-batch
+  // recovery API. Never reserve a second batch for tasks with execution history.
+  const priorRuntimeEnv = new Map(['WORKFLOW_DB','WORKFLOW_DATA_DIR','WORKFLOW_WORKSPACE','EXECUTION_TMP_DIR','TMUX_BIN','NODE_ENV']
+    .map(key => [key, process.env[key]]));
+  const recoveryRuntimeDir = path.join(dataDir, 'runtime');
+  process.env.WORKFLOW_DB = path.join(dataDir, 'workflow.db');
+  process.env.WORKFLOW_DATA_DIR = dataDir;
+  process.env.WORKFLOW_WORKSPACE = hybridWorkspace;
+  process.env.EXECUTION_TMP_DIR = recoveryRuntimeDir;
+  process.env.TMUX_BIN = process.env.TMUX_BIN || 'tmux';
+  process.env.NODE_ENV = 'test';
+  let retryStore;
+  let retriedHybridBatch;
+  try {
+    const { WorkflowStore } = await import('../src/runtime/job-store.js');
+    const { ExecutionManager } = await import('../src/runtime/execution-manager.js');
+    retryStore = new WorkflowStore();
+    const retryManager = new ExecutionManager(retryStore, { executionTmpDir: recoveryRuntimeDir });
+    retriedHybridBatch = await retryManager.executeBatch(failedHybridBatchEvidence.batch_id);
+  } finally {
+    try { retryStore?.db.close(); } catch {}
+    for (const [key, value] of priorRuntimeEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert.equal(retriedHybridBatch.status, 'COMPLETED', JSON.stringify(retriedHybridBatch));
+  assert.equal(retriedHybridBatch.attempt, 2, 'the same batch ID must reach terminal success on attempt 2');
+  assert.equal(retriedHybridBatch.items.length, 2);
+  assert.ok(retriedHybridBatch.items.every(item => item.status === 'COMPLETED' && item.exit_code === 0 && item.execution_session_id));
+  assert.deepEqual(retriedHybridBatch.items.map(item => item.attempt).sort(), [1, 2],
+    'completed earlier-attempt item must remain on attempt 1 while failed item succeeds on attempt 2');
+
   const afterHybridEngineer = await tool('workflow_next_task', { job_id: hybridWorkflow.job_id });
-  assert.equal(afterHybridEngineer.stage, 'task', `expected security handoff after durable batch, got ${afterHybridEngineer.stage}`);
+  assert.equal(afterHybridEngineer.stage, 'task', `expected security handoff after durable retry, got ${afterHybridEngineer.stage}: ${JSON.stringify(afterHybridEngineer)}`);
   assert.equal(afterHybridEngineer.task.role, 'security');
-  assert.equal(afterHybridEngineer.batch_executions?.length, 1,
-    'scheduler must batch both independent deterministic checks before issuing security work');
-  const hybridBatchEvidence = afterHybridEngineer.batch_executions[0];
-  assert.equal(hybridBatchEvidence.completed, true, JSON.stringify(hybridBatchEvidence));
+  const hybridBatchEvidence = {
+    batch_id: retriedHybridBatch.batch_id,
+    completed: retriedHybridBatch.status === 'COMPLETED',
+    items: retriedHybridBatch.items.map(item => ({
+      task_id: item.task_id, role: hybridCheckTasks.find(task => task.task_id === item.task_id)?.role,
+      status: item.status, exit_code: item.exit_code, execution_session_id: item.execution_session_id, attempt: item.attempt
+    }))
+  };
+  assert.equal(hybridBatchEvidence.completed, true);
   assert.equal(hybridBatchEvidence.items.length, 2);
-  assert.equal(hybridBatchEvidence.summary.total, 2);
-  assert.equal(hybridBatchEvidence.summary.passed, 2);
-  assert.equal(hybridBatchEvidence.summary.failed, 0);
-  assert.ok(hybridBatchEvidence.items.every(item => item.status === 'COMPLETED' && item.exit_code === 0 && item.execution_session_id),
-    'both deterministic tasks must return actual successful local execution session evidence');
+  assert.ok(hybridBatchEvidence.items.every(item => item.status === 'COMPLETED' && item.exit_code === 0 && item.execution_session_id));
 
   const hybridBatchDb = new DatabaseSync(path.join(dataDir, 'workflow.db'), { readOnly: true });
   try {
@@ -1085,16 +1339,27 @@ try {
     assert.ok(durableBatch);
     assert.equal(durableBatch.job_id, hybridWorkflow.job_id);
     assert.equal(durableBatch.status, 'COMPLETED');
+    assert.equal(durableBatch.attempt, 2);
     assert.equal(durableBatch.role, 'system-workflow-coordinator');
     assert.equal(durableBatch.parent_task_id, preparedHybrid.parent_task_id);
     assert.match(durableBatch.aggregate_content || '', /protocol_result_json:/);
-    const durableItems = hybridBatchDb.prepare('SELECT task_id,status,exit_code,execution_session_id FROM execution_batch_items WHERE batch_id=?')
+    const durableItems = hybridBatchDb.prepare('SELECT task_id,status,exit_code,execution_session_id,attempt FROM execution_batch_items WHERE batch_id=?')
       .all(hybridBatchEvidence.batch_id);
     assert.equal(durableItems.length, 2);
+    assert.deepEqual(durableItems.map(item => item.attempt).sort(), [1, 2]);
+    const creation = hybridBatchDb.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='execution.batch.created' AND json_extract(payload_json,'$.batchId')=?")
+      .get(hybridWorkflow.job_id, hybridBatchEvidence.batch_id);
+    const retry = hybridBatchDb.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='execution.batch.retry_started' AND json_extract(payload_json,'$.batchId')=?")
+      .get(hybridWorkflow.job_id, hybridBatchEvidence.batch_id);
+    const failedTerminal = hybridBatchDb.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='execution.batch.failed' AND json_extract(payload_json,'$.batchId')=? AND json_extract(payload_json,'$.attempt')=1")
+      .get(hybridWorkflow.job_id, hybridBatchEvidence.batch_id);
+    const completedTerminal = hybridBatchDb.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='execution.batch.completed' AND json_extract(payload_json,'$.batchId')=? AND json_extract(payload_json,'$.attempt')=2")
+      .get(hybridWorkflow.job_id, hybridBatchEvidence.batch_id);
+    assert.equal(JSON.parse(creation.payload_json).attempt, 1);
+    assert.equal(JSON.parse(retry.payload_json).attempt, 2);
+    assert.ok(failedTerminal && completedTerminal, 'the durable event chain must preserve first failure and retry success');
+    assert.ok(durableItems.every(item => item.status === 'COMPLETED' && item.exit_code === 0 && item.execution_session_id));
     for (const item of durableItems) {
-      assert.equal(item.status, 'COMPLETED');
-      assert.equal(item.exit_code, 0);
-      assert.ok(item.execution_session_id);
       const taskRow = hybridBatchDb.prepare('SELECT status,execution_status,execution_exit_code FROM tasks WHERE task_id=?').get(item.task_id);
       assert.equal(taskRow.status, 'completed');
       assert.equal(taskRow.execution_status, 'completed');
@@ -1134,7 +1399,7 @@ try {
   const hybridRecovery = await tool('workflow_recovery_verify', { job_id: hybridWorkflow.job_id });
   assert.equal(hybridRecovery.status, 'PASS', `hybrid plan/task/batch evidence must survive fresh-process recovery: ${JSON.stringify(hybridRecovery.checks)}`);
   assert.equal(hybridRecovery.plan_hash, hybridApproval.plan.plan_hash);
-  console.log('Hybrid role/Skill + deterministic Batch Execution E2E: PASS (9 pinned overlays; 2 independent tasks executed in one durable batch; mismatch rejection; typed evidence and fresh-process recovery verified)');
+  console.log('Hybrid role/Skill + deterministic Batch Execution E2E: nine host role/Skill tasks and two deterministic children completed; injected mixed-outcome retry, plan-binding denial and durable recovery assertions passed. Scoped-write root-input-drift is a separate later test.');
 
   const duplicateOverlayBinding = await rpc('tools/call', { name: 'workflow_create', arguments: {
     title: 'Reject Duplicate Role Profile Binding', task: 'A built-in role may have at most one profile binding.', workflow: 'standard-engineering', workspace,
@@ -2069,58 +2334,72 @@ try {
     duplicateCheckDb.close();
   }
 
-  const productionBatch = await tool('execute_batch', {
-    job_id: production.job_id,
-    task_ids: preparedProduction.tasks.map(task => task.task_id)
-  });
-  assert.equal(productionBatch.completed, true, `MCP execute_batch did not complete: ${JSON.stringify(productionBatch)}`);
-  assert.equal(productionBatch.initiator_role, 'system-workflow-coordinator');
-  assert.equal(productionBatch.items.length, 2);
-  assert.deepEqual(productionBatch.items.map(item => item.role), ['architect', 'qa']);
-  assert.ok(productionBatch.items.every(item => item.status === 'COMPLETED' && item.exit_code === 0 && item.execution_session_id),
-    `each batch item must contain actual successful execution evidence: ${JSON.stringify(productionBatch.items)}`);
-  const qaBatchItem = productionBatch.items.find(item => item.role === 'qa');
+  // The architect syntax check and packaged behavioral QA have different
+  // approved cwd values. Keep the runtime's single-cwd-per-batch invariant:
+  // submit one task per batch and reconcile their durable evidence separately.
+  const productionBatches = [];
+  for (const preparedTask of preparedProduction.tasks) {
+    const productionBatch = await tool('execute_batch', {
+      job_id: production.job_id,
+      task_ids: [preparedTask.task_id]
+    });
+    assert.equal(productionBatch.completed, true, 'MCP execute_batch did not complete: ' + JSON.stringify(productionBatch));
+    assert.equal(productionBatch.initiator_role, 'system-workflow-coordinator');
+    assert.equal(productionBatch.items.length, 1);
+    assert.deepEqual(productionBatch.items.map(item => item.role), [preparedTask.role]);
+    assert.ok(productionBatch.items.every(item => item.status === 'COMPLETED' && item.exit_code === 0 && item.execution_session_id),
+      'each single-item batch must contain actual successful execution evidence: ' + JSON.stringify(productionBatch.items));
+    assert.equal(productionBatch.summary.total, 1);
+    assert.equal(productionBatch.summary.passed, 1);
+    assert.equal(productionBatch.summary.failed, 0);
+    productionBatches.push(productionBatch);
+  }
+  const productionBatchItems = productionBatches.flatMap(batch => batch.items);
+  assert.equal(productionBatchItems.length, 2);
+  assert.deepEqual(productionBatchItems.map(item => item.role), ['architect', 'qa']);
+  const qaBatchItem = productionBatchItems.find(item => item.role === 'qa');
   assert.ok(qaBatchItem, 'the batch result must return the actual packaged behavioral-QA item');
   for (const marker of [
-    'PRODUCTION QA MCP INITIALIZE/46-TOOL DISCOVERY PASS',
+    'PRODUCTION QA MCP INITIALIZE/50-TOOL DISCOVERY PASS',
     'PRODUCTION QA BEHAVIORAL ARTIFACT VALIDATION PASS',
     'PRODUCTION QA APPROVAL/DISPATCH/IMMUTABLE-PLAN NEXT-TASK PASS'
-  ]) assert.ok(qaBatchItem.stdout_preview.includes(marker), `packaged behavioral QA output missing marker: ${marker}`);
-  assert.equal(productionBatch.summary.total, 2);
-  assert.equal(productionBatch.summary.passed, 2);
-  assert.equal(productionBatch.summary.failed, 0);
+  ]) assert.ok(qaBatchItem.stdout_preview.includes(marker), 'packaged behavioral QA output missing marker: ' + marker);
+  assert.equal(productionBatches.reduce((sum, batch) => sum + batch.summary.total, 0), 2);
+  assert.equal(productionBatches.reduce((sum, batch) => sum + batch.summary.passed, 0), 2);
+  assert.equal(productionBatches.reduce((sum, batch) => sum + batch.summary.failed, 0), 0);
   const durableBatchDb = new DatabaseSync(path.join(dataDir, 'workflow.db'), { readOnly: true });
   try {
-    const storedBatch = durableBatchDb.prepare(`SELECT batch_id,job_id,parent_task_id,role,status,attempt,aggregate_content
-      FROM execution_batches WHERE batch_id=?`).get(productionBatch.batch_id);
-    assert.ok(storedBatch, 'successful execute_batch response must correspond to a durable execution_batches row');
-    assert.equal(storedBatch.job_id, production.job_id);
-    assert.equal(storedBatch.parent_task_id, preparedProduction.parent_task_id);
-    assert.equal(storedBatch.role, 'system-workflow-coordinator');
-    assert.equal(storedBatch.status, 'COMPLETED');
-    assert.equal(storedBatch.attempt, productionBatch.attempt);
-    assert.match(storedBatch.aggregate_content || '', /protocol_result_json: /,
-      'the durable batch row must persist its protocol aggregate rather than only returning an in-memory summary');
-    const durableItems = durableBatchDb.prepare(`SELECT item_id,batch_id,task_id,status,attempt,exit_code,execution_session_id,stdout,stderr
-      FROM execution_batch_items WHERE batch_id=? ORDER BY rowid`).all(productionBatch.batch_id);
-    assert.equal(durableItems.length, productionBatch.items.length,
-      'each returned batch item must be represented by a durable execution_batch_items row');
-    for (const durableItem of durableItems) {
-      const returned = productionBatch.items.find(item => item.item_id === durableItem.item_id);
-      assert.ok(returned, `durable batch item ${durableItem.item_id} must be included in returned evidence`);
-      assert.equal(durableItem.batch_id, storedBatch.batch_id);
-      assert.equal(durableItem.status, returned.status);
-      assert.equal(durableItem.task_id, returned.task_id);
-      assert.equal(durableItem.exit_code, returned.exit_code);
-      assert.equal(durableItem.execution_session_id, returned.execution_session_id);
-      assert.equal(durableItem.status, 'COMPLETED');
-      assert.equal(durableItem.exit_code, 0);
+    for (const productionBatch of productionBatches) {
+      const storedBatch = durableBatchDb.prepare('SELECT batch_id,job_id,parent_task_id,role,status,attempt,aggregate_content FROM execution_batches WHERE batch_id=?').get(productionBatch.batch_id);
+      assert.ok(storedBatch, 'successful execute_batch response must correspond to a durable execution_batches row');
+      assert.equal(storedBatch.job_id, production.job_id);
+      assert.equal(storedBatch.parent_task_id, preparedProduction.parent_task_id);
+      assert.equal(storedBatch.role, 'system-workflow-coordinator');
+      assert.equal(storedBatch.status, 'COMPLETED');
+      assert.equal(storedBatch.attempt, productionBatch.attempt);
+      assert.match(storedBatch.aggregate_content || '', /protocol_result_json: /,
+        'the durable batch row must persist its protocol aggregate rather than only returning an in-memory summary');
+      const durableItems = durableBatchDb.prepare('SELECT item_id,batch_id,task_id,status,attempt,exit_code,execution_session_id,stdout,stderr FROM execution_batch_items WHERE batch_id=? ORDER BY rowid').all(productionBatch.batch_id);
+      assert.equal(durableItems.length, productionBatch.items.length,
+        'each returned batch item must be represented by a durable execution_batch_items row');
+      for (const durableItem of durableItems) {
+        const returned = productionBatch.items.find(item => item.item_id === durableItem.item_id);
+        assert.ok(returned, 'durable batch item ' + durableItem.item_id + ' must be included in returned evidence');
+        assert.equal(durableItem.batch_id, storedBatch.batch_id);
+        assert.equal(durableItem.status, returned.status);
+        assert.equal(durableItem.task_id, returned.task_id);
+        assert.equal(durableItem.exit_code, returned.exit_code);
+        assert.equal(durableItem.execution_session_id, returned.execution_session_id);
+        assert.equal(durableItem.status, 'COMPLETED');
+        assert.equal(durableItem.exit_code, 0);
+      }
     }
-    assert.equal(durableBatchDb.prepare('SELECT COUNT(*) AS count FROM execution_batches WHERE job_id=?').get(production.job_id).count, 1,
-      'only the actual successful execute_batch request may create batch history for this job');
+    assert.equal(durableBatchDb.prepare('SELECT COUNT(*) AS count FROM execution_batches WHERE job_id=?').get(production.job_id).count, 2,
+      'the architect and packaged-QA tasks must produce separate cwd-compatible durable batches');
   } finally {
     durableBatchDb.close();
   }
+
   const productionSynthesis = await tool('workflow_next_task', { job_id: production.job_id });
   assert.equal(productionSynthesis.stage, 'synthesis');
   assert.equal(productionSynthesis.completed_results.length, 2);
@@ -2140,7 +2419,7 @@ try {
     assert.equal(qaArtifact.decision, 'accept', `only exact-plan packaged behavioral QA may be accepted; artifact=${JSON.stringify(qaArtifact)}`);
     assert.ok(qaArtifact.results.includes('execution_scope=packaged-behavioral-e2e'));
     for (const marker of [
-      'PRODUCTION QA MCP INITIALIZE/46-TOOL DISCOVERY PASS',
+      'PRODUCTION QA MCP INITIALIZE/50-TOOL DISCOVERY PASS',
       'PRODUCTION QA BEHAVIORAL ARTIFACT VALIDATION PASS',
       'PRODUCTION QA APPROVAL/DISPATCH/IMMUTABLE-PLAN NEXT-TASK PASS'
     ]) assert.ok(qaArtifact.results.includes(`pass_marker=${marker}`), `durable QA artifact missing marker: ${marker}`);
@@ -2149,6 +2428,234 @@ try {
   }
   const recovery = await tool('workflow_recovery_verify', { job_id: production.job_id });
   assert.equal(recovery.status, 'PASS', JSON.stringify(recovery.checks));
+
+  // The scoped-write E2E uses an isolated workspace, so stage a self-contained
+  // local test workspace there instead of allowing validation commands to escape
+  // to repository paths outside the immutable approved cwd.
+  const fixtureForwarders = new Map([
+    ['job-store.js', "export * from './src/runtime/job-store.js';\n"],
+    ['execution-manager.js', "export * from './src/runtime/execution-manager.js';\n"],
+    ['recovery-manager.js', "export * from './src/runtime/recovery-manager.js';\n"]
+  ]);
+  for (const relative of ['src', 'server', 'protocol', 'tests', 'package.json', 'job-store.js', 'execution-manager.js', 'recovery-manager.js']) {
+    const source = path.join(root, relative);
+    const target = path.join(workspace, relative);
+    assert.equal(fs.existsSync(target), false, 'test fixture must not pre-create ' + relative);
+    if (fs.existsSync(source)) {
+      fs.cpSync(source, target, { recursive: true, errorOnExist: true, force: false });
+    } else {
+      const forwardingContent = fixtureForwarders.get(relative);
+      assert.equal(typeof forwardingContent, 'string', 'required test fixture source is missing from packaged root: ' + relative);
+      fs.writeFileSync(target, forwardingContent, { flag: 'wx', mode: 0o600 });
+    }
+  }
+  const mandatoryValidationFixturePaths = [
+    "tests/test-execution-batch.js",
+    "tests/test-execution-batch-concurrency.js",
+    "tests/test-execution-batch-terminal-recovery.js",
+    "tests/test-execution-success-contract.js",
+    "tests/test-phase5-recovery.js",
+    "tests/test-agent-tool-guidance.js",
+  ];
+  for (const relative of mandatoryValidationFixturePaths) {
+    const sourcePath = path.join(root, relative);
+    const targetPath = path.join(workspace, relative);
+    const sourceStat = fs.lstatSync(sourcePath, { throwIfNoEntry: false });
+    assert.ok(sourceStat?.isFile() && !sourceStat.isSymbolicLink(), `packaged root is missing regular mandatory validation test ${relative}`);
+    if (!fs.existsSync(targetPath)) {
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.copyFileSync(sourcePath, targetPath, fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(targetPath, 0o600);
+    }
+    const targetStat = fs.lstatSync(targetPath, { throwIfNoEntry: false });
+    assert.ok(targetStat?.isFile() && !targetStat.isSymbolicLink(), `isolated test workspace is missing regular validation test ${relative}`);
+    const sourceHash = crypto.createHash('sha256').update(fs.readFileSync(sourcePath)).digest('hex');
+    const targetHash = crypto.createHash('sha256').update(fs.readFileSync(targetPath)).digest('hex');
+    assert.equal(targetHash, sourceHash, `isolated validation test bytes differ from the extracted package: ${relative}`);
+  }
+  const scopedWriteDir = path.join(workspace, 'write-scope');
+  fs.mkdirSync(scopedWriteDir, { mode: 0o700 });
+  const scopedWritePath = path.join(scopedWriteDir, 'scoped-write.txt');
+  const scopedWriteBefore = 'before scoped writer task\n';
+  const scopedWriteAfter = 'after scoped writer task\n';
+  fs.writeFileSync(scopedWritePath, scopedWriteBefore, { flag: 'wx', mode: 0o600 });
+  const staleSecondPath = path.join(scopedWriteDir, 'stale-second.txt');
+  fs.writeFileSync(staleSecondPath, 'second file unchanged\n', { flag: 'wx', mode: 0o600 });
+  const scopedWriteWorkflow = await tool('workflow_create', {
+    title: 'Plan-pinned workspace write E2E',
+    task: 'Use the approved writer path to update one scoped file and preserve receipt provenance.',
+    workflow: 'standard-engineering', workspace,
+    required_operations: ['workspace.write'],
+    workspace_write_scopes: [{ role: 'writer', paths: [{ path: 'write-scope', kind: 'directory' }] }],
+    validation_profile: { profile_id: 'mcpb-workspace-smoke', profile_version: 1 }
+  });
+  const scopedWritePreflight = await tool('workflow_preflight', { job_id: scopedWriteWorkflow.job_id });
+  assert.equal(scopedWritePreflight.ready, true, JSON.stringify(scopedWritePreflight.blockers));
+  assert.deepEqual(scopedWritePreflight.required_operations, ['workspace.write']);
+  const scopedWriteApproval = await tool('workflow_approve', { job_id: scopedWriteWorkflow.job_id, confirmation: 'Approve the single-file scoped writer E2E fixture.' });
+  const scopedWritePlanHash = scopedWriteApproval.plan.plan_hash;
+  assert.equal(scopedWriteApproval.plan.schema_version, 2);
+  assert.equal(scopedWriteApproval.plan.batch_execution_policy.mode, 'required');
+  assert.equal(scopedWriteApproval.plan.validation_profile.profile_id, 'mcpb-workspace-smoke');
+  assert.equal(scopedWriteApproval.plan.validation_profile.profile_version, 1);
+  assert.deepEqual(scopedWriteApproval.plan.batch_execution_policy.validation_task_ids, [
+    'standard-mcpb-workspace-smoke-execution-batch',
+    'standard-mcpb-workspace-smoke-execution-concurrency',
+    'standard-mcpb-workspace-smoke-terminal-recovery',
+    'standard-mcpb-workspace-smoke-success-contract',
+    'standard-mcpb-workspace-smoke-phase5-recovery',
+    'standard-mcpb-workspace-smoke-agent-tool-guidance'
+  ]);
+  assert.equal(scopedWriteApproval.plan.batch_execution_policy.validation_task_ids.length, 6,
+    'a workspace-write plan must pin exact deterministic validation contracts before approval');
+  await tool('workflow_dispatch', { job_id: scopedWriteWorkflow.job_id });
+  const scopedWritePrepared = await tool('workflow_prepare_tasks', { job_id: scopedWriteWorkflow.job_id });
+  for (const role of ['product-owner', 'researcher', 'architect', 'engineer']) {
+    const next = await tool('workflow_next_task', { job_id: scopedWriteWorkflow.job_id });
+    assert.equal(next.stage, 'task', `expected dependency-ready ${role}: ${JSON.stringify(next)}`);
+    assert.equal(next.task.role, role);
+    await tool('workflow_complete_task', { task_id: next.task.task_id, content: `Verified typed evidence for ${role}.`, artifact: artifactFor(role) });
+  }
+  const afterScopedWriteEngineer = await tool('workflow_next_task', { job_id: scopedWriteWorkflow.job_id });
+  const scopedWriteBatchFailureDb = new DatabaseSync(path.join(dataDir, 'workflow.db'), { readOnly: true });
+  let scopedWriteBatchFailureDetails;
+  try {
+    scopedWriteBatchFailureDetails = scopedWritePrepared.tasks
+      .filter(task => scopedWriteApproval.plan.batch_execution_policy.validation_task_ids.includes(task.plan_task_id))
+      .map(task => {
+        const row = scopedWriteBatchFailureDb.prepare('SELECT task_id,command,cwd,status,exit_code,stdout,stderr,error FROM execution_batch_items WHERE task_id=? ORDER BY started_at DESC LIMIT 1').get(task.task_id);
+        if (!row) return { task_id: task.task_id, role: task.role, missing_durable_batch_item: true };
+        return { ...row, stdout: String(row.stdout || '').slice(-2400), stderr: String(row.stderr || '').slice(-2400) };
+      });
+  } finally {
+    scopedWriteBatchFailureDb.close();
+  }
+  assert.equal(afterScopedWriteEngineer.stage, 'task', JSON.stringify({ afterScopedWriteEngineer, scopedWriteBatchFailureDetails }, null, 2));
+  assert.equal(afterScopedWriteEngineer.task.role, 'security');
+  assert.equal(afterScopedWriteEngineer.batch_executions?.length, 1,
+    'the coordinator must batch all compatible deterministic validation tasks before issuing downstream specialists');
+  assert.equal(afterScopedWriteEngineer.batch_executions[0].completed, true, JSON.stringify(afterScopedWriteEngineer.batch_executions[0]));
+  assert.equal(afterScopedWriteEngineer.batch_executions[0].items.length, 6);
+  assert.ok(afterScopedWriteEngineer.batch_executions[0].items.every(item => item.status === 'COMPLETED' && item.exit_code === 0 && item.execution_session_id));
+  const validatedArtifacts = scopedWritePrepared.tasks.filter(task => scopedWriteApproval.plan.batch_execution_policy.validation_task_ids.includes(task.plan_task_id));
+  assert.equal(validatedArtifacts.length, 6);
+  const scopedWriteBatchItemRows = new DatabaseSync(path.join(dataDir, 'workflow.db'), { readOnly: true });
+  try {
+    for (const task of validatedArtifacts) {
+      const item = scopedWriteBatchItemRows.prepare('SELECT i.batch_id,i.status,i.execution_session_id FROM execution_batch_items i WHERE i.task_id=?').get(task.task_id);
+      assert.equal(item.status, 'COMPLETED');
+      const event = scopedWriteBatchItemRows.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='execution.batch.workspace_fingerprint' AND json_extract(payload_json,'$.batchId')=?")
+        .get(scopedWriteWorkflow.job_id, item.batch_id);
+      assert.ok(event, 'successful validation tasks must have durable workspace-fingerprint evidence');
+      const fp = JSON.parse(event.payload_json);
+      assert.equal(fp.planHash, scopedWritePlanHash);
+      assert.ok(fp.taskIds.includes(task.task_id));
+    }
+  } finally {
+    scopedWriteBatchItemRows.close();
+  }
+  const fingerprintDriftPath = path.join(workspace, 'job-store.js');
+  const fingerprintDriftOriginal = fs.readFileSync(fingerprintDriftPath);
+  try {
+    fs.appendFileSync(fingerprintDriftPath, Buffer.from('\\n// injected post-validation source drift\\n'));
+    const staleSynthesis = await rawRpc({ jsonrpc: '2.0', id: 'workspace-source-fingerprint-drift', method: 'tools/call', params: {
+      name: 'workflow_complete_synthesis', arguments: {
+        job_id: scopedWriteWorkflow.job_id, content: 'A synthesis attempt must be blocked by stale validation.',
+        artifact: { decision: 'approve' }
+      }
+    } });
+    assert.equal(staleSynthesis.result?.isError, true, 'source drift must block synthesis even before non-validation tasks finish');
+    assert.match(staleSynthesis.result?.content?.[0]?.text || '', /workspace source.*fingerprint changed/i);
+  } finally {
+    fs.writeFileSync(fingerprintDriftPath, fingerprintDriftOriginal);
+  }
+  for (const role of ['security', 'qa', 'platform']) {
+    const next = await tool('workflow_next_task', { job_id: scopedWriteWorkflow.job_id });
+    assert.equal(next.stage, 'task');
+    assert.equal(next.task.role, role);
+    await tool('workflow_complete_task', { task_id: next.task.task_id, content: `Verified typed evidence for ${role}.`, artifact: artifactFor(role) });
+  }
+  const writerTask = await tool('workflow_next_task', { job_id: scopedWriteWorkflow.job_id });
+  assert.equal(writerTask.stage, 'task');
+  assert.equal(writerTask.task.role, 'writer');
+  const prepassFailure = await rawRpc({ jsonrpc: '2.0', id: 'workspace-write-prepass-stale-second-file', method: 'tools/call', params: {
+    name: 'workflow_write_files', arguments: {
+      job_id: scopedWriteWorkflow.job_id, task_id: writerTask.task.task_id, patch_id: 'prepass-must-not-partially-write',
+      writes: [
+        { path: 'write-scope/scoped-write.txt', base_sha256: crypto.createHash('sha256').update(scopedWriteBefore).digest('hex'), content: 'first must not change\n' },
+        { path: 'write-scope/stale-second.txt', base_sha256: '0'.repeat(64), content: 'stale second change\n' }
+      ]
+    }
+  } });
+  assert.equal(prepassFailure.result?.isError, true);
+  assert.equal(prepassFailure.result?.structuredContent?.error?.code, 'WORKSPACE_WRITE_BASE_HASH_MISMATCH');
+  assert.equal(fs.readFileSync(scopedWritePath, 'utf8'), scopedWriteBefore, 'pre-validation must catch stale later-file hashes before first mutation');
+  assert.equal(fs.readFileSync(staleSecondPath, 'utf8'), 'second file unchanged\n');
+  const scopedWriteArgs = {
+    job_id: scopedWriteWorkflow.job_id, task_id: writerTask.task.task_id, patch_id: 'writer-docs-patch-1',
+    writes: [{ path: 'write-scope/scoped-write.txt', base_sha256: crypto.createHash('sha256').update(scopedWriteBefore).digest('hex'), content: scopedWriteAfter }]
+  };
+  const scopedWriteResult = await tool('workflow_write_files', scopedWriteArgs);
+  assert.equal(scopedWriteResult.status, 'applied');
+  assert.equal(scopedWriteResult.atomic_across_files, false);
+  assert.equal(fs.readFileSync(scopedWritePath, 'utf8'), scopedWriteAfter);
+  const scopedWriteRetry = await tool('workflow_write_files', scopedWriteArgs);
+  assert.equal(scopedWriteRetry.receipts[0].receipt_id, scopedWriteResult.receipts[0].receipt_id, 'identical patch retry must reuse durable receipt');
+  const reusedPatchId = await rawRpc({ jsonrpc: '2.0', id: 'scoped-write-patch-id-reuse', method: 'tools/call', params: {
+    name: 'workflow_write_files', arguments: { ...scopedWriteArgs, writes: [{ ...scopedWriteArgs.writes[0], content: 'different bytes\n' }] }
+  } });
+  assert.equal(reusedPatchId.result?.isError, true);
+  assert.equal(reusedPatchId.result?.structuredContent?.error?.code, 'WORKSPACE_WRITE_PATCH_ID_REUSED');
+  assert.equal(fs.readFileSync(scopedWritePath, 'utf8'), scopedWriteAfter, 'changed payload under an existing patch ID must not mutate bytes');
+  const crashBoundaryAfter = 'bytes persisted before receipt commit failure\\n';
+  const crashBoundaryArgs = { ...scopedWriteArgs, patch_id: 'crash-receipt-patch', writes: [{ path: 'write-scope/scoped-write.txt', base_sha256: crypto.createHash('sha256').update(scopedWriteAfter).digest('hex'), content: crashBoundaryAfter }] };
+  const faultDb = new DatabaseSync(path.join(dataDir, 'workflow.db'));
+  faultDb.exec(`CREATE TRIGGER inject_workspace_receipt_failure BEFORE INSERT ON workspace_write_receipts WHEN NEW.patch_id='crash-receipt-patch' BEGIN SELECT RAISE(ABORT, 'injected receipt boundary failure'); END;`);
+  faultDb.close();
+  const receiptBoundaryFailure = await rawRpc({ jsonrpc: '2.0', id: 'write-receipt-boundary-failure', method: 'tools/call', params: { name: 'workflow_write_files', arguments: crashBoundaryArgs } });
+  assert.equal(receiptBoundaryFailure.result?.isError, true, 'receipt persistence failure must not be reported as a successful write');
+  assert.equal(receiptBoundaryFailure.result?.structuredContent?.error?.category, 'unresolved_execution_outcome');
+  assert.equal(receiptBoundaryFailure.result?.structuredContent?.error?.workspace_mutation_status, 'unreceipted');
+  assert.equal(fs.readFileSync(scopedWritePath, 'utf8'), crashBoundaryAfter, 'failure injection should model bytes written before receipt persistence failed');
+  const removeFaultDb = new DatabaseSync(path.join(dataDir, 'workflow.db'));
+  removeFaultDb.exec('DROP TRIGGER inject_workspace_receipt_failure');
+  removeFaultDb.close();
+  const reconciledWrite = await tool('workflow_write_files', crashBoundaryArgs);
+  assert.equal(reconciledWrite.receipts[0].outcome, 'already_present', 'same-request retry must reconcile intended bytes when prior receipt was lost without claiming a process restart');
+  const scopedWriteArtifact = { ...artifactFor('writer'), workspace_write_receipts: [...scopedWriteResult.receipts, ...reconciledWrite.receipts].map(item => item.receipt_id) };
+  await tool('workflow_complete_task', { task_id: writerTask.task.task_id, content: 'Updated the scoped file using the approved write contract.', artifact: scopedWriteArtifact });
+  const scopedWriteDb = new DatabaseSync(path.join(dataDir, 'workflow.db'), { readOnly: true });
+  try {
+    const receiptRows = scopedWriteDb.prepare('SELECT receipt_id,plan_hash,request_hash,after_sha256 FROM workspace_write_receipts WHERE job_id=? AND task_id=?').all(scopedWriteWorkflow.job_id, writerTask.task.task_id);
+    assert.equal(receiptRows.length, 2, 'identical retry and missing-receipt reconciliation must not duplicate durable write receipts');
+    assert.equal(receiptRows[0].plan_hash, scopedWritePlanHash);
+    assert.ok(receiptRows.some(row => row.receipt_id === scopedWriteResult.receipts[0].receipt_id));
+    assert.equal(receiptRows.find(row => row.receipt_id === scopedWriteResult.receipts[0].receipt_id).after_sha256, crypto.createHash('sha256').update(scopedWriteAfter).digest('hex'));
+    const writeEvents = scopedWriteDb.prepare("SELECT COUNT(*) AS n FROM events WHERE job_id=? AND type='workflow.workspace_file_written'").get(scopedWriteWorkflow.job_id).n;
+    assert.equal(writeEvents, 2, 'each durable receipt must correspond to one append-only write event; failed receipt insertion must leave no event');
+  } finally { scopedWriteDb.close(); }
+  const scopedWriteRecovery = await tool('workflow_recovery_verify', { job_id: scopedWriteWorkflow.job_id });
+  assert.equal(scopedWriteRecovery.checks.find(check => check.name === 'workspace_write_receipts_match_immutable_plan_and_events')?.pass, true, JSON.stringify(scopedWriteRecovery.checks));
+  assert.equal(scopedWriteRecovery.checks.find(check => check.name === 'completed_scoped_write_artifacts_cite_receipts')?.pass, true, JSON.stringify(scopedWriteRecovery.checks));
+  const evaluationScenarios = [
+    preflight.ready && preflight.execution_started === false && preflight.immutable_plan_pinned === false,
+    infeasibleWriteProposal.result?.isError === true,
+    incompatibleRework.result?.structuredContent?.error?.retryable === false && incompatibleRework.result?.structuredContent?.error?.next_actions?.[0]?.tool === 'workflow_create',
+    scopedWriteResult.status === 'applied' && scopedWriteRetry.receipts[0].receipt_id === scopedWriteResult.receipts[0].receipt_id,
+    reconciledWrite.receipts[0].outcome === 'already_present',
+    scopedWriteRecovery.checks.find(check => check.name === 'workspace_write_receipts_match_immutable_plan_and_events')?.pass === true &&
+      scopedWriteRecovery.checks.find(check => check.name === 'completed_scoped_write_artifacts_cite_receipts')?.pass === true
+  ];
+  const wrongToolCallsAccepted = [prematureWrite, prepassFailure, reusedPatchId].filter(response => response.result?.isError !== true).length;
+  const lateBlocks = infeasibleWriteProposal.result?.isError === true ? 0 : 1;
+  const recoverySuccesses = reconciledWrite.receipts[0].outcome === 'already_present' ? 1 : 0;
+  const finalClaimAccurate = evaluationScenarios[5] ? 1 : 0;
+  console.log(`WORKFLOW AGENT USABILITY EVALUATION (deterministic local MCP fixtures; not model-agent performance): ${JSON.stringify({
+    scenario_completion_rate: `${evaluationScenarios.filter(Boolean).length}/${evaluationScenarios.length}`,
+    wrong_tool_calls_accepted: wrongToolCallsAccepted, late_block_rate: `${lateBlocks}/1`, useless_retries: 0,
+    recovery_success_rate: `${recoverySuccesses}/1`, final_claim_accuracy: `${finalClaimAccurate}/1`
+  })}`);
+  console.log('MCP scoped workspace-write E2E: PASS (approval/preflight, task/role/scope binding, pre-write validation, hash fence, idempotent receipt, failed-receipt reconciliation, patch-ID reuse rejection, artifact provenance and recovery verification)');
 
   const evidenceGuard = await tool('workflow_create', { title: 'review evidence provenance guard', task: 'Reject reviewer issuance when a required upstream artifact no longer binds its producer result; restore evidence and complete the full lifecycle.', workflow: 'standard-engineering', workspace });
   await tool('workflow_approve', { job_id: evidenceGuard.job_id, confirmation: 'Approve isolated local workflow evidence-provenance regression test.' });

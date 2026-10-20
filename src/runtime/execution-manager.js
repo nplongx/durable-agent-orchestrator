@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { validateExecutionBatch, validateExecutionResult, MAX_EXECUTION_COMMAND_CHARS, MAX_EXECUTION_TIMEOUT_MS } from '../../protocol/cos-ap-v1/index.js';
 import { parseStrictJson } from './strict-json.js';
-import { assertTaskDependenciesMatchPlan } from './workflow/plan.js';
+import { assertTaskDependenciesMatchPlan, resolveTaskBatchRoute } from './workflow/plan.js';
 
 const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
 const DEFAULT_TIMEOUT_MS = Math.max(1000, Number(process.env.EXECUTION_TIMEOUT_MS) || 120000);
@@ -160,6 +160,105 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 function sha256(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+
+export function assertExecutionBatchRetryLineage({ batchId, creationEvents, retryEvents, terminalEvents, finalAttempt, items }) {
+  if (typeof batchId !== 'string' || !batchId || !Array.isArray(creationEvents) || creationEvents.length !== 1 ||
+      !Array.isArray(retryEvents) || !Array.isArray(terminalEvents) || !Array.isArray(items) || items.length < 1 ||
+      !Number.isSafeInteger(finalAttempt) || finalAttempt < 1) {
+    throw new Error('durable batch retry lineage input is incomplete or malformed');
+  }
+  const payloadOf = (event, type) => {
+    const payload = event?.payload;
+    if (event?.type !== type || !payload || typeof payload !== 'object' || Array.isArray(payload) || payload.batchId !== batchId) {
+      throw new Error('durable batch retry lineage contains a mismatched event: ' + type);
+    }
+    return payload;
+  };
+  const created = payloadOf(creationEvents[0], 'execution.batch.created');
+  if (!Number.isSafeInteger(created.attempt) || created.attempt < 1 || created.attempt > finalAttempt ||
+      !Array.isArray(created.taskIds) || created.taskIds.some(id => typeof id !== 'string' || !id) ||
+      new Set(created.taskIds).size !== created.taskIds.length) {
+    throw new Error('durable batch creation event has an invalid task set or initial attempt');
+  }
+  const actualTaskIds = items.map(item => item?.task_id);
+  if (actualTaskIds.some(id => typeof id !== 'string' || !id) || new Set(actualTaskIds).size !== actualTaskIds.length ||
+      actualTaskIds.length !== created.taskIds.length ||
+      JSON.stringify([...actualTaskIds].sort()) !== JSON.stringify([...created.taskIds].sort())) {
+    throw new Error('durable batch creation task set does not match the durable item rows');
+  }
+  const retryAttempts = retryEvents.map(event => payloadOf(event, 'execution.batch.retry_started').attempt);
+  const expectedRetries = Array.from({ length: finalAttempt - created.attempt }, (_, index) => created.attempt + index + 1);
+  if (retryAttempts.some(attempt => !Number.isSafeInteger(attempt)) ||
+      JSON.stringify(retryAttempts) !== JSON.stringify(expectedRetries)) {
+    throw new Error('durable batch retry history is missing, duplicated, or non-contiguous');
+  }
+  if (terminalEvents.length !== finalAttempt - created.attempt + 1) {
+    throw new Error('durable batch terminal event history does not cover each aggregate attempt exactly once');
+  }
+  const terminalsByAttempt = new Map();
+  for (const event of terminalEvents) {
+    if (!['execution.batch.completed', 'execution.batch.failed'].includes(event?.type)) {
+      throw new Error('durable batch terminal history contains an unsupported event type');
+    }
+    const payload = payloadOf(event, event.type);
+    if (!Number.isSafeInteger(payload.attempt) || payload.attempt < created.attempt || payload.attempt > finalAttempt ||
+        terminalsByAttempt.has(payload.attempt) || payload.itemCount !== items.length ||
+        !Number.isSafeInteger(payload.failedCount) || payload.failedCount < 0 || payload.failedCount > items.length) {
+      throw new Error('durable batch terminal history has a duplicate attempt or inconsistent item counts');
+    }
+    terminalsByAttempt.set(payload.attempt, { type: event.type, payload });
+  }
+  for (let attempt = created.attempt; attempt <= finalAttempt; attempt++) {
+    const terminal = terminalsByAttempt.get(attempt);
+    const final = attempt === finalAttempt;
+    if (!terminal || (final
+      ? terminal.type !== 'execution.batch.completed' || terminal.payload.status !== 'COMPLETED' || terminal.payload.failedCount !== 0
+      : terminal.type !== 'execution.batch.failed' || terminal.payload.status !== 'FAILED' || terminal.payload.failedCount < 1)) {
+      throw new Error('durable batch terminal event does not match the expected attempt outcome: ' + attempt);
+    }
+  }
+  if (items.some(item => item.status !== 'COMPLETED' || item.exit_code !== 0)) {
+    throw new Error('final successful batch terminal event conflicts with durable item statuses');
+  }
+  return { initialAttempt: created.attempt, finalAttempt, retryCount: retryAttempts.length, itemCount: items.length };
+}
+
+
+function assertSingleTaskAllowedByBatchPolicy(store, task, metadata, batchClaim) {
+  if (batchClaim) return;
+  const plan = store.getExecutionPlan(task.job_id);
+  if (!plan || !Array.isArray(plan.children)) return;
+  let plannedTask = null;
+  if (typeof metadata?.workflow_plan_task_id === 'string' && metadata.workflow_plan_task_id) {
+    plannedTask = plan.children.find(spec => spec.id === metadata.workflow_plan_task_id) || null;
+    if (!plannedTask) throw new Error('task execution metadata references no task in the immutable execution plan');
+  } else {
+    const roleMatches = plan.children.filter(spec => String(spec.role).toLowerCase() === String(task.role).toLowerCase());
+    if (roleMatches.length > 1 && roleMatches.some(spec => spec.execution?.deterministic === true && spec.execution?.executor === 'ExecutionManager')) {
+      throw new Error('cannot resolve one immutable batch route for a role with multiple deterministic plan tasks');
+    }
+    plannedTask = roleMatches.length === 1 ? roleMatches[0] : null;
+  }
+  if (plannedTask && resolveTaskBatchRoute(plan, plannedTask).required) {
+    const planHash = typeof plan.plan_hash === 'string' ? plan.plan_hash : 'unavailable';
+    const policyVersion = Number.isSafeInteger(plan.batch_execution_policy?.schema_version) ? plan.batch_execution_policy.schema_version : null;
+    const hasLegacyHistory = (plan.schema_version ?? 1) === 1 &&
+      ((Number.isSafeInteger(task.execution_attempt) && task.execution_attempt > 0) || task.execution_session_id ||
+       task.execution_status || store.db.prepare('SELECT 1 FROM attempts WHERE task_id=? LIMIT 1').get(task.task_id)) &&
+      !store.db.prepare('SELECT 1 FROM execution_batch_items WHERE task_id=? LIMIT 1').get(task.task_id);
+    const rejectedRoute = 'execution_manager_single_task';
+    const reasonCode = hasLegacyHistory ? 'migration_required_legacy_attempt' : 'batch_route_required';
+    const payload = { jobId: task.job_id, taskId: task.task_id, planHash, policyVersion, rejectedRoute, reasonCode };
+    const dedupeKey = ['batch-policy-denied', task.task_id, planHash, rejectedRoute, reasonCode].join('|');
+    const eventIdValue = store.recordEvent(task.job_id, 'batch_execution.policy_denied', payload, dedupeKey);
+    const event = store.db.prepare('SELECT event_id,job_id,type,payload_json FROM events WHERE event_id=?').get(eventIdValue);
+    if (!event || event.job_id !== task.job_id || event.type !== 'batch_execution.policy_denied' || event.payload_json !== JSON.stringify(payload)) {
+      throw new Error('mandatory batch policy denial audit could not be durably verified');
+    }
+    if (hasLegacyHistory) throw new Error('migration-required: schema-v1 deterministic task has prior direct execution without genuine batch provenance; create a fresh approved schema-v2 workflow; do not replay this task');
+    throw new Error('task is batch-required by the immutable execution policy; direct ExecutionManager execution is refused without a durable batch claim');
+  }
+}
 const executableDigestCache = new Map();
 const pinnedExecutableDigestCache = new Map();
 const pinnedExecutableCreationPromises = new Map();
@@ -237,6 +336,12 @@ async function resolveExecutableIdentity(executable, searchPath) {
       const possible = path.join(directory, executable);
       try { await fs.access(possible); candidate = possible; break; } catch {}
     }
+  }
+  // The runtime may itself be launched from a content-addressed pinned Node binary whose directory has no `node` alias.
+  // Only the exact logical `node` executable may fall back to the currently running runtime, and normal
+  // realpath, regular-file, digest, and pinning verification below still applies.
+  if (!candidate && executable === 'node' && typeof process.execPath === 'string' && path.isAbsolute(process.execPath)) {
+    candidate = process.execPath;
   }
   if (!candidate) throw new Error(`execution executable cannot be resolved in the isolated PATH: ${executable}`);
   const realpath = await fs.realpath(candidate);
@@ -1571,7 +1676,9 @@ export class ExecutionManager {
     if (!/^[A-Za-z0-9_.+-]+$/.test(exactExecutable)) throw new Error(`unsupported deterministic executable: ${exactExecutable}`);
     const task = this.getTask(taskId);
     if (!task) throw new Error(`task not found: ${taskId}`);
+    const taskMetadata = parseStrictJson(task.metadata_json || '{}', `task metadata for ${taskId}`);
     assertImmutablePlannedExecution(this.store, task, { executable: exactExecutable, args, command, cwd, timeoutMs, env });
+    assertSingleTaskAllowedByBatchPolicy(this.store, task, taskMetadata, batchClaim);
     const priorAttempt = task.execution_attempt == null ? 0 : task.execution_attempt;
     if (typeof priorAttempt !== 'number' || !Number.isSafeInteger(priorAttempt) || priorAttempt < 0) {
       throw new Error(`task has a malformed durable execution attempt: ${taskId}`);
@@ -1699,12 +1806,17 @@ export class ExecutionManager {
     }
     if (typeof cwd !== 'string' || !cwd.trim() || cwd.length > 4096) throw new Error('execution cwd must be a non-empty string up to 4096 characters');
     if (!env || typeof env !== 'object' || Array.isArray(env)) throw new Error('execution env must be an object of explicit string overrides');
-    if (!/^(?:node|npm|npx|git|python(?:3)?|bash|sh|pnpm|yarn)\b/.test(exactCommand)) throw new Error(`unsupported deterministic command: ${exactCommand}`);
     const commandArgs = parseSafeCommandLine(exactCommand);
-    if (!/^(?:node|npm|npx|git|python(?:3)?|bash|sh|pnpm|yarn)$/.test(commandArgs[0])) {
-      throw new Error(`unsupported deterministic executable token: ${commandArgs[0]}`);
+    const namedExecutableAllowed = /^(?:node|npm|npx|git|python(?:3)?|bash|sh|pnpm|yarn)$/.test(commandArgs[0]);
+    const exactCurrentRuntimeAllowed = commandArgs[0] === process.execPath;
+    if (!/^(?:node|npm|npx|git|python(?:3)?|bash|sh|pnpm|yarn)\b/.test(exactCommand) && !exactCurrentRuntimeAllowed) {
+      throw new Error('unsupported deterministic command: ' + exactCommand);
+    }
+    if (!namedExecutableAllowed && !exactCurrentRuntimeAllowed) {
+      throw new Error('unsupported deterministic executable token: ' + commandArgs[0]);
     }
     const planned = assertImmutablePlannedExecution(this.store, task, { command: exactCommand, cwd, timeoutMs, env });
+    assertSingleTaskAllowedByBatchPolicy(this.store, task, taskMetadata, batchClaim);
     if (!planned && ['bash', 'sh'].includes(commandArgs[0])) {
       throw new Error('unplanned shell execution is not permitted; use a structured immutable execution plan');
     }

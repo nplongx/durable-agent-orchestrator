@@ -111,6 +111,26 @@ function setBanner(message = '') {
   if(!message){n.classList.add('hidden');n.textContent='';return;}
   n.textContent=message;n.classList.remove('hidden');
 }
+function setSyncUi(mode) {
+  const label=$('last-updated');
+  label.dataset.syncState=mode;
+  const busy=mode==='syncing';
+  for(const button of [$('refresh-button'),$('hero-refresh')]) {
+    button.classList.toggle('is-refreshing',busy);
+    button.disabled=busy;
+    button.setAttribute('aria-busy',String(busy));
+    button.title=busy?'Refreshing the local snapshot':'Refresh dashboard snapshot';
+  }
+  if(mode==='syncing' && !state.lastSync) label.textContent='SYNCING SNAPSHOT';
+  if(mode==='error') {
+    if(state.lastSync) {
+      label.title=`Refresh failed. Last successful snapshot: ${dateTime(state.lastSync.toISOString())}`;
+    } else {
+      label.textContent='SYNC FAILED';
+      label.title='No successful snapshot has been loaded yet.';
+    }
+  }
+}
 function updateHero(title, accent, subtitle) {
   const h=$('page-title'); clear(h); h.append(document.createTextNode(`${title} `), el('em','',accent)); $('page-subtitle').textContent=subtitle;
 }
@@ -122,7 +142,11 @@ function setView(view) {
     const detail=$('job-detail-shell');if(detail)detail.remove();state.currentJob=null;
     $('workflows-view').querySelector('.section-toolbar')?.classList.remove('hidden');$('workflows-view').querySelector('.table-panel')?.classList.remove('hidden');
   }
-  document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
+  document.querySelectorAll('.nav-item').forEach(b=>{
+    const active=b.dataset.view===view;
+    b.classList.toggle('active',active);
+    if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');
+  });
   const meta={overview:['Operations','Overview','Workflow status, recent activity and exceptions.'],workflows:['Workflows','Registry','Search, filter and inspect workflow runs.'],roles:['Role','Registry','Saved role versions, skill snapshots and custom workflow pins.'],policies:['Workflow','Policies','Reusable policy packs, immutable versions and workflow attachments.'],batches:['Batch','Execution','Durable command batches and per-item execution evidence.'],events:['Events','Stream','Recent events across workflow runs.'],artifacts:['Artifacts','Library','Stored results, reports and evidence.'],files:['Local files','Explorer','Read-only text and log previews.']}[view];
   updateHero(...meta); $('crumb-current').textContent=({overview:'Overview',workflows:'Workflows',roles:'Roles & skills',policies:'Policies',batches:'Batch execution',events:'Event stream',artifacts:'Artifacts',files:'File explorer'})[view];
   if(view==='workflows') loadJobs(); if(view==='roles') loadRoles(); if(view==='policies') loadPolicies(); if(view==='batches') loadBatches(); if(view==='events') loadEvents(); if(view==='artifacts') loadArtifacts(); if(view==='files') loadFiles(state.filePath);
@@ -247,7 +271,7 @@ async function refreshOverview() {
 function setViewPlaceholder(body, span, text) {clear(body);const tr=el('tr');const td=el('td','table-empty',text);td.colSpan=span;tr.append(td);body.append(tr);}
 function renderJobsTable(items, body, onOpen, mode='all') {
   clear(body);if(mode==='all'){$('workflow-results-meta').textContent=`${fmtNumber(state.jobTotal)} workflows${state.jobQuery?' · search applied':''}${state.statusFilter?' · '+state.statusFilter:''}${state.phaseFilter?' · '+state.phaseFilter.replaceAll('_',' '):''}`;document.querySelectorAll('[data-quick-status]').forEach(b=>b.classList.toggle('selected',b.dataset.quickStatus===state.statusFilter));}if(!items?.length){const tr=el('tr'),td=el('td','table-empty','No matching workflows.');td.colSpan=mode==='all'?7:5;tr.append(td);body.append(tr);return;}
-  for(const job of items){const tr=el('tr');tr.tabIndex=0;tr.addEventListener('click',()=>onOpen(job.job_id));tr.addEventListener('keydown',e=>{if(e.key==='Enter')onOpen(job.job_id)});
+  for(const job of items){const tr=el('tr');tr.tabIndex=0;tr.setAttribute('aria-label',`Inspect workflow ${job.title||job.job_id}`);tr.addEventListener('click',()=>onOpen(job.job_id));tr.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();onOpen(job.job_id)}});
     if(mode==='all'){
       const td1=el('td');td1.append(workflowCell(job));
       const progress=el('div','progress-cell');const sum=el('div','progress-summary');append(sum,el('span','',`${job.task_completed||0} / ${job.task_total||0} complete`),el('b','',`${job.task_total?Math.round(100*job.task_completed/job.task_total):0}%`));const track=el('div','progress-track'),fill=el('i');fill.style.width=`${job.task_total?Math.round(100*job.task_completed/job.task_total):0}%`;track.append(fill);progress.append(sum,track);
@@ -503,14 +527,14 @@ async function loadPolicies(quiet=false) {
   } catch(error) {if(!quiet)notify(`Unable to load policy registry: ${error.message}`,true);}
 }
 async function loadFiles(relative='') {
-  state.filePath=relative;try{const data=await api(`/api/files?path=${encodeURIComponent(relative)}`);const target=$('file-list');clear(target);$('file-breadcrumb').textContent=data.path?`/${data.path}`:'/';$('file-up').disabled=!data.parent;$('file-up').onclick=()=>loadFiles(data.parent||'');if(!data.entries.length)target.append(el('div','table-empty','No supported text/log files in this folder.'));for(const item of data.entries){const row=el('div',`file-row ${item.kind}`);append(row,el('span','file-glyph',item.kind==='directory'?'▰':'▤'),el('span','file-name',item.name),el('span','file-size',item.kind==='file'?humanSize(item.size):'DIR'),el('span','file-date',ago(item.modified_at)));row.title=item.path;row.addEventListener('click',()=>item.kind==='directory'?loadFiles(item.path):previewFile(item.path));target.append(row);}if(data.truncated)target.append(el('div','file-footnote','Showing the first 200 entries. Narrow folders to browse further.'));
+  state.filePath=relative;try{const data=await api(`/api/files?path=${encodeURIComponent(relative)}`);const target=$('file-list');clear(target);$('file-breadcrumb').textContent=data.path?`/${data.root_label}/${data.path}`:`/${data.root_label}`;$('file-up').disabled=!data.parent;$('file-up').onclick=()=>loadFiles(data.parent||'');if(!data.entries.length)target.append(el('div','table-empty','No supported text/log files in this folder.'));for(const item of data.entries){const row=el('div',`file-row ${item.kind}`);append(row,el('span','file-glyph',item.kind==='directory'?'▰':'▤'),el('span','file-name',item.name),el('span','file-size',item.kind==='file'?humanSize(item.size):'DIR'),el('span','file-date',ago(item.modified_at)));row.title=item.path;row.addEventListener('click',()=>item.kind==='directory'?loadFiles(item.path):previewFile(item.path));target.append(row);}if(data.truncated)target.append(el('div','file-footnote','Showing the first 200 entries. Narrow folders to browse further.'));
   }catch(error){notify(`Unable to browse local files: ${error.message}`,true)}
 }
 function humanSize(value){const n=Number(value||0);if(n<1024)return `${n} B`;if(n<1024*1024)return `${(n/1024).toFixed(1)} KB`;return `${(n/1048576).toFixed(1)} MB`;}
 async function previewFile(relative){
   try{const f=await api(`/api/files/preview?path=${encodeURIComponent(relative)}`);state.filePreviewPath=relative;$('file-preview-title').textContent=relative.split('/').pop();$('file-preview-meta').textContent=`${humanSize(f.size)} · modified ${dateTime(f.modified_at)}${f.truncated?' · PREVIEW TRUNCATED':''}`;$('file-preview-content').textContent=f.preview+(f.truncated?'\n\n[Preview truncated at 64 KB]':'');const copyPath=$('file-copy-path');if(copyPath)copyPath.disabled=false;notify(`Opened read-only preview: ${relative}`)}catch(error){notify(`File preview denied: ${error.message}`,true)}
 }
-async function refreshAll(quiet=false){if(refreshInFlight)return false;refreshInFlight=true;try{const ok=await refreshOverview();if(state.view==='workflows')await loadJobs(quiet);if(state.view==='roles')await loadRoles(quiet);if(state.view==='policies')await loadPolicies(quiet);if(state.view==='batches')await loadBatches(quiet);if(state.view==='events')await loadEvents();if(state.view==='artifacts')await loadArtifacts();if(state.view==='files'&&state.filePath)await loadFiles(state.filePath);return ok;}finally{refreshInFlight=false;}}
+async function refreshAll(quiet=false){if(refreshInFlight)return false;refreshInFlight=true;setSyncUi('syncing');let ok=false;try{ok=await refreshOverview();if(state.view==='workflows')await loadJobs(quiet);if(state.view==='roles')await loadRoles(quiet);if(state.view==='policies')await loadPolicies(quiet);if(state.view==='batches')await loadBatches(quiet);if(state.view==='events')await loadEvents();if(state.view==='artifacts')await loadArtifacts();if(state.view==='files'&&state.filePath)await loadFiles(state.filePath);return ok;}finally{refreshInFlight=false;setSyncUi(ok?'success':'error');}}
 function debounce(fn,delay=180){let timer;return(...args)=>{clearTimeout(timer);timer=setTimeout(()=>fn(...args),delay)}}
 for(const b of document.querySelectorAll('.nav-item')) b.addEventListener('click',()=>setView(b.dataset.view));
 for(const b of document.querySelectorAll('[data-open-view]')) b.addEventListener('click',()=>setView(b.dataset.openView));

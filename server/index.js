@@ -15,9 +15,13 @@ const SERVER_INSTRUCTIONS = [
   'All workflow state is stored in local SQLite. Deterministic commands execute on this computer only through the task’s immutable structured execution contract.',
   'There is no cloud runner, GitHub Actions dispatch, remote worker, external model API, or HTTP service in this plugin.',
   'Use the immutable System Workflow Coordinator role and workflow_coordinator_step as the primary lifecycle interface. It dispatches only after approval, prepares tasks, runs approved deterministic steps, and hands host reasoning tasks back with their typed contract.',
+  'When starting or diagnosing work, use workflow_catalog to choose a template, workflow_create to persist a proposal, and workflow_preflight to check the proposed immutable execution path before workflow_approve. Preflight is read-only; approval does not dispatch; dispatch does not prove task completion. When an active job appears stuck, call workflow_liveness_diagnostics before guessing, then inspect workflow_get/workflow_events/workflow_diagnose. A stale-candidate signal is not proof that the worker is dead and must never trigger blind retry or state mutation.',
+  'For substantial new work, proactively call workflow_recommend_resources with the actual task goal before creating a proposal; do not wait for the user to name a role, policy, skill, or reusable workflow. Prefer high-confidence existing resources when their contracts match, include selected role-profile bindings and suitable policy snapshots in the proposal lifecycle, and tell the user what was reused. Never force-fit low-confidence matches or create near-duplicates without reason. Resource discovery is read-only; it never grants permission, attaches a policy, approves, or executes by itself. Validate policy compatibility against the target plan before attachment, and include all selected constraints in the approval summary.',
   'For each task, follow its role-specific description, inspect the completed predecessor results and typed artifacts returned by the coordinator, and produce only the assigned role output. Do not treat different role labels as a substitute for different work.',
+  'Host specialists may write workspace files only when the approved standard-engineering v3+ plan pins a built-in engineer/writer role, workspace.write capability, and explicit relative path scopes. Use workflow_write_files with per-file base SHA-256 values; do not use ad-hoc file/command tools for plan-owned workspace changes. Report each returned receipt ID in the task artifact. Custom roles and other templates receive no workspace-write path.',
   'After completing specialist reasoning, submit the exact task result to workflow_coordinator_step.task_result; at synthesis, submit the CTO artifact to workflow_coordinator_step.synthesis. The coordinator advances dependencies and approved deterministic work, while the runtime remains authoritative for evidence checks and terminalization.',
   'This plugin is tool-driven, not an autonomous background agent runner: durable task creation/completion records do not prove independent model execution. Reasoning is performed by the host conversation; deterministic tasks run locally under their approved execution contract.',
+  'Review-driven rework and evidence-only reviewer revision require workflow_id=standard-engineering and version>=2; an engineering@2 plan is not compatible. If unsupported, inspect the diagnosis and create a separate standard-engineering proposal; never retry a structurally unsupported operation or mutate an approved plan.',
   'Custom workflows require an approved immutable preview and a separate workflow execution approval. Their tasks use the same local dependency-aware engine and typed artifact checks as built-in workflows; custom roles do not grant shell or workspace-write permissions.',
   'Do not claim native OpenClaw session/run IDs: local plugin tasks have no OpenClaw identity.'
 ].join(' ');
@@ -53,7 +57,7 @@ process.env.EXECUTION_TMP_DIR = path.resolve(process.env.RUNALITH_EXECUTION_TMP_
 process.env.WORKFLOW_WORKSPACE = path.resolve(process.env.RUNALITH_WORKSPACE || process.env.CHAT_ON_STEROIDS_WORKSPACE || process.env.WORKFLOW_WORKSPACE || home);
 
 const runtimePrefix = fs.existsSync(new URL('./runtime/job-store.js', import.meta.url)) ? './runtime' : '../src/runtime';
-const [{ workflowStore, WORKFLOW_DB_PATH }, { ExecutionManager, isVerifiedSuccessfulLocalExecution, isSuccessfulLocalExecutionSummary }] = await Promise.all([
+const [{ workflowStore, WORKFLOW_DB_PATH }, { ExecutionManager, isVerifiedSuccessfulLocalExecution, isSuccessfulLocalExecutionSummary, assertExecutionBatchRetryLineage }] = await Promise.all([
   import(`${runtimePrefix}/job-store.js`),
   import(`${runtimePrefix}/execution-manager.js`)
 ]);
@@ -62,6 +66,7 @@ const [{ artifactSchemaForType, validateArtifact, validateArtifactContent }, { g
   import(`${runtimePrefix}/workflow/agent-contracts.js`)
 ]);
 const { assessProductionQaExecution } = await import(`${runtimePrefix}/workflow/catalog/production.js`);
+const { replaceFileWithin, readFileWithin } = await import(`${runtimePrefix}/secure-filesystem.js`);
 const { createCase01WorkspaceSnapshot, removeCase01WorkspaceSnapshot, reconcileCase01WorkspaceSnapshots, validateCase01WorkspaceArtifact, readVerifiedCase01WorkspaceSnapshot, collectCase01SnapshotReferences, validateCase01DurableSnapshotReferences } = await import(`${runtimePrefix}/workflow/case01-artifact-acceptance.js`);
 const customRoles = await import(`${runtimePrefix}/workflow/custom-roles.js`);
 customRoles.initializeCustomRoleStore(workflowStore.db);
@@ -70,9 +75,15 @@ const customWorkflows = await import(`${runtimePrefix}/workflow/custom-workflows
 customWorkflows.initializeCustomWorkflowStore(workflowStore.db);
 const successContracts = await import(`${runtimePrefix}/workflow/success-contract.js`);
 const policyContracts = await import(`${runtimePrefix}/workflow/policy-contract.js`);
+const resourceRecommender = await import(`${runtimePrefix}/workflow/resource-recommender.js`);
 const workflowCompiler = await import(`${runtimePrefix}/workflow/compiler.js`);
+const batchExecutionPolicyRuntime = await import(`${runtimePrefix}/workflow/plan.js`);
 const systemCoordinator = await import(`${runtimePrefix}/workflow/system-coordinator.js`);
 const { getSpecialistRoleGuidance } = await import(`${runtimePrefix}/workflow/specialist-role-guidance.js`);
+const workspaceWriteContractRuntime = await import(`${runtimePrefix}/workflow/workspace-write-contract.js`);
+const recoveryCompatibility = await import(`${runtimePrefix}/workflow/recovery-compatibility.js`);
+const workflowToolErrors = await import(`${runtimePrefix}/workflow/tool-errors.js`);
+const { getJobLivenessDiagnostics } = await import(`${runtimePrefix}/job-liveness.js`);
 
 const CASE01_SNAPSHOT_BASE = path.join(dataDir, 'case01-snapshots');
 workflowStore.db.exec(`CREATE TABLE IF NOT EXISTS case01_snapshot_reservations (
@@ -572,11 +583,73 @@ const coordinatorSynthesisSchema = {
   required: ['content', 'artifact']
 };
 
+const workspaceWriteScopeSchema = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    role: { type: 'string', enum: ['engineer', 'writer'] },
+    paths: { type: 'array', minItems: 1, maxItems: 16, items: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        path: { type: 'string', minLength: 1, maxLength: 500 },
+        kind: { type: 'string', enum: ['file', 'directory'] }
+      },
+      required: ['path', 'kind']
+    } }
+  },
+  required: ['role', 'paths']
+};
+
+const workflowWriteProperties = {
+  required_operations: { type: 'array', maxItems: 4, uniqueItems: true, items: { type: 'string', enum: ['workspace.write'] } },
+  workspace_write_scopes: { type: 'array', maxItems: 8, items: workspaceWriteScopeSchema }
+};
+
+const workflowWriteFilesSchema = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    job_id: { type: 'string', minLength: 1, maxLength: 200 },
+    task_id: { type: 'string', minLength: 1, maxLength: 200 },
+    patch_id: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$' },
+    writes: { type: 'array', minItems: 1, maxItems: 16, items: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        path: { type: 'string', minLength: 1, maxLength: 1000 },
+        base_sha256: { type: 'string', pattern: '^(ABSENT|[a-f0-9]{64})$' },
+        content: { type: 'string', maxLength: 2_000_000 }
+      },
+      required: ['path', 'base_sha256', 'content']
+    } }
+  },
+  required: ['job_id', 'task_id', 'patch_id', 'writes']
+};
+
+// Filesystem mutation and SQLite receipt cannot commit atomically together.
+// The unique patch/path key lets retries reconcile intended bytes after a crash.
+workflowStore.db.exec(`
+  CREATE TABLE IF NOT EXISTS workspace_write_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    plan_hash TEXT NOT NULL,
+    patch_id TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    path TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('created','replaced','already_present','reconciled_after_restart')),
+    before_sha256 TEXT NOT NULL,
+    after_sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(job_id, task_id, patch_id, path)
+  );
+  CREATE INDEX IF NOT EXISTS idx_workspace_write_receipts_job ON workspace_write_receipts(job_id, created_at);
+`);
+
 const TOOL_DEFS = [
   { name: 'workflow_coordinator_role', description: 'Read the immutable built-in System Workflow Coordinator role used by the host assistant. It is not a custom role and cannot be created or modified through custom-role tools.', inputSchema: { type: 'object', additionalProperties: false, properties: {} } },
   { name: 'workflow_coordinator_step', description: 'Use as the normal high-level lifecycle interface after a proposal exists: it waits for explicit human approval, advances an already-approved workflow, prepares tasks, executes only approved deterministic local steps, and returns the next specialist task or synthesis contract. Submit task_result/synthesis to persist actual work. Do not use it to approve a proposal or bypass gates; use low-level tools for explicit state inspection or a documented recovery path.', inputSchema: { type: 'object', additionalProperties: false, properties: { job_id: { type: 'string', minLength: 1, maxLength: 200 }, task_result: coordinatorTaskResultSchema, synthesis: coordinatorSynthesisSchema, max_local_steps: { type: 'integer', minimum: 1, maximum: 20, default: 5 } }, required: ['job_id'] } },
   { name: 'orchestrator_health', description: 'Read-only local health check for plugin/storage and local execution readiness. Use before diagnosing local setup problems; it never probes remote services and does not prove an individual workflow\'s evidence or success gates.', inputSchema: { type: 'object', properties: {} } },
-  { name: 'workflow_catalog', description: 'Read-only discovery of supported local workflow templates and their intended shape. Use before workflow_create when choosing a template; this does not create, approve, or run a workflow.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'workflow_catalog', description: 'Read-only discovery of supported local workflow templates, exact workflow IDs/versions and intended execution modes. Use first when choosing a template; then workflow_create and workflow_preflight. This does not create, approve, or run a workflow.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'workflow_recommend_resources', description: 'Proactive, read-only discovery for a task goal. Use before creating a substantial workflow even when the user did not name roles, policies, skills, or reusable workflows. Ranks saved custom workflows, custom roles/attached skills, saved policies, and built-in role hints using deterministic Vietnamese/English lexical matching. Prefer compatible high-confidence existing resources over near-duplicates, but inspect contracts and policy scope; lexical scores are hints, not semantic proof. Does not attach policies, bind roles, mutate storage, approve, or execute.', inputSchema: { type: 'object', additionalProperties: false, properties: { task: { type: 'string', minLength: 1, maxLength: 12000 }, limit: { type: 'integer', minimum: 1, maximum: 10, default: 5 } }, required: ['task'] } },
   { name: 'workflow_policy_catalog', description: 'Read-only discovery of policy predicate types and their real runtime enforcement points. Use before drafting a policy; do not invent predicates or treat a catalog entry as proof a policy is attached/enforced for a particular run.', inputSchema: { type: 'object', additionalProperties: false, properties: {} } },
   { name: 'workflow_policy_create', description: 'State-changing: create immutable version 1 of a reusable workflow policy pack after reviewing workflow_policy_catalog. Use only the closed predicate schema; no executable code/arbitrary expressions are accepted. Validate before attaching; creation alone does not attach the policy to a workflow.', inputSchema: { ...policyDefinitionInputSchema } },
   { name: 'workflow_policy_list', description: 'Read-only list/search of saved policy packs. Set include_versions when comparing immutable revisions; use workflow_policy_get for a specific pack. This does not validate or attach a policy.', inputSchema: { type: 'object', additionalProperties: false, properties: { include_versions: { type: 'boolean' }, limit: { type: 'integer', minimum: 1, maximum: 200 }, query: { type: 'string', maxLength: 120 } } } },
@@ -584,18 +657,21 @@ const TOOL_DEFS = [
   { name: 'workflow_policy_update', description: 'State-changing: create the next immutable version of an existing policy pack. Omitted fields are retained; old versions and plans already pinned to them do not change. Validate the new version and explicitly attach an exact version to an eligible unapproved proposal if needed.', inputSchema: { type: 'object', additionalProperties: false, properties: policyDefinitionInputProperties, required: ['policy_id'] } },
   { name: 'workflow_policy_validate', description: 'Read-only validation of a proposed policy pack without storing it. Checks closed schema, rule conflicts and policy-level invariants; target-plan compatibility is checked again when attaching. Use before create/update/attach; a valid policy is not yet attached or enforced.', inputSchema: { ...policyDefinitionInputSchema } },
   { name: 'workflow_policy_attach', description: 'State-changing: attach an exact policy version only to an active, unapproved workflow proposal. The snapshot is pinned into the later plan hash; attachment is prohibited after approval/compilation. Use after policy validation and before workflow_approve; create a new proposal if the plan is already approved.', inputSchema: { type: 'object', additionalProperties: false, properties: { job_id: { type: 'string', minLength: 1, maxLength: 200 }, policy_id: policyDefinitionInputProperties.policy_id, version: { type: 'integer', minimum: 1 } }, required: ['job_id', 'policy_id'] } },
-  { name: 'workflow_create', description: 'State-changing proposal creation: use after choosing a template and writing a bounded request. Optional role_bindings pin exact custom-role versions/Skill snapshots as supplementary prompts for supported templates; built-in contracts and permissions stay authoritative. Goal/constraints/success criteria become part of the contract. Inspect the proposal and plan, then call workflow_approve only after explicit approval; create does not approve, dispatch, or execute.', inputSchema: { type: 'object', properties: { title: { type: 'string', minLength: 1, maxLength: 180 }, task: { type: 'string', minLength: 1, maxLength: 12000 }, workflow: { type: 'string', enum: Object.keys(WORKFLOWS), default: 'standard-engineering' }, workspace: { type: 'string', minLength: 1, maxLength: 2000 }, role_bindings: { type: 'array', maxItems: 9, items: { type: 'object', additionalProperties: false, properties: { role: { type: 'string', enum: roleProfilesRuntime.BUILTIN_ROLE_PROFILE_OVERLAY_ROLES }, custom_role_id: { type: 'string', pattern: '^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$', maxLength: 80 }, custom_role_version: { type: 'integer', minimum: 1 } }, required: ['role', 'custom_role_id', 'custom_role_version'] } }, ...goalAndSuccessInputProperties }, required: ['title', 'task'] } },
+  { name: 'workflow_create', description: 'Create a proposal only. Optional role_bindings pin immutable role-profile snapshots. For workspace edits, declare required_operations:["workspace.write"] plus explicit role-specific relative scopes (only built-in engineer/writer on standard-engineering v3+); scopes grant neither shell access nor unscoped filesystem access. Next call workflow_preflight, inspect the immutable plan/readiness, then obtain explicit human approval. Creation never approves or executes.', inputSchema: { type: 'object', additionalProperties: false, properties: { title: { type: 'string', minLength: 1, maxLength: 180 }, task: { type: 'string', minLength: 1, maxLength: 12000 }, workflow: { type: 'string', enum: Object.keys(WORKFLOWS), default: 'standard-engineering' }, workspace: { type: 'string', minLength: 1, maxLength: 2000 }, validation_profile: { type: 'object', additionalProperties: false, properties: { profile_id: { type: 'string', enum: ['core-release-validation', 'plugin-e2e', 'mcpb-package-build', 'mcpb-package-build-isolated', 'mcpb-workspace-smoke'] }, profile_version: { type: 'integer', minimum: 1 } }, required: ['profile_id', 'profile_version'] }, role_bindings: { type: 'array', maxItems: 9, items: { type: 'object', additionalProperties: false, properties: { role: { type: 'string', enum: roleProfilesRuntime.BUILTIN_ROLE_PROFILE_OVERLAY_ROLES }, custom_role_id: { type: 'string', pattern: '^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$', maxLength: 80 }, custom_role_version: { type: 'integer', minimum: 1 } }, required: ['role', 'custom_role_id', 'custom_role_version'] } }, ...workflowWriteProperties, ...goalAndSuccessInputProperties }, required: ['title', 'task'] } },
   { name: 'workflow_list', description: 'Read-only list of locally stored active workflows. Use to find a job_id when it is not known, then inspect that run with workflow_get; this does not advance or mutate any workflow.', inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 } } } },
   { name: 'workflow_get', description: 'Read-only inspection of local workflow state, immutable plan/hash, task states, artifact metadata and phase. Use before approval or when diagnosing a specific job; it does not expose full result bodies or mutate state.', inputSchema: { type: 'object', properties: { job_id: { type: 'string', minLength: 1 } }, required: ['job_id'] } },
-  { name: 'workflow_approve', description: 'State-changing approval: use only after inspecting the current proposal and intended immutable plan and obtaining explicit user confirmation. Compiles/pins the plan; do not edit it in place afterward. Approval is not dispatch—call workflow_dispatch next.', inputSchema: { type: 'object', properties: { job_id: { type: 'string', minLength: 1 }, confirmation: { type: 'string', minLength: 3, maxLength: 2000 } }, required: ['job_id', 'confirmation'] } },
+  { name: 'workflow_liveness_diagnostics', description: 'Read-only diagnosis of active-job liveness using durable job/task/event timestamps and task-lease heartbeats/expiry. Reports stale candidates and safe inspection hints; old activity is not proof a worker is dead. Never changes job/task state, expires or reacquires leases, retries, dispatches, or grants permission.', inputSchema: { type: 'object', additionalProperties: false, properties: { job_id: { type: 'string', minLength: 1, maxLength: 200 }, limit: { type: 'integer', minimum: 1, maximum: 100, default: 25 }, stale_after_ms: { type: 'integer', minimum: 60000, maximum: 604800000, default: 900000 } } } },
+  { name: 'workflow_preflight', description: 'Read-only feasibility check of a proposal or approved immutable plan. Compiles in memory without creating/changing a plan, checks workflow/version compatibility, role capability/permission contracts, scoped workspace-write roots, and plan/hash consistency. Run before workflow_approve; approval independently repeats the gate. A ready result is not approval or execution.', inputSchema: { type: 'object', additionalProperties: false, properties: { job_id: { type: 'string', minLength: 1, maxLength: 200 } }, required: ['job_id'] } },
+  { name: 'workflow_approve', description: 'State-changing approval: use only after workflow_preflight is ready, the proposal and proposed immutable plan are inspected, and explicit human approval is obtained. Re-runs feasibility checks, then pins the plan; do not edit it in place afterward. Approval is not dispatch—call workflow_dispatch next.', inputSchema: { type: 'object', properties: { job_id: { type: 'string', minLength: 1 }, confirmation: { type: 'string', minLength: 3, maxLength: 2000 } }, required: ['job_id', 'confirmation'] } },
   { name: 'workflow_dispatch', description: 'State-changing dispatch: use only for a proposal already approved with a current immutable plan. Starts the local workflow and creates its durable coordinator task; no cloud/remote worker is contacted. Then prepare tasks or use workflow_coordinator_step to advance.', inputSchema: { type: 'object', properties: { job_id: { type: 'string', minLength: 1 } }, required: ['job_id'] } },
   { name: 'workflow_prepare_tasks', description: 'State-changing task preparation/recovery: use after workflow_dispatch when the immutable plan\'s child tasks need creating or reconciling. Safe to repeat for the same approved plan; does not execute tasks. Next call workflow_next_task or workflow_coordinator_step.', inputSchema: { type: 'object', properties: { job_id: { type: 'string', minLength: 1 } }, required: ['job_id'] } },
   { name: 'workflow_next_task', description: 'Use after task preparation and after each recorded completion to obtain the next dependency-ready task, exact role contract and predecessor evidence. Deterministic tasks must use the approved task_execute_local/execute_batch path; specialist reasoning tasks use workflow_complete_task. If no task is ready or a gate blocks progress, inspect/diagnose rather than inventing a result.', inputSchema: { type: 'object', properties: { job_id: { type: 'string', minLength: 1 } }, required: ['job_id'] } },
   { name: 'workflow_diagnose', description: 'Read-only diagnosis when a local workflow is blocked, stuck, failed, or unexpectedly pending. Correlates task states, reviewer findings, stale/missing artifacts and safe next actions; it never mutates state. Use diagnosis before authorized rework/reviewer revision and never treat it as a repair or gate bypass.', inputSchema: { type: 'object', additionalProperties: false, properties: { job_id: { type: 'string', minLength: 1, maxLength: 200 } }, required: ['job_id'] } },
-  { name: 'workflow_request_rework', description: 'State-changing recovery for a supported standard-engineering v2 workflow after a completed reviewer decision when findings require specialist changes. Provide a concrete reason; this invalidates affected active artifacts and creates linked revision tasks while preserving plan and approval/CTO gates. It does not complete the work; diagnose first and re-run affected tasks/review.', inputSchema: { type: 'object', additionalProperties: false, properties: { job_id: { type: 'string', minLength: 1, maxLength: 200 }, reason: { type: 'string', minLength: 1, maxLength: 4000 } }, required: ['job_id', 'reason'] } },
-  { name: 'workflow_request_reviewer_revision', description: 'Narrow state-changing recovery: use only for an accepted standard-engineering v2 review blocked solely by documented evidenceIssues, with upstream evidence and acceptance flags otherwise valid. It invalidates/replaces the review artifact; it is not for security/implementation/blocking findings and never approves synthesis or weakens the contract.', inputSchema: { type: 'object', additionalProperties: false, properties: { job_id: { type: 'string', minLength: 1, maxLength: 200 }, reason: { type: 'string', minLength: 1, maxLength: 4000 } }, required: ['job_id', 'reason'] } },
+  { name: 'workflow_request_rework', description: 'State-changing review recovery, supported only when the exact immutable plan has workflow_id=standard-engineering and workflow_version>=2, and the job is active/EXECUTING with current approval. engineering@2 is not compatible. Use workflow_diagnose first; unsupported plans need a new proposal and approval, not retries. Rework preserves the immutable plan and approval gates and does not complete work.', inputSchema: { type: 'object', additionalProperties: false, properties: { job_id: { type: 'string', minLength: 1, maxLength: 200 }, reason: { type: 'string', minLength: 1, maxLength: 4000 } }, required: ['job_id', 'reason'] } },
+  { name: 'workflow_request_reviewer_revision', description: 'Narrow review recovery, supported only for workflow_id=standard-engineering and version>=2 in an active/EXECUTING job with current approval; use only for an accepted review blocked solely by evidenceIssues when all other acceptance flags/findings pass. engineering@2 is not compatible. Does not approve synthesis or weaken the contract.', inputSchema: { type: 'object', additionalProperties: false, properties: { job_id: { type: 'string', minLength: 1, maxLength: 200 }, reason: { type: 'string', minLength: 1, maxLength: 4000 } }, required: ['job_id', 'reason'] } },
   { name: 'workflow_complete_task', description: 'State-changing completion for a currently issued, dependency-ready non-deterministic local specialist task. Persist the actual result and typed artifact; record outcome=failed when work failed. Do not fabricate results or use this for deterministic tasks, which require task_execute_local/execute_batch. Request the next task after completion.', inputSchema: { type: 'object', properties: { task_id: { type: 'string', minLength: 1 }, content: { type: 'string', minLength: 1, maxLength: 1000000 }, artifact: { type: 'object' }, outcome: { type: 'string', enum: ['success', 'failed'], default: 'success' } }, required: ['task_id', 'content', 'artifact'] } },
-  { name: 'task_execute_local', description: 'State-changing local execution for one prepared deterministic task whose executable, arguments and workspace are fixed by the approved immutable plan. Use only when the task contract marks it deterministic; no arbitrary commands or remote execution are accepted. Inspect the actual exit/output and then request the next task.', inputSchema: { type: 'object', additionalProperties: false, properties: { task_id: { type: 'string', minLength: 1 }, timeout_ms: { type: 'integer', minimum: 1000, maximum: 600000 } }, required: ['task_id'] } },
+  { name: 'task_execute_local', description: 'State-changing local execution for one prepared deterministic task whose executable, arguments and workspace are fixed by the approved immutable plan. Do not use this route for any task whose immutable batch policy requires execute_batch, even for a single-item batch. No arbitrary commands or remote execution are accepted. Inspect the actual exit/output and then request the next task.', inputSchema: { type: 'object', additionalProperties: false, properties: { task_id: { type: 'string', minLength: 1 }, timeout_ms: { type: 'integer', minimum: 1000, maximum: 600000 } }, required: ['task_id'] } },
+  { name: 'workflow_write_files', description: 'State-changing, scope-limited workspace edit for a currently running built-in engineer/writer child of an approved standard-engineering v3+ workflow. Only plan-pinned relative paths are writable; each file must provide base_sha256 or ABSENT, and patch_id makes retries idempotent. No arbitrary commands, deletions, renames, symlink traversal, directory creation, custom roles or caller-supplied workspace roots. Inspect per-file receipts; reference receipt IDs in the typed task artifact. A multi-file patch can partially apply and will report that explicitly.', inputSchema: workflowWriteFilesSchema },
   { name: 'execute_batch', description: 'State-changing batch execution for 1–32 prepared, dependency-ready deterministic tasks within one approved active workflow. Use only tasks authorized for ExecutionManager; each is resolved from the immutable plan, and callers cannot supply command/args/cwd/timeout/role. Do not use for specialist reasoning tasks; inspect per-task outcomes and recover failures through the documented path.', inputSchema: { type: 'object', additionalProperties: false, properties: { job_id: { type: 'string', minLength: 1, maxLength: 200 }, task_ids: { type: 'array', minItems: 1, maxItems: MAX_EXECUTION_BATCH_ITEMS, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 200 } } }, required: ['job_id', 'task_ids'] } },
   { name: 'workflow_complete_synthesis', description: 'State-changing finalization: use only when all required tasks and evidence are ready and the coordinator has returned the synthesis contract. Record the typed CTO decision and exact success_assessment IDs/evidence_refs; the runtime independently checks task state, lineage, reviewer/QA gates and predicates. A call or narrative cannot bypass a failed gate; CASE-01 also requires the exact consumed workspace bytes.', inputSchema: { type: 'object', properties: { job_id: { type: 'string', minLength: 1 }, content: { type: 'string', minLength: 1, maxLength: 1000000 }, artifact: { type: 'object' }, consumed_workspace_bytes: { type: 'array', minItems: 2, maxItems: 2, items: { type: 'object', additionalProperties: false, properties: { path: { type: 'string', enum: ['config.json', 'result.json'] }, sha256: { type: 'string', pattern: '^[a-f0-9]{64}$' }, encoding: { type: 'string', enum: ['base64'] }, bytes: { type: 'string', maxLength: 2000000 } }, required: ['path', 'sha256', 'encoding', 'bytes'] } } }, required: ['job_id', 'content', 'artifact'] } },
   { name: 'workflow_events', description: 'Read-only view of a workflow\'s durable event history and observability summary. Use to reconstruct ordering or investigate an unexpected state; it does not change task/job state. Pair with workflow_get or workflow_diagnose when needed.', inputSchema: { type: 'object', properties: { job_id: { type: 'string', minLength: 1 }, limit: { type: 'integer', minimum: 1, maximum: 500 } }, required: ['job_id'] } },
@@ -789,6 +865,144 @@ function taskArtifactType(task) {
   return spec?.execution?.output_artifact_type || getAgentArtifactType(task.role);
 }
 
+function fingerprintWorkspaceForBatch(workspace) {
+  const root = path.resolve(workspace);
+  const digest = createHash('sha256');
+  const sourceRoots = ['server', 'src', 'tests', 'protocol'];
+  const allowedExtensions = new Set(['.js', '.mjs', '.cjs', '.json']);
+  const files = [];
+  function walk(abs, rel) {
+    const initial = fs.lstatSync(abs);
+    if (initial.isSymbolicLink()) throw new Error('workspace fingerprint refuses symlinked source entries: ' + rel);
+    if (initial.isDirectory()) {
+      const entries = fs.readdirSync(abs, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+      for (const entry of entries) walk(path.join(abs, entry.name), path.posix.join(rel, entry.name));
+      return;
+    }
+    if (!initial.isFile() || !allowedExtensions.has(path.extname(rel))) return;
+    files.push({ abs, rel: rel.replace(/\\/g, '/') });
+  }
+  for (const rel of sourceRoots) {
+    const abs = path.join(root, rel);
+    if (fs.existsSync(abs)) walk(abs, rel);
+  }
+  for (const entry of fs.readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isDirectory() && ['.js', '.mjs', '.cjs', '.json'].includes(path.extname(entry.name)) && entry.name !== 'package.json' && entry.name !== 'package-lock.json') {
+      walk(path.join(root, entry.name), entry.name);
+    }
+  }
+  for (const rel of ['package.json', 'package-lock.json']) {
+    const abs = path.join(root, rel);
+    if (fs.existsSync(abs)) walk(abs, rel);
+  }
+  files.sort((a, b) => a.rel.localeCompare(b.rel));
+  if (!files.length) throw new Error('workspace fingerprint found no source or test files');
+  for (const file of files) {
+    const before = fs.lstatSync(file.abs);
+    if (!before.isFile() || before.isSymbolicLink()) throw new Error('workspace fingerprint source changed while being read: ' + file.rel);
+    const content = fs.readFileSync(file.abs);
+    const after = fs.lstatSync(file.abs);
+    if (!after.isFile() || after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino ||
+        before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+      throw new Error('workspace fingerprint source changed while being read: ' + file.rel);
+    }
+    digest.update(String(Buffer.byteLength(file.rel))).update(':').update(file.rel)
+      .update(':').update(String(content.length)).update(':').update(content);
+  }
+  return digest.digest('hex');
+}
+
+function recordBatchPolicyDenial(jobId, taskId, plan, rejectedRoute, reasonCode) {
+  const planHash = typeof plan?.plan_hash === 'string' ? plan.plan_hash : 'unavailable';
+  const policyVersion = Number.isSafeInteger(plan?.batch_execution_policy?.schema_version) ? plan.batch_execution_policy.schema_version : null;
+  const payload = { jobId, taskId, planHash, policyVersion, rejectedRoute, reasonCode };
+  const dedupeKey = ['batch-policy-denied', taskId, planHash, rejectedRoute, reasonCode].join('|');
+  const eventIdValue = workflowStore.recordEvent(jobId, 'batch_execution.policy_denied', payload, dedupeKey);
+  const event = workflowStore.db.prepare('SELECT event_id,job_id,type,payload_json FROM events WHERE event_id=?').get(eventIdValue);
+  if (!event || event.job_id !== jobId || event.type !== 'batch_execution.policy_denied' || event.payload_json !== JSON.stringify(payload)) {
+    throw new Error('mandatory batch policy denial audit could not be durably verified');
+  }
+}
+
+function hasUnbatchedSchemaV1ExecutionHistory(task, plan) {
+  if (!task || (plan?.schema_version ?? 1) !== 1) return false;
+  const hasHistory = (Number.isSafeInteger(task.execution_attempt) && task.execution_attempt > 0) ||
+    Boolean(task.execution_session_id) || Boolean(task.execution_status) ||
+    Boolean(workflowStore.db.prepare('SELECT 1 FROM attempts WHERE task_id=? LIMIT 1').get(task.task_id));
+  return hasHistory && !workflowStore.db.prepare('SELECT 1 FROM execution_batch_items WHERE task_id=? LIMIT 1').get(task.task_id);
+}
+
+function assertMandatoryBatchEvidence(jobId, plan, children, workspace) {
+  const deterministicSpecs = (plan.children || []).filter(spec =>
+    spec.execution?.deterministic === true && spec.execution?.executor === 'ExecutionManager');
+  if (!deterministicSpecs.length) return { required: 0, verified: 0, fingerprint: null };
+  if (plan.batch_execution_policy?.mode === 'exempt') throw new Error('batch execution policy cannot exempt a plan containing deterministic local tasks');
+  const validationSpecIds = plan.batch_execution_policy?.validation_task_ids || [];
+  const currentFingerprint = plan.batch_execution_policy?.workspace_fingerprint_required ? fingerprintWorkspaceForBatch(workspace) : null;
+  let verified = 0;
+  for (const spec of deterministicSpecs) {
+    const route = batchExecutionPolicyRuntime.resolveTaskBatchRoute(plan, spec);
+    if (!route.required) continue;
+    const task = children.find(child => taskMetadata(child).workflow_plan_task_id === spec.id);
+    if (hasUnbatchedSchemaV1ExecutionHistory(task, plan)) {
+      throw new Error('migration-required: schema-v1 deterministic task has prior direct execution without genuine batch provenance; create a fresh approved schema-v2 workflow; do not replay this task');
+    }
+    if (!task || task.status !== 'completed' || task.execution_status !== 'completed' || task.execution_exit_code !== 0 ||
+        typeof task.execution_session_id !== 'string' || !task.execution_session_id.trim() ||
+        !Number.isSafeInteger(task.execution_attempt) || task.execution_attempt < 1) {
+      throw new Error('mandatory batch evidence is missing a successful durable task execution for plan task ' + spec.id);
+    }
+    const rows = workflowStore.db.prepare(`SELECT i.batch_id,i.task_id,i.command,i.cwd,i.timeout_ms,i.status AS item_status,
+        i.execution_session_id,i.execution_pid,i.exit_code,i.attempt AS item_attempt,
+        b.job_id AS batch_job_id,b.parent_task_id AS batch_parent_task_id,b.status AS batch_status,b.attempt AS batch_attempt
+      FROM execution_batch_items i JOIN execution_batches b ON b.batch_id=i.batch_id
+      WHERE i.task_id=? AND b.job_id=?`).all(task.task_id, jobId);
+    if (rows.length !== 1) throw new Error('mandatory batch evidence requires exactly one durable batch item for task ' + spec.id);
+    const row = rows[0];
+    const expectedCommand = canonicalStructuredExecutionCommand(spec.execution.executable, spec.execution.args);
+    if (row.batch_job_id !== jobId || row.batch_status !== 'COMPLETED' || row.item_status !== 'COMPLETED' || row.exit_code !== 0 ||
+        row.execution_session_id !== task.execution_session_id || row.item_attempt !== task.execution_attempt || row.item_attempt > row.batch_attempt ||
+        row.batch_parent_task_id !== task.parent_task_id || row.command !== expectedCommand ||
+        path.resolve(String(row.cwd || '')) !== path.resolve(String(spec.execution.cwd || workspace)) ||
+        Number(row.timeout_ms) !== Number(spec.execution.timeout_ms)) {
+      throw new Error('durable batch/item ledger does not match the immutable task contract and successful execution for ' + spec.id);
+    }
+    const creationRows = workflowStore.db.prepare("SELECT type,payload_json FROM events WHERE job_id=? AND type='execution.batch.created' AND json_extract(payload_json,'$.batchId')=?")
+      .all(jobId, row.batch_id);
+    const retryRows = workflowStore.db.prepare("SELECT type,payload_json FROM events WHERE job_id=? AND type='execution.batch.retry_started' AND json_extract(payload_json,'$.batchId')=? ORDER BY created_at ASC,rowid ASC")
+      .all(jobId, row.batch_id);
+    const terminalRows = workflowStore.db.prepare("SELECT type,payload_json FROM events WHERE job_id=? AND type IN ('execution.batch.completed','execution.batch.failed') AND json_extract(payload_json,'$.batchId')=? ORDER BY created_at ASC,rowid ASC")
+      .all(jobId, row.batch_id);
+    const batchItems = workflowStore.db.prepare("SELECT task_id,status,exit_code FROM execution_batch_items WHERE batch_id=? ORDER BY rowid ASC")
+      .all(row.batch_id);
+    try {
+      assertExecutionBatchRetryLineage({
+        batchId: row.batch_id,
+        creationEvents: creationRows.map(event => ({ type: event.type, payload: parseStrictJson(event.payload_json, 'batch creation evidence') })),
+        retryEvents: retryRows.map(event => ({ type: event.type, payload: parseStrictJson(event.payload_json, 'batch retry evidence') })),
+        terminalEvents: terminalRows.map(event => ({ type: event.type, payload: parseStrictJson(event.payload_json, 'batch terminal evidence') })),
+        finalAttempt: row.batch_attempt,
+        items: batchItems
+      });
+    } catch (error) {
+      throw new Error('mandatory batch evidence retry/terminal lineage rejected for ' + spec.id + ': ' + String(error?.message || error));
+    }
+    if (validationSpecIds.includes(spec.id)) {
+      if (!currentFingerprint) throw new Error('deterministic validation requires workspace fingerprint evidence but none was computed');
+      const fingerprintRows = workflowStore.db.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='execution.batch.workspace_fingerprint' AND json_extract(payload_json,'$.batchId')=?")
+        .all(jobId, row.batch_id);
+      if (fingerprintRows.length !== 1) throw new Error('deterministic validation batch lacks a unique workspace fingerprint record: ' + row.batch_id);
+      const fingerprint = parseStrictJson(fingerprintRows[0].payload_json, 'workspace fingerprint evidence');
+      if (fingerprint.planHash !== plan.plan_hash || fingerprint.fingerprint !== currentFingerprint || fingerprint.workspace !== path.resolve(workspace) ||
+          !Array.isArray(fingerprint.taskIds) || fingerprint.taskIds.filter(id => id === task.task_id).length !== 1) {
+        throw new Error('workspace source/test fingerprint changed after deterministic validation for plan task ' + spec.id);
+      }
+    }
+    verified++;
+  }
+  return { required: deterministicSpecs.length, verified, fingerprint: currentFingerprint };
+}
+
 function plannedArtifactType(spec) {
   if (spec?.execution?.output_artifact_type) return spec.execution.output_artifact_type;
   try { return getAgentArtifactType(spec?.role); } catch { return null; }
@@ -945,6 +1159,101 @@ function proposalFor(jobId) {
   return proposal.payload || {};
 }
 
+function workflowPreflight(jobId) {
+  const blockers = [];
+  let job;
+  let proposal;
+  let candidatePlan = null;
+  let existingPlan = null;
+  let customWorkflow = null;
+  try {
+    job = workflowStore.getJob(jobId);
+    if (!job) return { status: 'blocked', ready: false, job_id: jobId, blockers: [{ code: 'WORKFLOW_NOT_FOUND', category: 'invalid_state', message: `workflow not found: ${jobId}` }], warnings: [], next_actions: [] };
+    const eligiblePreflightStates = new Set(['IDLE', 'PROPOSED', 'DISCUSSING', 'APPROVED']);
+    if (job.status !== 'active' || !eligiblePreflightStates.has(String(job.state || '').toUpperCase())) {
+      return { status: 'blocked', ready: false, job_id: jobId, job_state: job.state, job_status: job.status,
+        blockers: [{ code: 'WORKFLOW_PREFLIGHT_INVALID_STATE', category: 'invalid_state', message: 'Feasibility preflight is available only for an active proposal or an approved, not-yet-dispatched workflow.' }],
+        warnings: [], next_actions: [{ tool: 'workflow_get', reason: 'Inspect the current durable state; do not approve or dispatch a terminal or already executing workflow.' }], read_only: true, execution_started: false };
+    }
+    proposal = proposalFor(jobId);
+    if (typeof proposal.workspace !== 'string' || !proposal.workspace.trim() || typeof proposal.workflowId !== 'string' || !proposal.workflowId.trim()) {
+      return { status: 'blocked', ready: false, job_id: jobId, blockers: [{ code: 'WORKFLOW_PROPOSAL_INCOMPLETE', category: 'validation_failure', message: 'Proposal must pin a workflow ID and a concrete local workspace before it can be approved.' }], warnings: [], next_actions: [{ tool: 'workflow_create', reason: 'Create a complete proposal with a supported template and an existing workspace.' }] };
+    }
+    const workspaceStat = fs.lstatSync(proposal.workspace, { throwIfNoEntry: false });
+    if (!workspaceStat?.isDirectory() || workspaceStat.isSymbolicLink() || fs.realpathSync(proposal.workspace) !== path.resolve(proposal.workspace)) {
+      return { status: 'blocked', ready: false, job_id: jobId, workflow_id: proposal.workflowId, blockers: [{ code: 'WORKSPACE_UNAVAILABLE', category: 'validation_failure', message: 'The proposal workspace is missing or is not a directory.' }], warnings: [], next_actions: [{ tool: 'workflow_create', reason: 'Create a new proposal bound to an existing local workspace; approved plans cannot be edited in place.' }] };
+    }
+    if (proposal.customWorkflowPlanId) {
+      customWorkflow = customWorkflows.getApprovedCustomWorkflowExecutionSpec(workflowStore.db, proposal.customWorkflowPlanId);
+      if (customWorkflow.workflow.workflow_id !== proposal.customWorkflowId || customWorkflow.workflow.version !== proposal.customWorkflowVersion || customWorkflow.plan_hash !== proposal.customWorkflowPlanHash) {
+        return { status: 'blocked', ready: false, job_id: jobId, workflow_id: proposal.workflowId, blockers: [{ code: 'CUSTOM_WORKFLOW_PLAN_MISMATCH', category: 'policy_denial', message: 'Approved custom workflow preview does not match the exact workflow version/hash pinned in this proposal.' }], warnings: [], next_actions: [{ tool: 'custom_workflow_get', reason: 'Inspect the immutable definition and preview; create a new run from the exact approved plan if it is stale.' }] };
+      }
+    }
+    const roleProfiles = resolveRoleProfilesForProposal(proposal);
+    const policyPacks = policyContracts.getWorkflowPolicySnapshotsForJob(workflowStore.db, jobId);
+    try { existingPlan = workflowStore.getExecutionPlan(jobId); }
+    catch (error) {
+      blockers.push({ code: 'IMMUTABLE_PLAN_INVALID', category: 'policy_denial', message: String(error?.message || error) });
+    }
+    candidatePlan = workflowCompiler.compileWorkflowPlan(job, {
+      workspace: proposal.workspace,
+      customWorkflow,
+      successContract: proposal.success_contract,
+      policyPacks,
+      roleProfiles,
+      requiredOperations: proposal.required_operations || [],
+      workspaceWriteScopes: proposal.workspace_write_scopes || [],
+      validationProfileSelector: proposal.validation_profile ?? null,
+      workflowVersion: existingPlan?.workflow_id === 'standard-engineering' ? existingPlan.workflow_version : null,
+      batchExecutionPolicy: existingPlan ? (Object.hasOwn(existingPlan, 'batch_execution_policy') ? existingPlan.batch_execution_policy : null) : undefined
+    });
+    if (existingPlan && existingPlan.plan_hash !== candidatePlan.plan_hash) {
+      blockers.push({ code: 'IMMUTABLE_PLAN_MISMATCH', category: 'policy_denial', message: 'The persisted immutable plan differs from a read-only compilation of the current proposal, role profiles, policy snapshots, and workspace scopes.' });
+    }
+  } catch (error) {
+    const code = error?.code || 'WORKFLOW_PREFLIGHT_FAILED';
+    blockers.push({ code, category: error?.category || (String(code).startsWith('WORKSPACE_WRITE') || String(code).startsWith('WORKSPACE_SCOPE') ? 'permission_denied' : 'validation_failure'), message: String(error?.message || error), details: error?.details || {} });
+  }
+  const ready = blockers.length === 0 && Boolean(candidatePlan);
+  const nextActions = ready
+    ? (existingPlan && String(job?.state || '').toUpperCase() === 'APPROVED'
+      ? [{ tool: 'workflow_dispatch', reason: 'The exact approved immutable plan still matches the current proposal and passed read-only preflight.' }]
+      : [{ tool: 'workflow_approve', reason: 'Inspect the proposal, plan hash, operations and scopes, then obtain explicit human approval.' }])
+    : [{ tool: 'workflow_create', reason: 'The current proposal cannot be repaired after plan approval. Resolve the listed structural blockers in a new proposal, then re-run workflow_preflight before approval.' }];
+  return {
+    status: ready ? 'ready' : 'blocked',
+    ready,
+    job_id: jobId,
+    job_state: job?.state || null,
+    job_status: job?.status || null,
+    workflow_id: candidatePlan?.workflow_id || proposal?.workflowId || null,
+    workflow_version: candidatePlan?.workflow_version || null,
+    candidate_plan_hash: candidatePlan?.plan_hash || null,
+    stored_plan_hash: existingPlan?.plan_hash || null,
+    immutable_plan_pinned: Boolean(existingPlan),
+    validation_profile: candidatePlan?.validation_profile ? { profile_id: candidatePlan.validation_profile.profile_id, profile_version: candidatePlan.validation_profile.profile_version, content_hash: candidatePlan.validation_profile.content_hash, route: candidatePlan.validation_profile.route, task_count: candidatePlan.validation_profile.task_contracts.length } : null,
+    required_operations: candidatePlan?.required_operations || [],
+    workspace_write_scopes: (candidatePlan?.workspace_write_scopes || []).map(scope => ({ role: scope.role, paths: scope.paths })),
+    task_execution_paths: candidatePlan ? [...candidatePlan.children, candidatePlan.synthesis].map(task => ({
+      task_id: task.id, role: task.role, capability: task.capability || null,
+      executor: task.execution?.executor || null, deterministic: task.execution?.deterministic === true,
+      execution_mode: task.execution?.execution_mode || (task.execution?.deterministic ? 'deterministic-local' : 'host-conversation'),
+      validation_profile: task.execution?.validation_profile_id ? { profile_id: task.execution.validation_profile_id, profile_version: task.execution.validation_profile_version, task_id: task.execution.validation_profile_task_id } : null,
+      local_only: task.execution?.local_only === true,
+      workspace_write_authorized: Boolean(task.execution?.workspace_write_contract)
+    })) : [],
+    blockers,
+    warnings: [],
+    next_actions: nextActions,
+    read_only: true,
+    execution_started: false
+  };
+}
+
+function makeWorkflowToolError(code, category, message, details = {}) {
+  return new workflowToolErrors.WorkflowToolError(message, { code, category, ...details });
+}
+
 function resolveRoleProfilesForProposal(proposal) {
   return roleProfilesRuntime.resolveRoleProfileBindings(workflowStore.db, proposal?.role_profile_bindings || []);
 }
@@ -1086,6 +1395,7 @@ function taskSummary(task) {
     plan_task_id: metadata.workflow_plan_task_id || null,
     deterministic: metadata.deterministic === true,
     executor: metadata.executor || null,
+    workspace_write_contract: metadata.workspace_write_contract || null,
     created_at: task.created_at,
     updated_at: task.updated_at
   };
@@ -1172,6 +1482,9 @@ async function executeDurableBatch(args) {
     if (!task) throw new Error(`execute_batch task not found: ${taskId}`);
     if (task.job_id !== jobId) throw new Error(`execute_batch task belongs to a different workflow: ${taskId}`);
     if (task.parent_task_id !== parent.task_id) throw new Error(`execute_batch task does not belong to the active CTO parent: ${taskId}`);
+    if (hasUnbatchedSchemaV1ExecutionHistory(task, plan)) {
+      throw new Error('migration-required: schema-v1 deterministic task has prior direct execution without genuine batch provenance; create a fresh approved schema-v2 workflow; do not replay this task');
+    }
     if (task.status !== 'pending') throw new Error(`execute_batch task is not pending and eligible for a first batch attempt: ${taskId}`);
     if (task.execution_status != null || task.execution_session_id != null ||
         (task.execution_attempt != null && task.execution_attempt !== 0)) {
@@ -1187,6 +1500,9 @@ async function executeDurableBatch(args) {
     if (!planned || String(planned.role).toLowerCase() !== String(task.role).toLowerCase() ||
         taskByPlanId.get(planned.id)?.task_id !== task.task_id) {
       throw new Error(`execute_batch task role/parent does not match its immutable plan binding: ${taskId}`);
+    }
+    if (!batchExecutionPolicyRuntime.resolveTaskBatchRoute(plan, planned).required) {
+      throw new Error(`execute_batch received a task that is not marked for deterministic batch routing: ${taskId}`);
     }
     if (metadata.deterministic !== true || metadata.executor !== 'ExecutionManager' ||
         typeof metadata.executable !== 'string' || !metadata.executable ||
@@ -1230,6 +1546,21 @@ async function executeDurableBatch(args) {
   // this allows truly parallel, dependency-ready plan children such as the
   // production architect and behavioral-QA checks without accepting a role
   // supplied by the caller.
+  const batchCwds = new Set(tasks.map(item => item.executionCwd));
+  if (batchCwds.size !== 1) throw new Error('execute_batch may group only tasks with the same approved working directory');
+  const occupiedResources = new Map();
+  for (const { task, planned } of tasks) {
+    const locks = [
+      ...(Array.isArray(planned.execution?.resource_locks) ? planned.execution.resource_locks : []),
+      ...(Array.isArray(planned.execution?.exclusive_resources) ? planned.execution.exclusive_resources : [])
+    ].filter(value => typeof value === 'string' && value.length);
+    for (const lock of locks) {
+      if (occupiedResources.has(lock)) {
+        throw new Error(`execute_batch resource conflict on ${lock}: tasks ${occupiedResources.get(lock)} and ${task.task_id} cannot share a batch`);
+      }
+      occupiedResources.set(lock, task.task_id);
+    }
+  }
   const items = tasks.map(({ task, metadata, executionCwd, canonicalCommand }) => ({
     taskId: task.task_id,
     command: canonicalCommand,
@@ -1249,6 +1580,12 @@ async function executeDurableBatch(args) {
   };
   validateExecutionBatch(preflight);
 
+  // Capture the approved source/test snapshot immediately before batch validation.
+  // If source changes after the successful run, synthesis rejects this evidence.
+  const validationTaskIds = plan.batch_execution_policy?.validation_task_ids || [];
+  const needsWorkspaceFingerprint = plan.batch_execution_policy?.workspace_fingerprint_required === true &&
+    tasks.some(({ planned }) => validationTaskIds.includes(planned.id));
+  const workspaceFingerprint = needsWorkspaceFingerprint ? fingerprintWorkspaceForBatch(approvedWorkspace) : null;
   // Persistence begins only after every task passed complete authorization and
   // protocol validation. The store and manager provide their own transaction,
   // claim CAS, spawn authorization, terminal-ledger, and recovery fences.
@@ -1257,6 +1594,17 @@ async function executeDurableBatch(args) {
     role: 'system-workflow-coordinator',
     items
   });
+  if (workspaceFingerprint) {
+    const fingerprintPayload = {
+      batchId: batch.batch_id, planHash: plan.plan_hash, workspace: approvedWorkspace,
+      fingerprint: workspaceFingerprint, taskIds: tasks.map(item => item.task.task_id).sort()
+    };
+    const fingerprintEventId = workflowStore.recordEvent(jobId, 'execution.batch.workspace_fingerprint', fingerprintPayload, batch.batch_id + '|workspace-fingerprint');
+    const fingerprintEvent = workflowStore.db.prepare('SELECT event_id,job_id,type,payload_json FROM events WHERE event_id=?').get(fingerprintEventId);
+    if (!fingerprintEvent || fingerprintEvent.job_id !== jobId || fingerprintEvent.type !== 'execution.batch.workspace_fingerprint' || fingerprintEvent.payload_json !== JSON.stringify(fingerprintPayload)) {
+      throw new Error(`workspace fingerprint event did not persist exact evidence for batch ${batch.batch_id}`);
+    }
+  }
   await executionManager.executeBatch(batch.batch_id);
 
   const persistedBatch = workflowStore.getExecutionBatch(batch.batch_id);
@@ -1328,6 +1676,14 @@ async function callTool(name, args) {
     }
     case 'workflow_catalog':
       return { workflows: Object.entries(WORKFLOWS).map(([id, value]) => ({ id, ...value })) };
+    case 'workflow_recommend_resources': {
+      assertOnlyKeys(args, ['task', 'limit'], name);
+      const task = assertString(args.task, 'task', 12000);
+      if (args.limit != null && (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 10)) {
+        throw new Error('limit must be an integer from 1 to 10');
+      }
+      return resourceRecommender.recommendReusableResources(workflowStore.db, task, { limit: args.limit });
+    }
     case 'workflow_policy_catalog': {
       assertOnlyKeys(args, [], name);
       return policyContracts.getWorkflowPolicyCatalog();
@@ -1381,7 +1737,10 @@ async function callTool(name, args) {
       }
       const baseContract = proposal.success_contract || { goal: proposal.task || job.title };
       const roleProfiles = resolveRoleProfilesForProposal(proposal);
-      const planPreview = workflowCompiler.compileWorkflowPlan(job, { workspace: proposal.workspace, customWorkflow, successContract: baseContract, roleProfiles });
+      const planPreview = workflowCompiler.compileWorkflowPlan(job, {
+        workspace: proposal.workspace, customWorkflow, successContract: baseContract, roleProfiles,
+        requiredOperations: proposal.required_operations || [], workspaceWriteScopes: proposal.workspace_write_scopes || []
+      });
       const policy = policyContracts.getWorkflowPolicy(workflowStore.db, policyId, args.version);
       if (!policy) throw new Error(`workflow policy version not found: ${policyId}${args.version == null ? '' : `@${args.version}`}`);
       const { created_at: policyCreatedAt, created_by: policyCreatedBy, ...policySnapshot } = policy;
@@ -1484,14 +1843,175 @@ async function callTool(name, args) {
       if (!stat?.isDirectory()) throw new Error(`workspace is not an existing local directory: ${workspace}`);
       const roleBindings = roleProfilesRuntime.normalizeRoleProfileBindings(workflowStore.db, workflow, args.role_bindings || []);
       const successContract = successContracts.normalizeSuccessContract(args, task);
+      // Reject structurally impossible operation/scope requests before creating
+      // a durable proposal. Approval repeats compilation against the real job,
+      // exact role/profile snapshots, and current policy state.
+      try {
+        workflowCompiler.compileWorkflowPlan({ job_id: 'proposal-feasibility-check', title: `${template.titlePrefix}: ${title}` }, {
+          workspace, successContract,
+          roleProfiles: resolveRoleProfilesForProposal({ role_profile_bindings: roleBindings }),
+          requiredOperations: args.required_operations || [],
+          workspaceWriteScopes: args.workspace_write_scopes || [],
+          validationProfileSelector: args.validation_profile ?? null
+        });
+      } catch (error) {
+        if (/^(WORKSPACE_|WORKFLOW_OPERATION_)/.test(String(error?.code || ''))) {
+          throw makeWorkflowToolError(error.code, error.category || 'validation_failure', String(error.message || error), {
+            workflow_id: workflow, workflow_version: workflow === 'standard-engineering' ? 3 : null,
+            capability: 'workspace.write', retryable: false, side_effects: [], workspace_mutation_status: 'not_modified',
+            next_actions: [{ tool: 'workflow_create', reason: 'Correct required_operations and explicit role-specific relative path scopes, then create a fresh proposal.' }],
+            details: error.details || {}
+          });
+        }
+        throw error;
+      }
       const job = workflowStore.createJob({ conversationKey: `chat-on-steroids:${randomUUID()}`, title: `${template.titlePrefix}: ${title}` });
-      workflowStore.recordEvent(job.job_id, 'job.proposal_requested', { task, workspace, workflowId: workflow, executionTarget: 'local', success_contract: successContract, role_profile_bindings: roleBindings }, job.job_id);
-      return { created: true, job_id: job.job_id, title: job.title, state: job.state, status: job.status, workflow, workspace, success_contract: successContract, role_profile_bindings: roleBindings, requires_explicit_approval: true };
+      workflowStore.recordEvent(job.job_id, 'job.proposal_requested', {
+        task, workspace, workflowId: workflow, executionTarget: 'local', success_contract: successContract,
+        role_profile_bindings: roleBindings,
+        required_operations: args.required_operations || [],
+        workspace_write_scopes: args.workspace_write_scopes || [],
+        ...(args.validation_profile ? { validation_profile: args.validation_profile } : {})
+      }, job.job_id);
+      return { created: true, job_id: job.job_id, title: job.title, state: job.state, status: job.status, workflow, workspace, success_contract: successContract, role_profile_bindings: roleBindings, validation_profile: args.validation_profile || null, requires_explicit_approval: true };
     }
     case 'workflow_list':
       return { workflows: workflowStore.listActiveJobs(args.limit || 50).map(job => ({ ...job, title: redactText(job.title) })), stats: workflowStore.getStats() };
     case 'workflow_get':
       return getWorkflow(assertString(args.job_id, 'job_id', 200));
+    case 'workflow_liveness_diagnostics': {
+      assertOnlyKeys(args, ['job_id', 'limit', 'stale_after_ms'], name);
+      return getJobLivenessDiagnostics(workflowStore.db, {
+        jobId: args.job_id ?? null,
+        limit: args.limit ?? 25,
+        staleAfterMs: args.stale_after_ms ?? 15 * 60 * 1000
+      });
+    }
+    case 'workflow_preflight':
+      assertOnlyKeys(args, ['job_id'], 'workflow_preflight');
+      return workflowPreflight(assertString(args.job_id, 'job_id', 200));
+    case 'workflow_write_files': {
+      assertOnlyKeys(args, ['job_id', 'task_id', 'patch_id', 'writes'], 'workflow_write_files');
+      const jobId = assertString(args.job_id, 'job_id', 200);
+      const taskId = assertString(args.task_id, 'task_id', 200);
+      const patchId = assertString(args.patch_id, 'patch_id', 120);
+      const job = workflowStore.getJob(jobId);
+      const task = workflowStore.getTask(taskId);
+      const plan = workflowStore.getExecutionPlan(jobId);
+      const deny = (code, category, message, extra = {}) => { throw makeWorkflowToolError(code, category, message, {
+        job_id: jobId, workflow_id: plan?.workflow_id || null, workflow_version: plan?.workflow_version || null,
+        job_state: job?.state || null, task_id: taskId, capability: 'workspace.write', retryable: false,
+        side_effects: [], workspace_mutation_status: 'not_modified', ...extra
+      }); };
+      if (!job || !task || task.job_id !== jobId) deny('WORKSPACE_WRITE_TASK_MISMATCH', 'invalid_state', 'Task does not belong to the requested workflow.');
+      if (job.status !== 'active' || String(job.state).toUpperCase() !== 'EXECUTING') deny('WORKFLOW_NOT_EXECUTING', 'invalid_state', 'Workspace writes require an active EXECUTING workflow.');
+      if (!plan || plan.workflow_id !== 'standard-engineering' || plan.workflow_version < 3 || !plan.required_operations?.includes('workspace.write')) {
+        deny('WORKSPACE_WRITE_UNSUPPORTED_PLAN', 'unsupported_operation', 'Workspace writes require an approved standard-engineering v3+ plan that pins workspace.write.');
+      }
+      if (!workflowStore.isApprovalCurrent(jobId)) deny('WORKFLOW_APPROVAL_NOT_CURRENT', 'policy_denial', 'The current approval does not authorize this plan.');
+      const proposal = proposalFor(jobId);
+      const workspace = fs.realpathSync(proposal.workspace);
+      let revalidatedPlan;
+      try { revalidatedPlan = workflowStore.compileExecutionPlan(jobId, { workspace }); }
+      catch (error) { deny('IMMUTABLE_PLAN_MISMATCH', 'policy_denial', `Current proposal cannot be revalidated against the immutable plan: ${String(error?.message || error)}`); }
+      if (revalidatedPlan?.plan_hash !== plan.plan_hash) deny('IMMUTABLE_PLAN_MISMATCH', 'policy_denial',
+        `Current proposal no longer compiles to the approved immutable plan (candidate=${revalidatedPlan?.plan_hash || 'none'}, approved=${plan.plan_hash}).`,
+        { details: { candidate_plan_hash: revalidatedPlan?.plan_hash || null, approved_plan_hash: plan.plan_hash } });
+      const planTaskId = taskMetadata(task).workflow_plan_task_id;
+      const planned = plan.children.find(item => item.id === planTaskId);
+      const writeContract = planned?.execution?.workspace_write_contract;
+      const scope = workspaceWriteContractRuntime.workspaceWriteScopeForRole({
+        required_operations: plan.required_operations,
+        scopes: plan.workspace_write_scopes
+      }, task.role);
+      if (!planned || planned.role !== task.role || !writeContract || !scope ||
+          writeContract.role !== task.role || !['engineer', 'writer'].includes(task.role) ||
+          !['running'].includes(String(task.status).toLowerCase())) {
+        deny('WORKSPACE_WRITE_TASK_NOT_AUTHORIZED', 'permission_denied', 'Task is not a running built-in engineer/writer task with an exact plan-pinned write scope.');
+      }
+      if (!Array.isArray(args.writes) || args.writes.length < 1 || args.writes.length > 16) deny('WORKSPACE_WRITE_REQUEST_INVALID', 'validation_failure', 'writes must contain 1..16 file changes.');
+      const requestHash = createHash('sha256').update(JSON.stringify({ jobId, taskId, patchId, writes: args.writes })).digest('hex');
+      const validated = [];
+      const seenPaths = new Set();
+      for (const [index, write] of args.writes.entries()) {
+        if (!write || typeof write !== 'object' || Array.isArray(write) || Object.keys(write).some(key => !['path', 'base_sha256', 'content'].includes(key)) ||
+            typeof write.path !== 'string' || typeof write.content !== 'string' || Buffer.byteLength(write.content, 'utf8') > 2_000_000 ||
+            !/^(ABSENT|[a-f0-9]{64})$/.test(write.base_sha256 || '')) {
+          deny('WORKSPACE_WRITE_REQUEST_INVALID', 'validation_failure', `writes[${index}] has invalid path, content, or base_sha256.`);
+        }
+        if (!workspaceWriteContractRuntime.pathIsWithinWorkspaceWriteScope(write.path, scope)) deny('WORKSPACE_WRITE_SCOPE_DENIED', 'permission_denied', `Path is outside the approved ${task.role} workspace scope: ${write.path}`);
+        if (seenPaths.has(write.path)) deny('WORKSPACE_WRITE_REQUEST_INVALID', 'validation_failure', `Duplicate path in one patch: ${write.path}`);
+        seenPaths.add(write.path);
+        const prior = workflowStore.db.prepare('SELECT * FROM workspace_write_receipts WHERE job_id=? AND task_id=? AND patch_id=? AND path=?').get(jobId, taskId, patchId, write.path);
+        if (prior && prior.request_hash !== requestHash) deny('WORKSPACE_WRITE_PATCH_ID_REUSED', 'policy_denial', 'patch_id was already used with a different request payload.');
+        let currentBytes = null;
+        try { currentBytes = readFileWithin(workspace, write.path); }
+        catch (error) { if (error?.code !== 'ENOENT') deny('WORKSPACE_WRITE_TARGET_INVALID', 'validation_failure', `Cannot safely inspect ${write.path}: ${String(error?.message || error)}`); }
+        const currentHash = currentBytes === null ? null : createHash('sha256').update(currentBytes).digest('hex');
+        const intendedHash = createHash('sha256').update(write.content, 'utf8').digest('hex');
+        if (currentHash !== intendedHash && (write.base_sha256 === 'ABSENT' ? currentHash !== null : currentHash !== write.base_sha256)) {
+          deny('WORKSPACE_WRITE_BASE_HASH_MISMATCH', 'validation_failure', `Base SHA-256 precondition does not match current bytes for ${write.path}; no files were changed.`,
+            { evidence_missing: [write.path], details: { expected_sha256: write.base_sha256, observed_sha256: currentHash } });
+        }
+        validated.push({ ...write, prior });
+      }
+      const receipts = [];
+      const failures = [];
+      for (const write of validated) {
+        if (write.prior) { receipts.push({ receipt_id: write.prior.receipt_id, path: write.path, outcome: write.prior.outcome, after_sha256: write.prior.after_sha256, size_bytes: write.prior.size_bytes, replayed: true }); continue; }
+        let observedMutation = null;
+        try {
+          workflowStore.db.exec('BEGIN IMMEDIATE');
+          try {
+            const currentJob = workflowStore.getJob(jobId);
+            const currentTask = workflowStore.getTask(taskId);
+            if (!currentJob || currentJob.status !== 'active' || currentJob.state !== 'EXECUTING' || !currentTask || currentTask.status !== 'running' ||
+                !workflowStore.isApprovalCurrent(jobId) || workflowStore.getExecutionPlan(jobId)?.plan_hash !== plan.plan_hash) {
+              throw new Error('workflow/task/approval changed during workspace write; inspect file bytes before recovery');
+            }
+            const racedReceipt = workflowStore.db.prepare('SELECT * FROM workspace_write_receipts WHERE job_id=? AND task_id=? AND patch_id=? AND path=?')
+              .get(jobId, taskId, patchId, write.path);
+            if (racedReceipt) {
+              if (racedReceipt.request_hash !== requestHash) throw new Error('patch_id was concurrently reused with a different request payload');
+              workflowStore.db.exec('COMMIT');
+              receipts.push({ receipt_id: racedReceipt.receipt_id, path: racedReceipt.path, outcome: racedReceipt.outcome,
+                after_sha256: racedReceipt.after_sha256, size_bytes: racedReceipt.size_bytes, replayed: true });
+              continue;
+            }
+            const result = replaceFileWithin(workspace, write.path, write.content, { expectedSha256: write.base_sha256, maxBytes: 2_000_000 });
+            if (result.changed) observedMutation = { path: write.path, outcome: result.outcome, before_sha256: result.before_sha256 || 'ABSENT', after_sha256: result.after_sha256, size_bytes: result.size_bytes };
+            const receiptId = `wwr_${createHash('sha256').update(`${jobId}\0${taskId}\0${patchId}\0${write.path}`).digest('hex').slice(0, 32)}`;
+            const outcome = result.outcome;
+            workflowStore.db.prepare(`INSERT INTO workspace_write_receipts
+              (receipt_id,job_id,task_id,plan_hash,patch_id,request_hash,path,outcome,before_sha256,after_sha256,size_bytes,created_at)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(receiptId, jobId, taskId, plan.plan_hash, patchId, requestHash, write.path, outcome,
+              result.before_sha256 || 'ABSENT', result.after_sha256, result.size_bytes, new Date().toISOString());
+            workflowStore.recordEvent(jobId, 'workflow.workspace_file_written', {
+              receipt_id: receiptId, task_id: taskId, plan_hash: plan.plan_hash, patch_id: patchId, request_hash: requestHash,
+              path: write.path, outcome, before_sha256: result.before_sha256 || 'ABSENT', after_sha256: result.after_sha256, size_bytes: result.size_bytes
+            }, `${receiptId}:${requestHash}`);
+            workflowStore.db.exec('COMMIT');
+            receipts.push({ receipt_id: receiptId, path: write.path, outcome, before_sha256: result.before_sha256 || 'ABSENT', after_sha256: result.after_sha256, size_bytes: result.size_bytes });
+          } catch (error) { workflowStore.db.exec('ROLLBACK'); throw error; }
+        } catch (error) {
+          failures.push({ path: write.path, code: observedMutation ? 'WORKSPACE_WRITE_RECEIPT_UNRESOLVED' : (error?.code || 'WORKSPACE_WRITE_FAILED'), message: String(error?.message || error), observed_mutation: observedMutation });
+          break;
+        }
+      }
+      if (failures.length) throw makeWorkflowToolError('WORKSPACE_WRITE_PARTIAL_OR_FAILED', 'validation_failure',
+        receipts.length ? 'Workspace patch partially applied; inspect per-file receipts before retrying.' : 'Workspace patch failed before any receipt was recorded.', {
+          category: failures.some(item => item.observed_mutation) ? 'unresolved_execution_outcome' : 'validation_failure',
+          job_id: jobId, workflow_id: plan.workflow_id, workflow_version: plan.workflow_version, job_state: workflowStore.getJob(jobId)?.state,
+          task_id: taskId, capability: 'workspace.write', retryable: false, side_effects: [
+            ...receipts.map(item => ({ receipt_id: item.receipt_id, path: item.path, outcome: item.outcome })),
+            ...failures.filter(item => item.observed_mutation).map(item => ({ ...item.observed_mutation, receipt_id: null }))
+          ],
+          workspace_mutation_status: receipts.length && failures.some(item => item.observed_mutation) ? 'partial_unreceipted' : receipts.length ? 'partial' : failures.some(item => item.observed_mutation) ? 'unreceipted' : 'not_modified', evidence_missing: failures.map(item => item.path),
+          next_actions: [{ tool: 'workflow_write_files', reason: 'Inspect current file bytes and durable receipts. If bytes already match the intended content, replay only the exact same patch_id and identical request to reconcile the missing receipt; never infer success from the write alone.' }],
+          details: { receipts, failures, patch_id: patchId, request_hash: requestHash }
+        });
+      return { status: 'applied', job_id: jobId, task_id: taskId, patch_id: patchId, request_hash: requestHash, plan_hash: plan.plan_hash, receipts, atomic_across_files: false };
+    }
     case 'workflow_approve': {
       const jobId = assertString(args.job_id, 'job_id', 200);
       const confirmation = assertString(args.confirmation, 'confirmation', 2000);
@@ -1503,6 +2023,17 @@ async function callTool(name, args) {
       if (customWorkflow && (customWorkflow.workflow.workflow_id !== proposal.customWorkflowId || customWorkflow.workflow.version !== proposal.customWorkflowVersion || customWorkflow.plan_hash !== proposal.customWorkflowPlanHash)) {
         throw new Error('approved custom workflow preview no longer matches the execution proposal');
       }
+      const preflight = workflowPreflight(jobId);
+      if (!preflight.ready) {
+        const first = preflight.blockers[0] || {};
+        throw makeWorkflowToolError(first.code || 'WORKFLOW_PREFLIGHT_BLOCKED', first.category || 'validation_failure',
+          `Workflow approval blocked by preflight: ${first.message || 'the proposed execution plan is not feasible.'}`, {
+            job_id: jobId, workflow_id: preflight.workflow_id || proposal.workflowId,
+            workflow_version: preflight.workflow_version, job_state: workflowStore.getJob(jobId)?.state || null,
+            workspace_mutation_status: 'not_modified', side_effects: [], next_actions: preflight.next_actions,
+            details: { blockers: preflight.blockers, candidate_plan_hash: preflight.candidate_plan_hash || null }
+          });
+      }
       const roleProfiles = resolveRoleProfilesForProposal(proposal);
       const job = workflowStore.approve(jobId, confirmation, 'chat-on-steroids-user', { workspace: proposal.workspace, customWorkflow, successContract: proposal.success_contract, roleProfiles });
       return { approved: true, job_id: jobId, state: job.state, plan: workflowStore.getExecutionPlan(jobId), phase: workflowStore.getWorkflowRuntimeState(jobId)?.phase, execution_enabled: true, execution_authorized: true };
@@ -1510,6 +2041,17 @@ async function callTool(name, args) {
     case 'workflow_dispatch': {
       const jobId = assertString(args.job_id, 'job_id', 200);
       workflowStore.assertApprovalCurrent(jobId);
+      const preflight = workflowPreflight(jobId);
+      if (!preflight.ready) {
+        const first = preflight.blockers[0] || {};
+        throw makeWorkflowToolError(first.code || 'WORKFLOW_PREFLIGHT_BLOCKED', first.category || 'validation_failure',
+          `Dispatch blocked by preflight: ${first.message || 'the current immutable plan is not executable.'}`, {
+            job_id: jobId, workflow_id: preflight.workflow_id, workflow_version: preflight.workflow_version,
+            job_state: workflowStore.getJob(jobId)?.state || null, workspace_mutation_status: 'not_modified',
+            side_effects: [], next_actions: preflight.next_actions,
+            details: { blockers: preflight.blockers, stored_plan_hash: preflight.stored_plan_hash || null }
+          });
+      }
       const proposal = proposalFor(jobId);
       const plan = workflowStore.getExecutionPlan(jobId);
       const contractPrompt = successContracts.successContractPrompt(plan?.success_contract);
@@ -1569,43 +2111,58 @@ async function callTool(name, args) {
       }
       const running = children.find(task => task.status === 'running' && !task.execution_status);
       if (running) return { stage: 'task', task: taskSummary(running), expected_artifact: expectedArtifact(running), idempotent: true, completed_results: collectCompletedResults(jobId, children, running) };
-      // Hybrid engineering plans intentionally include independent local checks
-      // behind the implementation task. Execute all ready checks together when
-      // two or more are eligible, before handing the next host specialist off.
-      // executeDurableBatch revalidates the approved plan, parent, role/task
-      // bindings, exact command/cwd/args, attempts, and dependencies itself.
-      if (plan.workflow_id === 'hybrid-engineering') {
-        const done = completedPlanIds(children);
-        const readyBatch = children.filter(task => {
-          if (task.status !== 'pending') return false;
-          const metadata = taskMetadata(task);
-          const spec = plan.children.find(item => item.id === metadata.workflow_plan_task_id);
-          return spec && metadata.deterministic === true && metadata.executor === 'ExecutionManager' &&
-            spec.execution?.deterministic === true && spec.execution?.executor === 'ExecutionManager' &&
-            spec.dependencies.every(dep => done.has(dep));
-        });
-        if (readyBatch.length >= 2) {
-          let batch;
-          try {
-            batch = await executeDurableBatch({ job_id: jobId, task_ids: readyBatch.map(task => task.task_id) });
-          } catch (error) {
-            return { stage: 'blocked', job_id: jobId, reason: 'hybrid deterministic batch execution was rejected or failed preflight', error: String(error?.message || error), terminalized: false };
-          }
-          const batchEvidence = {
-            batch_id: batch.batch_id,
-            completed: batch.completed === true,
-            summary: batch.summary || null,
-            items: (batch.items || []).map(item => ({
-              task_id: item.task_id, role: item.role, status: item.status,
-              exit_code: item.exit_code ?? null, execution_session_id: item.execution_session_id || null
-            }))
-          };
-          if (!batch.completed) {
-            return { stage: 'blocked', job_id: jobId, reason: 'hybrid deterministic batch did not produce verified successful completion for every item', batch_executions: [batchEvidence], terminalized: false };
-          }
-          const next = await callTool('workflow_next_task', { job_id: jobId });
-          return { ...next, batch_executions: [...(next.batch_executions || []), batchEvidence] };
+      // Every deterministic ExecutionManager task covered by the immutable policy uses
+      // execute_batch, including a single ready task. Do not fall back to single-task
+      // execution. Group only compatible dependency-ready tasks and respect declared
+      // resource locks.
+      const done = completedPlanIds(children);
+      const proposal = proposalFor(jobId);
+      const readyCandidates = children.filter(task => {
+        if (task.status !== 'pending') return false;
+        const metadata = taskMetadata(task);
+        const spec = plan.children.find(item => item.id === metadata.workflow_plan_task_id);
+        return spec && metadata.deterministic === true && metadata.executor === 'ExecutionManager' &&
+          batchExecutionPolicyRuntime.resolveTaskBatchRoute(plan, spec).required &&
+          spec.dependencies.every(dep => done.has(dep));
+      });
+      if (readyCandidates.length) {
+        const firstSpec = plan.children.find(item => item.id === taskMetadata(readyCandidates[0]).workflow_plan_task_id);
+        const commonCwd = path.resolve(firstSpec.execution.cwd || proposal.workspace);
+        const selected = [];
+        const occupiedResources = new Set();
+        for (const candidate of readyCandidates) {
+          if (selected.length >= MAX_EXECUTION_BATCH_ITEMS) break;
+          const spec = plan.children.find(item => item.id === taskMetadata(candidate).workflow_plan_task_id);
+          if (path.resolve(spec.execution.cwd || proposal.workspace) !== commonCwd) continue;
+          const locks = [
+            ...(Array.isArray(spec.execution.resource_locks) ? spec.execution.resource_locks : []),
+            ...(Array.isArray(spec.execution.exclusive_resources) ? spec.execution.exclusive_resources : [])
+          ].filter(value => typeof value === 'string' && value.length);
+          if (locks.some(lock => occupiedResources.has(lock))) continue;
+          selected.push(candidate);
+          for (const lock of locks) occupiedResources.add(lock);
         }
+        if (!selected.length) selected.push(readyCandidates[0]);
+        let batch;
+        try {
+          batch = await executeDurableBatch({ job_id: jobId, task_ids: selected.map(task => task.task_id) });
+        } catch (error) {
+          return { stage: 'blocked', job_id: jobId, reason: 'mandatory deterministic batch execution was rejected or failed preflight', error: String(error?.message || error), terminalized: false };
+        }
+        const batchEvidence = {
+          batch_id: batch.batch_id,
+          completed: batch.completed === true,
+          summary: batch.summary || null,
+          items: (batch.items || []).map(item => ({
+            task_id: item.task_id, role: item.role, status: item.status,
+            exit_code: item.exit_code ?? null, execution_session_id: item.execution_session_id || null
+          }))
+        };
+        if (!batch.completed) {
+          return { stage: 'blocked', job_id: jobId, reason: 'mandatory deterministic batch did not produce verified successful completion for every item', batch_executions: [batchEvidence], terminalized: false };
+        }
+        const next = await callTool('workflow_next_task', { job_id: jobId });
+        return { ...next, batch_executions: [...(next.batch_executions || []), batchEvidence] };
       }
       const doneIds = completedPlanIds(children);
       const ready = children.find(task => {
@@ -1675,12 +2232,17 @@ async function callTool(name, args) {
       const substantiveReviewFindings = review?.decision === 'accept' &&
         ['implementationIssues', 'securityIssues', 'blockingIssues'].some(field => Array.isArray(review[field]) && review[field].length > 0);
       if (failed.length) actions.push({ tool: 'workflow_inspect_failure', reason: 'A failed/cancelled task needs investigation; this diagnostic does not retry it automatically.' });
+      const reviewRecovery = recoveryCompatibility.classifyReviewRecovery({ plan, job: trace.job });
       if ((review?.decision && ['needs_changes', 'reject'].includes(review.decision)) || substantiveReviewFindings) {
-        actions.push({ tool: 'workflow_request_rework', reason: substantiveReviewFindings
-          ? 'The review is labelled accept but still contains implementation, security, or blocking findings. Treat it as unresolved evidence: request formal specialist rework; synthesis remains blocked until a fresh review clears every finding.'
-          : 'Reviewer recorded findings; this creates linked specialist revisions and invalidates only the affected evidence.' });
+        actions.push(reviewRecovery.supported
+          ? { tool: 'workflow_request_rework', reason: substantiveReviewFindings
+            ? 'The review is labelled accept but still contains implementation, security, or blocking findings. Treat it as unresolved evidence: request formal specialist rework; synthesis remains blocked until a fresh review clears every finding.'
+            : 'Reviewer recorded findings; this creates linked specialist revisions and invalidates only the affected evidence.', retryable: false }
+          : { tool: reviewRecovery.next_action?.tool || 'workflow_get', code: reviewRecovery.code, reason: reviewRecovery.reason, retryable: false, suggested_action: reviewRecovery.next_action });
       }
-      else if (reviewerRevisionEligible) actions.push({ tool: 'workflow_request_reviewer_revision', reason: 'Review was accepted with all required acceptance flags and documented evidence limitations only; no implementation, security, or blocking findings remain.' });
+      else if (reviewerRevisionEligible) actions.push(reviewRecovery.supported
+        ? { tool: 'workflow_request_reviewer_revision', reason: 'Review was accepted with all required acceptance flags and documented evidence limitations only; no implementation, security, or blocking findings remain.', retryable: false }
+        : { tool: reviewRecovery.next_action?.tool || 'workflow_get', code: reviewRecovery.code, reason: reviewRecovery.reason, retryable: false, suggested_action: reviewRecovery.next_action });
       else if (children.length && children.every(task => task.status === 'completed')) {
         const reviewLooksReady = review?.decision === 'accept' &&
           ['requirementsSatisfied', 'architectureConformant', 'securityAccepted', 'qaAccepted', 'platformAccepted', 'documentationAccepted'].every(field => review[field] === true) &&
@@ -1704,11 +2266,21 @@ async function callTool(name, args) {
       assertOnlyKeys(args, ['job_id', 'reason'], 'workflow_request_rework');
       const jobId = assertString(args.job_id, 'job_id', 200);
       const reason = assertString(args.reason, 'reason', 4000);
-      workflowStore.assertApprovalCurrent(jobId);
       const job = workflowStore.getJob(jobId);
-      if (!job || job.state !== 'EXECUTING') throw new Error('workflow rework requires an executing workflow');
       const plan = workflowStore.getExecutionPlan(jobId);
-      if (!plan || String(plan.workflow_id).toLowerCase() !== 'standard-engineering' || Number(plan.workflow_version) < 2) throw new Error('workflow rework is only supported for standard-engineering workflow version 2 or later');
+      const compatibility = recoveryCompatibility.classifyReviewRecovery({ plan, job });
+      if (!compatibility.supported) {
+        throw makeWorkflowToolError(compatibility.code, compatibility.category, compatibility.reason, {
+          job_id: jobId, workflow_id: compatibility.workflow_id, workflow_version: compatibility.workflow_version,
+          job_state: compatibility.job_state, retryable: false, side_effects: [], workspace_mutation_status: 'not_modified',
+          next_actions: compatibility.next_action ? [compatibility.next_action] : []
+        });
+      }
+      if (!workflowStore.isApprovalCurrent(jobId)) throw makeWorkflowToolError('WORKFLOW_APPROVAL_NOT_CURRENT', 'policy_denial', 'Review rework requires the current approval to match the exact immutable proposal.', {
+        job_id: jobId, workflow_id: plan.workflow_id, workflow_version: plan.workflow_version, job_state: job.state,
+        retryable: false, side_effects: [], workspace_mutation_status: 'not_modified',
+        next_actions: [{ tool: 'workflow_get', reason: 'Inspect proposal and approval history; any changed proposal requires a new explicit approval.' }]
+      });
       const trace = workflowStore.getJobTrace(jobId);
       const parent = trace?.tasks.find(task => task.task_id === job.active_task_id && task.role === 'cto');
       if (!parent) throw new Error('active workflow coordinator task is missing');
@@ -1727,13 +2299,22 @@ async function callTool(name, args) {
       assertOnlyKeys(args, ['job_id', 'reason'], 'workflow_request_reviewer_revision');
       const jobId = assertString(args.job_id, 'job_id', 200);
       const reason = assertString(args.reason, 'reason', 4000);
-      workflowStore.assertApprovalCurrent(jobId);
       const job = workflowStore.getJob(jobId);
-      if (!job || job.state !== 'EXECUTING') throw new Error('reviewer revision requires an executing workflow');
       const plan = workflowStore.getExecutionPlan(jobId);
-      if (!plan || String(plan.workflow_id).toLowerCase() !== 'standard-engineering' || Number(plan.workflow_version) < 2) {
-        throw new Error('reviewer revision is only supported for standard-engineering workflow version 2 or later');
+      const compatibility = recoveryCompatibility.classifyReviewRecovery({ plan, job });
+      if (!compatibility.supported) {
+        throw makeWorkflowToolError(compatibility.code === 'WORKFLOW_REWORK_UNSUPPORTED' ? 'WORKFLOW_REVIEWER_REVISION_UNSUPPORTED' : compatibility.code,
+          compatibility.category, compatibility.reason, {
+            job_id: jobId, workflow_id: compatibility.workflow_id, workflow_version: compatibility.workflow_version,
+            job_state: compatibility.job_state, retryable: false, side_effects: [], workspace_mutation_status: 'not_modified',
+            next_actions: compatibility.next_action ? [compatibility.next_action] : []
+          });
       }
+      if (!workflowStore.isApprovalCurrent(jobId)) throw makeWorkflowToolError('WORKFLOW_APPROVAL_NOT_CURRENT', 'policy_denial', 'Reviewer revision requires the current approval to match the exact immutable proposal.', {
+        job_id: jobId, workflow_id: plan.workflow_id, workflow_version: plan.workflow_version, job_state: job.state,
+        retryable: false, side_effects: [], workspace_mutation_status: 'not_modified',
+        next_actions: [{ tool: 'workflow_get', reason: 'Inspect proposal and approval history; any changed proposal requires a new explicit approval.' }]
+      });
       const trace = workflowStore.getJobTrace(jobId);
       const parent = trace?.tasks.find(task => task.task_id === job.active_task_id && task.role === 'cto');
       if (!parent) throw new Error('active workflow coordinator task is missing');
@@ -1753,10 +2334,52 @@ async function callTool(name, args) {
       const job = workflowStore.getJob(task.job_id);
       if (!job || job.state !== 'EXECUTING') throw new Error('task workflow is not executing');
       workflowStore.assertApprovalCurrent(task.job_id);
+      const approvedPlan = workflowStore.getExecutionPlan(task.job_id);
+      const completionMetadata = taskMetadata(task);
+      const planTaskId = completionMetadata.workflow_plan_task_id;
+      const matchingPlanTasks = Array.isArray(approvedPlan?.children) && typeof planTaskId === 'string' && planTaskId
+        ? approvedPlan.children.filter(spec => spec.id === planTaskId) : [];
+      const plannedTask = matchingPlanTasks.length === 1 ? matchingPlanTasks[0] : null;
+      if (!approvedPlan || approvedPlan.job_id !== task.job_id || !plannedTask ||
+          String(plannedTask.role).toLowerCase() !== String(task.role).toLowerCase()) {
+        const migrationRequired = hasUnbatchedSchemaV1ExecutionHistory(task, approvedPlan);
+        recordBatchPolicyDenial(task.job_id, task.task_id, approvedPlan, 'workflow_complete_task',
+          migrationRequired ? 'migration_required_legacy_attempt' : 'immutable_plan_task_binding_invalid');
+        if (migrationRequired) throw new Error('migration-required: schema-v1 deterministic task has prior direct execution without genuine batch provenance; create a fresh approved schema-v2 workflow; do not terminalize this task');
+        throw new Error('workflow_complete_task requires an exact immutable plan task binding; direct completion is refused');
+      }
+      if (batchExecutionPolicyRuntime.resolveTaskBatchRoute(approvedPlan, plannedTask).required) {
+        const migrationRequired = hasUnbatchedSchemaV1ExecutionHistory(task, approvedPlan);
+        recordBatchPolicyDenial(task.job_id, task.task_id, approvedPlan, 'workflow_complete_task',
+          migrationRequired ? 'migration_required_legacy_attempt' : 'batch_route_required');
+        if (migrationRequired) throw new Error('migration-required: schema-v1 deterministic task has prior direct execution without genuine batch provenance; create a fresh approved schema-v2 workflow; do not terminalize this task');
+        throw new Error('deterministic task is batch-required by the immutable plan and cannot complete through workflow_complete_task');
+      }
       const tasks = getTasks(task.job_id);
       assertDependenciesCompleted(task, tasks);
       let artifactContent = redactValue(args.artifact);
       const outcome = args.outcome || 'success';
+      if (outcome === 'success' && plannedTask?.execution?.workspace_write_contract) {
+        const receiptIds = artifactContent?.workspace_write_receipts;
+        if (!Array.isArray(receiptIds) || !receiptIds.length || receiptIds.some(id => typeof id !== 'string') || new Set(receiptIds).size !== receiptIds.length) {
+          throw makeWorkflowToolError('WORKSPACE_WRITE_RECEIPTS_MISSING', 'validation_failure', 'A successful scoped-write task artifact must list workspace_write_receipts returned by workflow_write_files.', {
+            job_id: task.job_id, workflow_id: approvedPlan.workflow_id, workflow_version: approvedPlan.workflow_version,
+            job_state: job.state, task_id: taskId, capability: 'workspace.write', retryable: false,
+            workspace_mutation_status: 'unknown', evidence_missing: ['workspace_write_receipts'],
+            next_actions: [{ tool: 'workflow_write_files', reason: 'Inspect the task write receipts and include their exact IDs in the typed artifact before submitting task success.' }]
+          });
+        }
+        const persistedReceipts = workflowStore.db.prepare('SELECT receipt_id FROM workspace_write_receipts WHERE job_id=? AND task_id=? AND plan_hash=? ORDER BY created_at, receipt_id')
+          .all(task.job_id, taskId, approvedPlan.plan_hash).map(row => row.receipt_id);
+        if (!persistedReceipts.length || persistedReceipts.length !== receiptIds.length || persistedReceipts.some(id => !receiptIds.includes(id))) {
+          throw makeWorkflowToolError('WORKSPACE_WRITE_RECEIPTS_INVALID', 'validation_failure', 'Artifact receipt IDs do not exactly match durable workspace-write receipts for this task and immutable plan.', {
+            job_id: task.job_id, workflow_id: approvedPlan.workflow_id, workflow_version: approvedPlan.workflow_version,
+            job_state: job.state, task_id: taskId, capability: 'workspace.write', retryable: false,
+            workspace_mutation_status: 'modified', evidence_missing: persistedReceipts.filter(id => !receiptIds.includes(id)),
+            next_actions: [{ tool: 'workflow_get', reason: 'Inspect durable workspace-write receipts and submit the exact receipt ID set; do not claim success without provenance.' }]
+          });
+        }
+      }
       const case01 = isCase01ArtifactLineage(task.job_id) && outcome === 'success';
       let newlyCreatedSnapshotId = null;
       let case01SnapshotBase = null;
@@ -1849,6 +2472,15 @@ async function callTool(name, args) {
       assertDependenciesCompleted(task, tasks);
       const metadata = taskMetadata(task);
       const plan = workflowStore.getExecutionPlan(task.job_id);
+      const plannedTask = plan?.children?.find(spec => spec.id === metadata.workflow_plan_task_id);
+      if (!plannedTask) throw new Error('task does not resolve to an immutable execution-plan task');
+      if (batchExecutionPolicyRuntime.resolveTaskBatchRoute(plan, plannedTask).required) {
+        const migrationRequired = hasUnbatchedSchemaV1ExecutionHistory(task, plan);
+        recordBatchPolicyDenial(task.job_id, task.task_id, plan, 'task_execute_local',
+          migrationRequired ? 'migration_required_legacy_attempt' : 'batch_route_required');
+        if (migrationRequired) throw new Error('migration-required: schema-v1 deterministic task has prior direct execution without genuine batch provenance; create a fresh approved schema-v2 workflow; do not replay this task');
+        throw new Error('task is batch-required by the immutable plan; use execute_batch rather than task_execute_local');
+      }
       if (metadata.deterministic !== true || metadata.executor !== 'ExecutionManager' || !metadata.executable || !Array.isArray(metadata.args)) {
         throw new Error('task does not have an approved deterministic structured execution contract');
       }
@@ -1882,6 +2514,7 @@ async function callTool(name, args) {
       const children = trace.tasks.filter(task => task.parent_task_id === parent.task_id);
       const childContractError = validatePlannedChildTasks(plan, children);
       if (childContractError) throw new Error(`cannot synthesize before every planned child task exists or the revision chain is valid: ${childContractError}`);
+      assertMandatoryBatchEvidence(jobId, plan, children, proposalFor(jobId).workspace);
       const incomplete = children.filter(task => task.status !== 'completed');
       if (incomplete.length) throw new Error(`cannot synthesize while tasks remain unsettled: ${incomplete.map(task => `${task.role}:${task.status}`).join(', ')}`);
       const missingArtifacts = children.filter(task => {
@@ -2073,6 +2706,42 @@ async function callTool(name, args) {
       const checks = [
         { name: 'approved_plan_hash', pass: Boolean(plan?.plan_hash) },
         { name: 'child_count_matches_plan', pass: Boolean(plan) && validatePlannedChildTasks(plan, children) === null },
+        { name: 'workspace_write_receipts_match_immutable_plan_and_events', pass: (() => {
+          const receipts = workflowStore.db.prepare('SELECT * FROM workspace_write_receipts WHERE job_id=? ORDER BY created_at, receipt_id').all(jobId);
+          if (!receipts.length) return true;
+          if (!plan?.plan_hash || !plan.required_operations?.includes('workspace.write') || plan.workflow_id !== 'standard-engineering' || plan.workflow_version < 3) return false;
+          let events;
+          try { events = workflowStore.db.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='workflow.workspace_file_written'").all(jobId).map(row => parseStrictJson(row.payload_json, 'workspace write event')); }
+          catch { return false; }
+          if (events.length !== receipts.length) return false;
+          const scopes = { required_operations: plan.required_operations, scopes: plan.workspace_write_scopes || [] };
+          return receipts.every(receipt => {
+            if (receipt.plan_hash !== plan.plan_hash || !/^[a-f0-9]{64}$/.test(receipt.request_hash) || !/^[a-f0-9]{64}$/.test(receipt.after_sha256)) return false;
+            const task = trace.tasks.find(item => item.task_id === receipt.task_id);
+            if (!task || task.job_id !== jobId || !['engineer', 'writer'].includes(task.role)) return false;
+            let metadata;
+            try { metadata = taskMetadata(task); } catch { return false; }
+            const spec = plan.children.find(item => item.id === metadata.workflow_plan_task_id);
+            const scope = workspaceWriteContractRuntime.workspaceWriteScopeForRole(scopes, task.role);
+            if (!spec || spec.role !== task.role || !spec.execution?.workspace_write_contract || !scope ||
+                !workspaceWriteContractRuntime.pathIsWithinWorkspaceWriteScope(receipt.path, scope)) return false;
+            return events.some(event => event.receipt_id === receipt.receipt_id && event.task_id === receipt.task_id &&
+              event.plan_hash === receipt.plan_hash && event.request_hash === receipt.request_hash && event.path === receipt.path &&
+              event.after_sha256 === receipt.after_sha256 && event.outcome === receipt.outcome);
+          });
+        })() },
+        { name: 'completed_scoped_write_artifacts_cite_receipts', pass: (() => {
+          if (!plan?.children?.some(spec => spec.execution?.workspace_write_contract)) return true;
+          const receipts = workflowStore.db.prepare('SELECT receipt_id,task_id FROM workspace_write_receipts WHERE job_id=? AND plan_hash=?').all(jobId, plan.plan_hash);
+          return plan.children.filter(spec => spec.execution?.workspace_write_contract).every(spec => {
+            const task = children.find(item => { try { return taskMetadata(item).workflow_plan_task_id === spec.id; } catch { return false; } });
+            if (!task || task.status !== 'completed') return true;
+            const expected = receipts.filter(row => row.task_id === task.task_id).map(row => row.receipt_id).sort();
+            const artifact = workflowStore.listArtifacts(jobId, { taskId: task.task_id, activeOnly: true, type: plannedArtifactType(spec) }).at(-1);
+            const cited = artifact?.content?.workspace_write_receipts;
+            return expected.length > 0 && Array.isArray(cited) && JSON.stringify([...cited].sort()) === JSON.stringify(expected);
+          });
+        })() },
         // Custom workflow children use internal role labels (`custom-task-N`);
         // resolve their pinned output type from task metadata/plan rather than
         // passing that synthetic label to the built-in agent contract registry.
@@ -2689,6 +3358,10 @@ function buildRoleTaskDescription(spec, request, successContract = null) {
   return [
     `Assigned role: ${contract.role} (${contract.capability}).`,
     ...profileContext,
+    ...(spec.execution?.workspace_write_contract ? [
+      `Approved workspace-write contract v${spec.execution.workspace_write_contract.version}: role=${spec.execution.workspace_write_contract.role}; mode=${spec.execution.workspace_write_contract.mode}; max_file_bytes=${spec.execution.workspace_write_contract.max_file_bytes}.`,
+      `Writable relative paths only: ${(spec.execution.workspace_write_contract.paths || []).map(item => `${item.kind}:${item.path}`).join(', ')}. Read the current file bytes and provide base_sha256 (or ABSENT only for new files under an approved directory) when using workflow_write_files. Reference returned receipt IDs in this task's typed artifact. No shell, deletes, renames, new directories, symlink traversal, or out-of-scope edits are authorized.`
+    ] : []),
     `Project request: ${String(request || '').trim()}`,
     contractContext,
     `Your inputs: ${contract.inputs.join(', ')}. Use predecessor results and their typed artifacts supplied by the orchestrator; state explicitly when required evidence is absent.`,
@@ -2702,7 +3375,14 @@ function buildRoleTaskDescription(spec, request, successContract = null) {
 
 function rpc(id, result) { return JSON.stringify({ jsonrpc: '2.0', id, result }); }
 function rpcError(id, code, message) { return JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }); }
-function toolError(id, message) { return rpc(id, { content: [{ type: 'text', text: message }], isError: true }); }
+function toolError(id, error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const response = { content: [{ type: 'text', text: message }], isError: true };
+  // Preserve the established text/isError fields for older MCP clients while
+  // giving agent clients a stable, machine-readable recovery contract.
+  if (workflowToolErrors.isWorkflowToolError(error)) response.structuredContent = { error: error.toJSON() };
+  return rpc(id, response);
+}
 
 async function handle(message) {
   const hasId = isPlainRecord(message) && Object.hasOwn(message, 'id');
@@ -2744,7 +3424,7 @@ async function handle(message) {
       const result = await callTool(message.params.name, message.params.arguments === undefined ? {} : message.params.arguments);
       return rpc(id, { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], structuredContent: result, isError: false });
     } catch (error) {
-      return toolError(id, error instanceof Error ? error.message : String(error));
+      return toolError(id, error);
     }
   }
   return rpcError(id, -32601, `method not found: ${method}`);

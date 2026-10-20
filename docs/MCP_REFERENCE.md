@@ -5,7 +5,7 @@ This page is generated from the shipped stdio MCP server by the documentation ge
 - Source: `server/index.js` and its runtime schema definitions.
 - Server identity reported by the checked-out source: `runalith-agent-orchestrator`.
 - Source package version reported at generation time: `1.0.9-rc.5`. This is source-runtime metadata, not proof of which bundle is installed in a client.
-- Registered tools: **46**.
+- Registered tools: **50**.
 
 ## Choosing the right operation
 
@@ -23,7 +23,8 @@ This page is generated from the shipped stdio MCP server by the documentation ge
 | [`workflow_coordinator_role`](#workflow_coordinator_role) | Read the immutable built-in System Workflow Coordinator role used by the host assistant. It is not a custom role and cannot be created or modified through custom-role tools. | None |
 | [`workflow_coordinator_step`](#workflow_coordinator_step) | Use as the normal high-level lifecycle interface after a proposal exists: it waits for explicit human approval, advances an already-approved workflow, prepares tasks, executes only approved deterministic local steps, and returns the next specialist task or synthesis contract. Submit task_result/synthesis to persist actual work. Do not use it to approve a proposal or bypass gates; use low-level tools for explicit state inspection or a documented recovery path. | `job_id` |
 | [`orchestrator_health`](#orchestrator_health) | Read-only local health check for plugin/storage and local execution readiness. Use before diagnosing local setup problems; it never probes remote services and does not prove an individual workflow's evidence or success gates. | None |
-| [`workflow_catalog`](#workflow_catalog) | Read-only discovery of supported local workflow templates and their intended shape. Use before workflow_create when choosing a template; this does not create, approve, or run a workflow. | None |
+| [`workflow_catalog`](#workflow_catalog) | Read-only discovery of supported local workflow templates, exact workflow IDs/versions and intended execution modes. Use first when choosing a template; then workflow_create and workflow_preflight. This does not create, approve, or run a workflow. | None |
+| [`workflow_recommend_resources`](#workflow_recommend_resources) | Proactive, read-only discovery for a task goal. Use before creating a substantial workflow even when the user did not name roles, policies, skills, or reusable workflows. Ranks saved custom workflows, custom roles/attached skills, saved policies, and built-in role hints using deterministic Vietnamese/English lexical matching. Prefer compatible high-confidence existing resources over near-duplicates, but inspect contracts and policy scope; lexical scores are hints, not semantic proof. Does not attach policies, bind roles, mutate storage, approve, or execute. | `task` |
 | [`workflow_policy_catalog`](#workflow_policy_catalog) | Read-only discovery of policy predicate types and their real runtime enforcement points. Use before drafting a policy; do not invent predicates or treat a catalog entry as proof a policy is attached/enforced for a particular run. | None |
 | [`workflow_policy_create`](#workflow_policy_create) | State-changing: create immutable version 1 of a reusable workflow policy pack after reviewing workflow_policy_catalog. Use only the closed predicate schema; no executable code/arbitrary expressions are accepted. Validate before attaching; creation alone does not attach the policy to a workflow. | `policy_id`, `name` |
 | [`workflow_policy_list`](#workflow_policy_list) | Read-only list/search of saved policy packs. Set include_versions when comparing immutable revisions; use workflow_policy_get for a specific pack. This does not validate or attach a policy. | None |
@@ -31,18 +32,21 @@ This page is generated from the shipped stdio MCP server by the documentation ge
 | [`workflow_policy_update`](#workflow_policy_update) | State-changing: create the next immutable version of an existing policy pack. Omitted fields are retained; old versions and plans already pinned to them do not change. Validate the new version and explicitly attach an exact version to an eligible unapproved proposal if needed. | `policy_id` |
 | [`workflow_policy_validate`](#workflow_policy_validate) | Read-only validation of a proposed policy pack without storing it. Checks closed schema, rule conflicts and policy-level invariants; target-plan compatibility is checked again when attaching. Use before create/update/attach; a valid policy is not yet attached or enforced. | `policy_id`, `name` |
 | [`workflow_policy_attach`](#workflow_policy_attach) | State-changing: attach an exact policy version only to an active, unapproved workflow proposal. The snapshot is pinned into the later plan hash; attachment is prohibited after approval/compilation. Use after policy validation and before workflow_approve; create a new proposal if the plan is already approved. | `job_id`, `policy_id` |
-| [`workflow_create`](#workflow_create) | State-changing proposal creation: use after choosing a template and writing a bounded request. Optional role_bindings pin exact custom-role versions/Skill snapshots as supplementary prompts for supported templates; built-in contracts and permissions stay authoritative. Goal/constraints/success criteria become part of the contract. Inspect the proposal and plan, then call workflow_approve only after explicit approval; create does not approve, dispatch, or execute. | `title`, `task` |
+| [`workflow_create`](#workflow_create) | Create a proposal only. Optional role_bindings pin immutable role-profile snapshots. For workspace edits, declare required_operations:["workspace.write"] plus explicit role-specific relative scopes (only built-in engineer/writer on standard-engineering v3+); scopes grant neither shell access nor unscoped filesystem access. Next call workflow_preflight, inspect the immutable plan/readiness, then obtain explicit human approval. Creation never approves or executes. | `title`, `task` |
 | [`workflow_list`](#workflow_list) | Read-only list of locally stored active workflows. Use to find a job_id when it is not known, then inspect that run with workflow_get; this does not advance or mutate any workflow. | None |
 | [`workflow_get`](#workflow_get) | Read-only inspection of local workflow state, immutable plan/hash, task states, artifact metadata and phase. Use before approval or when diagnosing a specific job; it does not expose full result bodies or mutate state. | `job_id` |
-| [`workflow_approve`](#workflow_approve) | State-changing approval: use only after inspecting the current proposal and intended immutable plan and obtaining explicit user confirmation. Compiles/pins the plan; do not edit it in place afterward. Approval is not dispatch—call workflow_dispatch next. | `job_id`, `confirmation` |
+| [`workflow_liveness_diagnostics`](#workflow_liveness_diagnostics) | Read-only diagnosis of active-job liveness using durable job/task/event timestamps and task-lease heartbeats/expiry. Reports stale candidates and safe inspection hints; old activity is not proof a worker is dead. Never changes job/task state, expires or reacquires leases, retries, dispatches, or grants permission. | None |
+| [`workflow_preflight`](#workflow_preflight) | Read-only feasibility check of a proposal or approved immutable plan. Compiles in memory without creating/changing a plan, checks workflow/version compatibility, role capability/permission contracts, scoped workspace-write roots, and plan/hash consistency. Run before workflow_approve; approval independently repeats the gate. A ready result is not approval or execution. | `job_id` |
+| [`workflow_approve`](#workflow_approve) | State-changing approval: use only after workflow_preflight is ready, the proposal and proposed immutable plan are inspected, and explicit human approval is obtained. Re-runs feasibility checks, then pins the plan; do not edit it in place afterward. Approval is not dispatch—call workflow_dispatch next. | `job_id`, `confirmation` |
 | [`workflow_dispatch`](#workflow_dispatch) | State-changing dispatch: use only for a proposal already approved with a current immutable plan. Starts the local workflow and creates its durable coordinator task; no cloud/remote worker is contacted. Then prepare tasks or use workflow_coordinator_step to advance. | `job_id` |
 | [`workflow_prepare_tasks`](#workflow_prepare_tasks) | State-changing task preparation/recovery: use after workflow_dispatch when the immutable plan's child tasks need creating or reconciling. Safe to repeat for the same approved plan; does not execute tasks. Next call workflow_next_task or workflow_coordinator_step. | `job_id` |
 | [`workflow_next_task`](#workflow_next_task) | Use after task preparation and after each recorded completion to obtain the next dependency-ready task, exact role contract and predecessor evidence. Deterministic tasks must use the approved task_execute_local/execute_batch path; specialist reasoning tasks use workflow_complete_task. If no task is ready or a gate blocks progress, inspect/diagnose rather than inventing a result. | `job_id` |
 | [`workflow_diagnose`](#workflow_diagnose) | Read-only diagnosis when a local workflow is blocked, stuck, failed, or unexpectedly pending. Correlates task states, reviewer findings, stale/missing artifacts and safe next actions; it never mutates state. Use diagnosis before authorized rework/reviewer revision and never treat it as a repair or gate bypass. | `job_id` |
-| [`workflow_request_rework`](#workflow_request_rework) | State-changing recovery for a supported standard-engineering v2 workflow after a completed reviewer decision when findings require specialist changes. Provide a concrete reason; this invalidates affected active artifacts and creates linked revision tasks while preserving plan and approval/CTO gates. It does not complete the work; diagnose first and re-run affected tasks/review. | `job_id`, `reason` |
-| [`workflow_request_reviewer_revision`](#workflow_request_reviewer_revision) | Narrow state-changing recovery: use only for an accepted standard-engineering v2 review blocked solely by documented evidenceIssues, with upstream evidence and acceptance flags otherwise valid. It invalidates/replaces the review artifact; it is not for security/implementation/blocking findings and never approves synthesis or weakens the contract. | `job_id`, `reason` |
+| [`workflow_request_rework`](#workflow_request_rework) | State-changing review recovery, supported only when the exact immutable plan has workflow_id=standard-engineering and workflow_version>=2, and the job is active/EXECUTING with current approval. engineering@2 is not compatible. Use workflow_diagnose first; unsupported plans need a new proposal and approval, not retries. Rework preserves the immutable plan and approval gates and does not complete work. | `job_id`, `reason` |
+| [`workflow_request_reviewer_revision`](#workflow_request_reviewer_revision) | Narrow review recovery, supported only for workflow_id=standard-engineering and version>=2 in an active/EXECUTING job with current approval; use only for an accepted review blocked solely by evidenceIssues when all other acceptance flags/findings pass. engineering@2 is not compatible. Does not approve synthesis or weaken the contract. | `job_id`, `reason` |
 | [`workflow_complete_task`](#workflow_complete_task) | State-changing completion for a currently issued, dependency-ready non-deterministic local specialist task. Persist the actual result and typed artifact; record outcome=failed when work failed. Do not fabricate results or use this for deterministic tasks, which require task_execute_local/execute_batch. Request the next task after completion. | `task_id`, `content`, `artifact` |
-| [`task_execute_local`](#task_execute_local) | State-changing local execution for one prepared deterministic task whose executable, arguments and workspace are fixed by the approved immutable plan. Use only when the task contract marks it deterministic; no arbitrary commands or remote execution are accepted. Inspect the actual exit/output and then request the next task. | `task_id` |
+| [`task_execute_local`](#task_execute_local) | State-changing local execution for one prepared deterministic task whose executable, arguments and workspace are fixed by the approved immutable plan. Do not use this route for any task whose immutable batch policy requires execute_batch, even for a single-item batch. No arbitrary commands or remote execution are accepted. Inspect the actual exit/output and then request the next task. | `task_id` |
+| [`workflow_write_files`](#workflow_write_files) | State-changing, scope-limited workspace edit for a currently running built-in engineer/writer child of an approved standard-engineering v3+ workflow. Only plan-pinned relative paths are writable; each file must provide base_sha256 or ABSENT, and patch_id makes retries idempotent. No arbitrary commands, deletions, renames, symlink traversal, directory creation, custom roles or caller-supplied workspace roots. Inspect per-file receipts; reference receipt IDs in the typed task artifact. A multi-file patch can partially apply and will report that explicitly. | `job_id`, `task_id`, `patch_id`, `writes` |
 | [`execute_batch`](#execute_batch) | State-changing batch execution for 1–32 prepared, dependency-ready deterministic tasks within one approved active workflow. Use only tasks authorized for ExecutionManager; each is resolved from the immutable plan, and callers cannot supply command/args/cwd/timeout/role. Do not use for specialist reasoning tasks; inspect per-task outcomes and recover failures through the documented path. | `job_id`, `task_ids` |
 | [`workflow_complete_synthesis`](#workflow_complete_synthesis) | State-changing finalization: use only when all required tasks and evidence are ready and the coordinator has returned the synthesis contract. Record the typed CTO decision and exact success_assessment IDs/evidence_refs; the runtime independently checks task state, lineage, reviewer/QA gates and predicates. A call or narrative cannot bypass a failed gate; CASE-01 also requires the exact consumed workspace bytes. | `job_id`, `content`, `artifact` |
 | [`workflow_events`](#workflow_events) | Read-only view of a workflow's durable event history and observability summary. Use to reconstruct ordering or investigate an unexpected state; it does not change task/job state. Pair with workflow_get or workflow_diagnose when needed. | `job_id` |
@@ -238,7 +242,7 @@ This tool accepts no named input properties.
 
 ### `workflow_catalog`
 
-Read-only discovery of supported local workflow templates and their intended shape. Use before workflow_create when choosing a template; this does not create, approve, or run a workflow.
+Read-only discovery of supported local workflow templates, exact workflow IDs/versions and intended execution modes. Use first when choosing a template; then workflow_create and workflow_preflight. This does not create, approve, or run a workflow.
 
 This tool accepts no named input properties.
 
@@ -250,6 +254,43 @@ This tool accepts no named input properties.
   "type": "object",
   "properties": {},
   "additionalProperties": false
+}
+```
+
+</details>
+
+### `workflow_recommend_resources`
+
+Proactive, read-only discovery for a task goal. Use before creating a substantial workflow even when the user did not name roles, policies, skills, or reusable workflows. Ranks saved custom workflows, custom roles/attached skills, saved policies, and built-in role hints using deterministic Vietnamese/English lexical matching. Prefer compatible high-confidence existing resources over near-duplicates, but inspect contracts and policy scope; lexical scores are hints, not semantic proof. Does not attach policies, bind roles, mutate storage, approve, or execute.
+
+| Input | Type | Required | Description | Constraints |
+|---|---|---|---|---|
+| `task` | `string` | Yes | — | minLength: `1`; maxLength: `12000` |
+| `limit` | `integer` | No | — | minimum: `1`; maximum: `10`; default: `5` |
+
+<details>
+<summary>Full input schema (JSON)</summary>
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "task": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 12000
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 5
+    }
+  },
+  "required": [
+    "task"
+  ]
 }
 ```
 
@@ -3435,7 +3476,7 @@ State-changing: attach an exact policy version only to an active, unapproved wor
 
 ### `workflow_create`
 
-State-changing proposal creation: use after choosing a template and writing a bounded request. Optional role_bindings pin exact custom-role versions/Skill snapshots as supplementary prompts for supported templates; built-in contracts and permissions stay authoritative. Goal/constraints/success criteria become part of the contract. Inspect the proposal and plan, then call workflow_approve only after explicit approval; create does not approve, dispatch, or execute.
+Create a proposal only. Optional role_bindings pin immutable role-profile snapshots. For workspace edits, declare required_operations:["workspace.write"] plus explicit role-specific relative scopes (only built-in engineer/writer on standard-engineering v3+); scopes grant neither shell access nor unscoped filesystem access. Next call workflow_preflight, inspect the immutable plan/readiness, then obtain explicit human approval. Creation never approves or executes.
 
 | Input | Type | Required | Description | Constraints |
 |---|---|---|---|---|
@@ -3443,7 +3484,10 @@ State-changing proposal creation: use after choosing a template and writing a bo
 | `task` | `string` | Yes | — | minLength: `1`; maxLength: `12000` |
 | `workflow` | `string` | No | — | enum: `standard-engineering`, `hybrid-engineering`, `engineering`, `production`; default: `"standard-engineering"` |
 | `workspace` | `string` | No | — | minLength: `1`; maxLength: `2000` |
+| `validation_profile` | `object` | No | — | no additional properties; required fields: `profile_id`, `profile_version` |
 | `role_bindings` | `array` | No | — | maxItems: `9`; items: object |
+| `required_operations` | `array` | No | — | maxItems: `4`; unique items; items: string |
+| `workspace_write_scopes` | `array` | No | — | maxItems: `8`; items: object |
 | `goal` | `string` | No | — | minLength: `1`; maxLength: `4000` |
 | `constraints` | `array` | No | — | maxItems: `32`; items: union |
 | `success_criteria` | `array` | No | — | maxItems: `32`; items: union |
@@ -3454,6 +3498,7 @@ State-changing proposal creation: use after choosing a template and writing a bo
 ```json
 {
   "type": "object",
+  "additionalProperties": false,
   "properties": {
     "title": {
       "type": "string",
@@ -3479,6 +3524,30 @@ State-changing proposal creation: use after choosing a template and writing a bo
       "type": "string",
       "minLength": 1,
       "maxLength": 2000
+    },
+    "validation_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile_id": {
+          "type": "string",
+          "enum": [
+            "core-release-validation",
+            "plugin-e2e",
+            "mcpb-package-build",
+            "mcpb-package-build-isolated",
+            "mcpb-workspace-smoke"
+          ]
+        },
+        "profile_version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "profile_id",
+        "profile_version"
+      ]
     },
     "role_bindings": {
       "type": "array",
@@ -3515,6 +3584,65 @@ State-changing proposal creation: use after choosing a template and writing a bo
           "role",
           "custom_role_id",
           "custom_role_version"
+        ]
+      }
+    },
+    "required_operations": {
+      "type": "array",
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "workspace.write"
+        ]
+      }
+    },
+    "workspace_write_scopes": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "engineer",
+              "writer"
+            ]
+          },
+          "paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "file",
+                    "directory"
+                  ]
+                }
+              },
+              "required": [
+                "path",
+                "kind"
+              ]
+            }
+          }
+        },
+        "required": [
+          "role",
+          "paths"
         ]
       }
     },
@@ -4497,8 +4625,7 @@ State-changing proposal creation: use after choosing a template and writing a bo
   "required": [
     "title",
     "task"
-  ],
-  "additionalProperties": false
+  ]
 }
 ```
 
@@ -4560,9 +4687,80 @@ Read-only inspection of local workflow state, immutable plan/hash, task states, 
 
 </details>
 
+### `workflow_liveness_diagnostics`
+
+Read-only diagnosis of active-job liveness using durable job/task/event timestamps and task-lease heartbeats/expiry. Reports stale candidates and safe inspection hints; old activity is not proof a worker is dead. Never changes job/task state, expires or reacquires leases, retries, dispatches, or grants permission.
+
+| Input | Type | Required | Description | Constraints |
+|---|---|---|---|---|
+| `job_id` | `string` | No | — | minLength: `1`; maxLength: `200` |
+| `limit` | `integer` | No | — | minimum: `1`; maximum: `100`; default: `25` |
+| `stale_after_ms` | `integer` | No | — | minimum: `60000`; maximum: `604800000`; default: `900000` |
+
+<details>
+<summary>Full input schema (JSON)</summary>
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 25
+    },
+    "stale_after_ms": {
+      "type": "integer",
+      "minimum": 60000,
+      "maximum": 604800000,
+      "default": 900000
+    }
+  }
+}
+```
+
+</details>
+
+### `workflow_preflight`
+
+Read-only feasibility check of a proposal or approved immutable plan. Compiles in memory without creating/changing a plan, checks workflow/version compatibility, role capability/permission contracts, scoped workspace-write roots, and plan/hash consistency. Run before workflow_approve; approval independently repeats the gate. A ready result is not approval or execution.
+
+| Input | Type | Required | Description | Constraints |
+|---|---|---|---|---|
+| `job_id` | `string` | Yes | — | minLength: `1`; maxLength: `200` |
+
+<details>
+<summary>Full input schema (JSON)</summary>
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    }
+  },
+  "required": [
+    "job_id"
+  ]
+}
+```
+
+</details>
+
 ### `workflow_approve`
 
-State-changing approval: use only after inspecting the current proposal and intended immutable plan and obtaining explicit user confirmation. Compiles/pins the plan; do not edit it in place afterward. Approval is not dispatch—call workflow_dispatch next.
+State-changing approval: use only after workflow_preflight is ready, the proposal and proposed immutable plan are inspected, and explicit human approval is obtained. Re-runs feasibility checks, then pins the plan; do not edit it in place afterward. Approval is not dispatch—call workflow_dispatch next.
 
 | Input | Type | Required | Description | Constraints |
 |---|---|---|---|---|
@@ -4715,7 +4913,7 @@ Read-only diagnosis when a local workflow is blocked, stuck, failed, or unexpect
 
 ### `workflow_request_rework`
 
-State-changing recovery for a supported standard-engineering v2 workflow after a completed reviewer decision when findings require specialist changes. Provide a concrete reason; this invalidates affected active artifacts and creates linked revision tasks while preserving plan and approval/CTO gates. It does not complete the work; diagnose first and re-run affected tasks/review.
+State-changing review recovery, supported only when the exact immutable plan has workflow_id=standard-engineering and workflow_version>=2, and the job is active/EXECUTING with current approval. engineering@2 is not compatible. Use workflow_diagnose first; unsupported plans need a new proposal and approval, not retries. Rework preserves the immutable plan and approval gates and does not complete work.
 
 | Input | Type | Required | Description | Constraints |
 |---|---|---|---|---|
@@ -4752,7 +4950,7 @@ State-changing recovery for a supported standard-engineering v2 workflow after a
 
 ### `workflow_request_reviewer_revision`
 
-Narrow state-changing recovery: use only for an accepted standard-engineering v2 review blocked solely by documented evidenceIssues, with upstream evidence and acceptance flags otherwise valid. It invalidates/replaces the review artifact; it is not for security/implementation/blocking findings and never approves synthesis or weakens the contract.
+Narrow review recovery, supported only for workflow_id=standard-engineering and version>=2 in an active/EXECUTING job with current approval; use only for an accepted review blocked solely by evidenceIssues when all other acceptance flags/findings pass. engineering@2 is not compatible. Does not approve synthesis or weaken the contract.
 
 | Input | Type | Required | Description | Constraints |
 |---|---|---|---|---|
@@ -4839,7 +5037,7 @@ State-changing completion for a currently issued, dependency-ready non-determini
 
 ### `task_execute_local`
 
-State-changing local execution for one prepared deterministic task whose executable, arguments and workspace are fixed by the approved immutable plan. Use only when the task contract marks it deterministic; no arbitrary commands or remote execution are accepted. Inspect the actual exit/output and then request the next task.
+State-changing local execution for one prepared deterministic task whose executable, arguments and workspace are fixed by the approved immutable plan. Do not use this route for any task whose immutable batch policy requires execute_batch, even for a single-item batch. No arbitrary commands or remote execution are accepted. Inspect the actual exit/output and then request the next task.
 
 | Input | Type | Required | Description | Constraints |
 |---|---|---|---|---|
@@ -4866,6 +5064,80 @@ State-changing local execution for one prepared deterministic task whose executa
   },
   "required": [
     "task_id"
+  ]
+}
+```
+
+</details>
+
+### `workflow_write_files`
+
+State-changing, scope-limited workspace edit for a currently running built-in engineer/writer child of an approved standard-engineering v3+ workflow. Only plan-pinned relative paths are writable; each file must provide base_sha256 or ABSENT, and patch_id makes retries idempotent. No arbitrary commands, deletions, renames, symlink traversal, directory creation, custom roles or caller-supplied workspace roots. Inspect per-file receipts; reference receipt IDs in the typed task artifact. A multi-file patch can partially apply and will report that explicitly.
+
+| Input | Type | Required | Description | Constraints |
+|---|---|---|---|---|
+| `job_id` | `string` | Yes | — | minLength: `1`; maxLength: `200` |
+| `task_id` | `string` | Yes | — | minLength: `1`; maxLength: `200` |
+| `patch_id` | `string` | Yes | — | pattern: `^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$` |
+| `writes` | `array` | Yes | — | minItems: `1`; maxItems: `16`; items: object |
+
+<details>
+<summary>Full input schema (JSON)</summary>
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "patch_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$"
+    },
+    "writes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "base_sha256": {
+            "type": "string",
+            "pattern": "^(ABSENT|[a-f0-9]{64})$"
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 2000000
+          }
+        },
+        "required": [
+          "path",
+          "base_sha256",
+          "content"
+        ]
+      }
+    }
+  },
+  "required": [
+    "job_id",
+    "task_id",
+    "patch_id",
+    "writes"
   ]
 }
 ```

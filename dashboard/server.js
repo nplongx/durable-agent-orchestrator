@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import http from 'node:http';
+import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { inspectStoredWorkflowPolicyRow } from '../src/runtime/workflow/policy-contract.js';
@@ -19,8 +20,11 @@ const MAX_PREVIEW_CHARS = 48_000;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_URL_BYTES = 4096;
 const MAX_JSON_RESPONSE_BYTES = 1_500_000;
-const SAFE_TEXT_EXTENSIONS = new Set(['.log', '.txt', '.md', '.json', '.jsonl', '.ndjson', '.out', '.err', '.stdout', '.stderr', '.csv', '.yaml', '.yml', '.toml']);
+const SAFE_TEXT_EXTENSIONS = new Set(['.log', '.txt', '.md', '.mdx', '.json', '.jsonc', '.jsonl', '.ndjson', '.out', '.err', '.stdout', '.stderr', '.csv', '.yaml', '.yml', '.toml', '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '.html', '.htm', '.css', '.scss', '.xml', '.sh', '.bash', '.py', '.go', '.rs', '.java', '.c', '.h', '.cc', '.cpp', '.hpp', '.sql', '.graphql', '.gql', '.env.example']);
 const FORBIDDEN_FILE_RE = /(?:\.db(?:-(?:wal|shm))?|\.sqlite(?:-\w+)?|\.sqlite3?|\.mcpb|\.exe|\.dll|\.so(?:\.\d+)*|\.dylib|\.bin|\.wasm|\.zip|\.gz|\.tar|\.png|\.jpe?g|\.gif|\.webp|\.pdf)$/i;
+const MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_GIT_RESPONSE_ENTRIES = 500;
+const MAX_GIT_DIFF_BYTES = 64 * 1024;
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
 
 function redactSensitiveText(value, { redactLocalSkillPaths = true } = {}) {
@@ -606,6 +610,168 @@ function previewFile(dataRoot, relative) {
     return {path:relative,size:info.size,preview:boundedText(text,MAX_FILE_BYTES),truncated:info.size>read,limit:MAX_FILE_BYTES,modified_at:info.mtime.toISOString()};
   } finally { fs.closeSync(fd); }
 }
+function gitEnvironment() {
+  const env = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!/^GIT_/i.test(key)) env[key] = value;
+  }
+  Object.assign(env, {
+    GIT_OPTIONAL_LOCKS: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull,
+    GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', PAGER: 'cat'
+  });
+  return env;
+}
+function runGit(cwd, args, { timeoutMs = 2_000, maxBuffer = MAX_GIT_OUTPUT_BYTES } = {}) {
+  const argv = ['-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', '-c', 'diff.external=', '-c', 'color.ui=false', ...args];
+  const result = spawnSync('git', argv, {
+    cwd, env: gitEnvironment(), shell: false, encoding: null,
+    timeout: timeoutMs, maxBuffer, windowsHide: true
+  });
+  if (result.error || result.signal || result.status !== 0) {
+    const reason = result.error?.code === 'ETIMEDOUT' || result.signal === 'SIGTERM'
+      ? 'timeout' : result.error?.code === 'ENOBUFS' ? 'output_limit' : 'git_unavailable';
+    return { ok: false, reason, stdout: Buffer.alloc(0) };
+  }
+  return { ok: true, reason: null, stdout: Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout || '') };
+}
+function resolveGitWorkspace(filesRoot) {
+  const rootResult = runGit(filesRoot, ['rev-parse', '--show-toplevel'], { timeoutMs: 1_000, maxBuffer: 8_192 });
+  if (!rootResult.ok) return { available: false, reason: 'not_git_repository' };
+  let gitRoot;
+  try { gitRoot = fs.realpathSync(rootResult.stdout.toString('utf8').trim()); }
+  catch { return { available: false, reason: 'git_root_unavailable' }; }
+  if (!fs.statSync(gitRoot).isDirectory() || !isWithin(gitRoot, filesRoot)) {
+    return { available: false, reason: 'repository_outside_workspace' };
+  }
+  const prefix = path.relative(gitRoot, filesRoot).split(path.sep).join('/');
+  if (prefix === '..' || prefix.startsWith('../') || path.posix.isAbsolute(prefix)) {
+    return { available: false, reason: 'repository_outside_workspace' };
+  }
+  return { available: true, root: gitRoot, prefix: prefix ? `${prefix.replace(/\/$/, '')}/` : '' };
+}
+function pathspecForGit(context, relative = '') {
+  const combined = `${context.prefix}${relative}`;
+  return combined ? `:(top,literal)${combined}` : '.';
+}
+function statusCode(code) {
+  return ({ '.': 'clean', M: 'modified', A: 'added', D: 'deleted', R: 'renamed', C: 'copied', T: 'type_changed', U: 'conflict' })[code] || 'unknown';
+}
+function safeGitRelativePath(context, gitPath) {
+  if (typeof gitPath !== 'string' || !gitPath) return null;
+  let relative = gitPath;
+  if (context.prefix) {
+    if (!relative.startsWith(context.prefix)) return null;
+    relative = relative.slice(context.prefix.length);
+  }
+  try { allowedSegments(relative); } catch { return null; }
+  if (!relative || !SAFE_TEXT_EXTENSIONS.has(path.posix.extname(relative).toLowerCase()) || FORBIDDEN_FILE_RE.test(relative)) return null;
+  return relative;
+}
+function parseGitStatus(output, context) {
+  const records = output.toString('utf8').split('\0');
+  const entries = [];
+  let branch = null;
+  for (let i = 0; i < records.length; i += 1) {
+    const record = records[i];
+    if (!record) continue;
+    if (record.startsWith('# branch.head ')) {
+      const name = record.slice('# branch.head '.length);
+      branch = name === '(detached)' ? 'detached HEAD' : name;
+      continue;
+    }
+    if (record.startsWith('# ') || record.startsWith('#')) continue;
+    let xy = '??';
+    let gitPath = '';
+    let oldGitPath = null;
+    let recordKind = 'ordinary';
+    if (record.startsWith('? ')) {
+      recordKind = 'untracked';
+      gitPath = record.slice(2);
+    } else if (record.startsWith('1 ')) {
+      const pieces = record.split(' ');
+      xy = pieces[1] || '??';
+      gitPath = record.split(' ').slice(8).join(' ');
+    } else if (record.startsWith('2 ')) {
+      recordKind = 'rename';
+      const pieces = record.split(' ');
+      xy = pieces[1] || '??';
+      // Porcelain v2 emits the source path as the next NUL-delimited record.
+      gitPath = record.split(' ').slice(9).join(' ');
+      oldGitPath = records[i + 1] || null;
+      i += 1;
+    } else if (record.startsWith('u ')) {
+      recordKind = 'unmerged';
+      const pieces = record.split(' ');
+      xy = pieces[1] || 'UU';
+      gitPath = record.split(' ').slice(10).join(' ');
+    } else {
+      continue;
+    }
+    const relative = safeGitRelativePath(context, gitPath);
+    if (!relative) continue;
+    const x = xy[0] || '?';
+    const y = xy[1] || '?';
+    let kind = 'modified';
+    if (recordKind === 'untracked') kind = 'untracked';
+    else if (recordKind === 'unmerged' || xy.includes('U') || xy === 'AA' || xy === 'DD') kind = 'conflict';
+    else if (x === 'D' || y === 'D') kind = 'deleted';
+    else if (recordKind === 'rename' || x === 'R' || y === 'R') kind = 'renamed';
+    else if (x === 'A' || y === 'A') kind = 'added';
+    else if (x === 'C' || y === 'C') kind = 'copied';
+    else if (!/[MTRCDAU]/.test(x + y)) continue;
+    let oldPath = null;
+    if (oldGitPath) oldPath = safeGitRelativePath(context, oldGitPath);
+    entries.push({
+      path: relative, index_status: recordKind === 'untracked' ? 'untracked' : statusCode(x),
+      worktree_status: recordKind === 'untracked' ? 'untracked' : statusCode(y),
+      kind, ...(oldPath ? { old_path: oldPath } : {})
+    });
+  }
+  entries.sort((a, b) => a.path.localeCompare(b.path));
+  return { branch, entries };
+}
+function collectGitStatus(filesRoot, relative = '') {
+  let checked;
+  try { checked = relative ? checkSafeEntry(filesRoot, relative, true) : checkSafeEntry(filesRoot, '', true); }
+  catch (error) { return { ok: false, status: 400, reason: 'invalid_workspace_path', details: boundedText(error.message, 200) }; }
+  const context = resolveGitWorkspace(filesRoot);
+  if (!context.available) return { ok: true, git_available: false, reason: context.reason, branch: null, entries: [], truncated: false };
+  const pathspec = pathspecForGit(context, relative);
+  const status = runGit(context.root, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all', '--no-ahead-behind', '--', pathspec]);
+  if (!status.ok) return { ok: true, git_available: false, reason: status.reason, branch: null, entries: [], truncated: false };
+  const parsed = parseGitStatus(status.stdout, context);
+  const entries = relative
+    ? parsed.entries.filter(entry => entry.path === relative || entry.path.startsWith(`${relative.replace(/\/$/, '')}/`))
+    : parsed.entries;
+  return {
+    ok: true, git_available: true, reason: null, branch: parsed.branch,
+    entries: entries.slice(0, MAX_GIT_RESPONSE_ENTRIES), truncated: entries.length > MAX_GIT_RESPONSE_ENTRIES,
+    generated_at: new Date().toISOString(), context, checked
+  };
+}
+function validateGitFilePath(filesRoot, relative) {
+  const segments = allowedSegments(relative);
+  if (!segments.length || !SAFE_TEXT_EXTENSIONS.has(path.posix.extname(relative).toLowerCase()) || FORBIDDEN_FILE_RE.test(relative)) {
+    throw new Error('file type is not allowed');
+  }
+  try {
+    const checked = checkSafeEntry(filesRoot, relative, false);
+    if (!checked.stat.isFile()) throw new Error('preview target is not a file');
+    if (checked.stat.size > 50 * 1024 * 1024) throw new Error('file exceeds maximum browse size');
+    return { exists: true, checked, segments };
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    const parent = segments.slice(0, -1).join('/');
+    checkSafeEntry(filesRoot, parent, true);
+    return { exists: false, checked: null, segments };
+  }
+}
+function makeUntrackedPatch(relative, content) {
+  const normalized = String(content || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const lines = normalized.split('\n');
+  const patch = `diff --git a/${relative} b/${relative}\nnew file mode 100644\n--- /dev/null\n+++ b/${relative}\n@@ -0,0 +1,${lines.length} @@\n${lines.map(line => `+${line}`).join('\n')}`;
+  return { patch: boundedText(patch, MAX_GIT_DIFF_BYTES), truncated: Buffer.byteLength(patch) > MAX_GIT_DIFF_BYTES };
+}
 function getPolicies(db, params) {
   const q = boundedText(params.get('q') || '', 120).trim();
   const includeVersions = params.get('versions') === 'all';
@@ -735,6 +901,11 @@ export function createDashboardServer(options = {}) {
   const port = options.port ?? clampInt(process.env.RUNALITH_DASHBOARD_PORT || process.env.CHAT_ON_STEROIDS_DASHBOARD_PORT, 8318, 1, 65535);
   const dataRoot = resolveDataDir(options.dataDir || DEFAULT_DATA_DIR);
   const dbPath = path.resolve(options.dbPath || DEFAULT_DB_PATH);
+  const configuredFilesRoot = options.filesRoot
+    || process.env.RUNALITH_DASHBOARD_FILES_ROOT
+    || process.env.CHAT_ON_STEROIDS_DASHBOARD_FILES_ROOT
+    || (options.dataDir ? dataRoot : process.cwd());
+  const filesRoot = resolveDataDir(configuredFilesRoot);
   let db = null;
   let dbError = null;
   try {
@@ -756,7 +927,7 @@ export function createDashboardServer(options = {}) {
       if (!db) return sendJson(res,503,{error:'workflow database is unavailable',details:dbError,read_only:true});
       try {
         let payload;
-        if (route === '/api/health') payload = { status:'ok', database:'connected', database_path:path.basename(dbPath), data_root:path.basename(dataRoot), mode:'local-read-only', read_only:true, host, port:server.address()?.port || port };
+        if (route === '/api/health') payload = { status:'ok', database:'connected', database_path:path.basename(dbPath), data_root:path.basename(dataRoot), files_root:path.basename(filesRoot), mode:'local-read-only', read_only:true, host, port:server.address()?.port || port };
         else if (route === '/api/overview') payload = getOverview(db);
         else if (route === '/api/roles') payload = getRoles(db,url.searchParams);
         else if (route === '/api/policies') payload = getPolicies(db,url.searchParams);
@@ -772,11 +943,53 @@ export function createDashboardServer(options = {}) {
           const id=decodeURIComponent(route.slice('/api/artifacts/'.length));
           const row=queryOne(db,"SELECT a.artifact_id,a.job_id,a.task_id,a.kind,a.uri,substr(a.metadata_json,1,4001) AS metadata_json,a.created_at,a.schema_version,a.producer_role,substr(a.content,1,48001) AS content,length(a.content) AS content_size,substr(a.evidence_json,1,8001) AS evidence_json,a.status,a.supersedes,a.content_hash,CASE WHEN json_valid(t.metadata_json) THEN json_extract(t.metadata_json,'$.custom_role_id') END AS producer_custom_role_id,CASE WHEN json_valid(t.metadata_json) THEN json_extract(t.metadata_json,'$.custom_role_version') END AS producer_custom_role_version,CASE WHEN json_valid(t.metadata_json) THEN json_extract(t.metadata_json,'$.custom_role_name') END AS producer_custom_role_name FROM artifacts a LEFT JOIN tasks t ON t.task_id=a.task_id WHERE a.artifact_id=?",[id]);
           if(!row) return sendJson(res,404,{error:'artifact not found'}); payload=mapArtifact(row,true);
+        } else if (route === '/api/git/status') {
+          const result = collectGitStatus(filesRoot, url.searchParams.get('path') || '');
+          if (!result.ok) return sendJson(res, result.status || 400, { error: 'Git status could not be read', reason: result.reason, details: result.details });
+          payload = {
+            git_available: result.git_available, reason: result.reason,
+            root_label: path.basename(filesRoot), branch: result.branch,
+            entries: result.entries, truncated: result.truncated, generated_at: result.generated_at || new Date().toISOString()
+          };
+        } else if (route === '/api/git/diff') {
+          const relative = url.searchParams.get('path') || '';
+          const mode = url.searchParams.get('mode') || 'working-tree';
+          if (!['working-tree', 'staged', 'unstaged'].includes(mode)) return sendJson(res, 400, { error: 'invalid Git diff mode' });
+          let fileInfo;
+          try { fileInfo = validateGitFilePath(filesRoot, relative); }
+          catch (error) { return sendJson(res, 403, { error: 'Git diff denied', details: boundedText(error.message, 240) }); }
+          const context = resolveGitWorkspace(filesRoot);
+          if (!context.available) {
+            payload = { git_available: false, reason: context.reason, path: relative, mode, status: 'unavailable', patch: '', truncated: false };
+          } else {
+            const gitPath = `${context.prefix}${relative}`;
+            const pathspec = `:(top,literal)${gitPath}`;
+            const statusResult = runGit(context.root, ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--no-ahead-behind', '--', pathspec]);
+            if (!statusResult.ok) return sendJson(res, 200, { git_available: false, reason: statusResult.reason, path: relative, mode, status: 'unavailable', patch: '', truncated: false });
+            const status = parseGitStatus(statusResult.stdout, context).entries.find(entry => entry.path === relative);
+            if (status?.kind === 'untracked' && mode === 'working-tree' && fileInfo.exists) {
+              const preview = previewFile(filesRoot, relative);
+              const untrackedPatch = makeUntrackedPatch(relative, preview.preview);
+              payload = { git_available: true, path: relative, mode, status: 'untracked', patch: untrackedPatch.patch, truncated: untrackedPatch.truncated || preview.truncated };
+            } else {
+              const args = ['diff', '--no-ext-diff', '--no-textconv', '--no-color'];
+              if (mode === 'staged') args.push('--cached', 'HEAD');
+              else if (mode === 'working-tree') args.push('HEAD');
+              args.push('--', pathspec);
+              const diffResult = runGit(context.root, args, { timeoutMs: 2_500, maxBuffer: MAX_GIT_OUTPUT_BYTES });
+              if (!diffResult.ok) {
+                payload = { git_available: true, path: relative, mode, status: status?.kind || 'unavailable', patch: '', truncated: false, reason: diffResult.reason };
+              } else {
+                const rawPatch = diffResult.stdout.toString('utf8');
+                payload = { git_available: true, path: relative, mode, status: status?.kind || (fileInfo.exists ? 'clean' : 'deleted'), patch: boundedText(rawPatch, MAX_GIT_DIFF_BYTES), truncated: Buffer.byteLength(rawPatch) > MAX_GIT_DIFF_BYTES };
+              }
+            }
+          }
         } else if (route === '/api/files') {
-          try { payload=listFiles(dataRoot,url.searchParams.get('path')||''); }
+          try { payload=listFiles(filesRoot,url.searchParams.get('path')||''); }
           catch(error) { return sendJson(res,400,{error:'directory cannot be browsed',details:boundedText(error.message,300)}); }
         } else if (route === '/api/files/preview') {
-          try { const filePath=url.searchParams.get('path')||''; if(!filePath) return sendJson(res,400,{error:'path is required'}); payload=previewFile(dataRoot,filePath); }
+          try { const filePath=url.searchParams.get('path')||''; if(!filePath) return sendJson(res,400,{error:'path is required'}); payload=previewFile(filesRoot,filePath); }
           catch(error) { return sendJson(res,403,{error:'file preview denied',details:boundedText(error.message,300)}); }
         } else return sendJson(res,404,{error:'API route not found'});
         return sendJson(res,200,payload);
@@ -784,7 +997,7 @@ export function createDashboardServer(options = {}) {
         return sendJson(res,500,{error:'dashboard query failed',details:boundedText(error?.message||error,300)});
       }
     }
-    const assets = new Map([['/','index.html'],['/index.html','index.html'],['/styles.css','styles.css'],['/ux-overrides.css','ux-overrides.css'],['/app.js','app.js']]);
+    const assets = new Map([['/','index.html'],['/index.html','index.html'],['/styles.css','styles.css'],['/ux-overrides.css','ux-overrides.css'],['/app.js','app.js'],['/workbench.css','workbench.css'],['/workbench.js','workbench.js']]);
     const asset = assets.get(route);
     if (!asset) return sendJson(res,404,{error:'not found'});
     try {
@@ -796,7 +1009,7 @@ export function createDashboardServer(options = {}) {
     } catch { return sendJson(res,500,{error:'dashboard asset unavailable'}); }
   });
   return {
-    server, dbPath, dataRoot, host, port,
+    server, dbPath, dataRoot, filesRoot, host, port,
     listen:()=>new Promise((resolve,reject)=>{
       server.once('error',reject);
       server.listen(port,host,()=>{server.off('error',reject);resolve(server.address());});

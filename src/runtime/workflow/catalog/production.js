@@ -7,13 +7,13 @@ const DEFAULT_WORKSPACE = path.resolve(fileURLToPath(new URL('../../../../', imp
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 export const PRODUCTION_QA_SUCCESS_MARKERS = Object.freeze([
-  'PRODUCTION QA MCP INITIALIZE/46-TOOL DISCOVERY PASS',
+  'PRODUCTION QA MCP INITIALIZE/50-TOOL DISCOVERY PASS',
   'PRODUCTION QA BEHAVIORAL ARTIFACT VALIDATION PASS',
   'PRODUCTION QA APPROVAL/DISPATCH/IMMUTABLE-PLAN NEXT-TASK PASS'
 ]);
 // Deliberately checked in, not computed-and-trusted from the current bytes.
 // Update this pin only alongside a reviewed source change and successor package.
-export const PRODUCTION_QA_HARNESS_SHA256 = '89d52a2b5113e2346f45c2d2ae37706896ecdee081004e8e6e5525b4e667f42c';
+export const PRODUCTION_QA_HARNESS_SHA256 = '4b0d3489b7ebd70e927ba21daeca501c4143c634ca9fcf3a95dbcf0f099b795f';
 
 function resolvePluginRoot() {
   // Source checkout layout: src/runtime/workflow/catalog -> repository root

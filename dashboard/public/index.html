@@ -5,28 +5,61 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#f2f4f3">
-  <title>Local Workflow Monitor</title>
+  <title>Runalith Local Workbench</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/ux-overrides.css">
+  <link rel="stylesheet" href="/workbench.css">
   <script src="/app.js" defer></script>
+  <script src="/workbench.js" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Skip to dashboard content</a>
   <div class="app-shell">
-    <aside class="sidebar">
+    <aside class="sidebar" id="wb-primary-sidebar" aria-label="Workbench primary sidebar">
       <div class="brand-lockup">
-        <div class="brand-mark" aria-hidden="true">O</div>
-        <div><div class="brand-name">WORKFLOW<span> / </span>MONITOR</div><div class="brand-caption">LOCAL ORCHESTRATOR</div></div>
+        <div class="brand-mark" aria-hidden="true">R</div>
+        <div><div class="brand-name">RUNALITH<span> / </span>WORKBENCH</div><div class="brand-caption">LOCAL ORCHESTRATOR</div></div>
       </div>
-      <div class="workspace-label">WORKSPACE <span class="mini-live"><b></b> LOCAL</span></div>
-      <nav class="primary-nav" aria-label="Primary navigation">
-        <button class="nav-item active" data-view="overview"><span class="nav-symbol">◈</span><span>Overview</span><span class="nav-arrow">↗</span></button>
-        <button class="nav-item" data-view="workflows"><span class="nav-symbol">⌘</span><span>Workflows</span><span class="nav-count" id="nav-jobs-count">—</span></button>
-        <button class="nav-item" data-view="roles"><span class="nav-symbol">◎</span><span>Roles &amp; skills</span><span class="nav-count" id="nav-roles-count">—</span></button>
-        <button class="nav-item" data-view="policies"><span class="nav-symbol">⚖</span><span>Policies</span><span class="nav-count" id="nav-policies-count">—</span></button>
-        <button class="nav-item" data-view="batches"><span class="nav-symbol">▤</span><span>Batch execution</span><span class="nav-count" id="nav-batches-count">—</span></button>
-        <button class="nav-item" data-view="events"><span class="nav-symbol">≋</span><span>Event stream</span><span class="nav-count" id="nav-events-count">—</span></button>
-        <button class="nav-item" data-view="artifacts"><span class="nav-symbol">▧</span><span>Artifacts</span></button>
-        <button class="nav-item" data-view="files"><span class="nav-symbol">▤</span><span>File explorer</span></button>
+      <div class="wb-sidebar-context"><span id="wb-sidebar-title">HOME</span><span class="mini-live"><b></b> LOCAL</span></div>
+      <nav id="wb-sidebar-groups" class="primary-nav" aria-label="Context navigation">
+        <section class="wb-sidebar-group" data-sidebar-group="home">
+          <div class="wb-group-label">HOME</div>
+          <button class="nav-item active" data-container="home" data-view="overview" aria-label="Overview" title="Overview" aria-current="page"><span class="nav-symbol" aria-hidden="true">⌂</span><span>Overview</span><span class="nav-arrow" aria-hidden="true">↗</span></button>
+        </section>
+        <section class="wb-sidebar-group" data-sidebar-group="explorer" hidden>
+          <div class="wb-group-label">EXPLORER</div>
+          <button class="nav-item" data-container="explorer" data-view="files" aria-label="File explorer" title="File explorer"><span class="nav-symbol" aria-hidden="true">▤</span><span>Workspace files</span></button>
+          <div id="wb-explorer-sidebar" class="wb-context-tools"></div>
+        </section>
+        <section class="wb-sidebar-group" data-sidebar-group="search" hidden>
+          <div class="wb-group-label">SEARCH</div>
+          <button class="wb-context-action" data-workbench-action="search"><span aria-hidden="true">⌕</span><span>Global Search</span></button>
+          <button class="wb-context-action" data-workbench-action="quick-open"><span aria-hidden="true">↗</span><span>Quick Open</span><kbd>Ctrl/Cmd+P</kbd></button>
+        </section>
+        <section class="wb-sidebar-group" data-sidebar-group="sourceControl" hidden>
+          <div class="wb-group-label">SOURCE CONTROL</div>
+          <div class="wb-source-toolbar"><span>CHANGES</span><button class="wb-small-action" data-workbench-action="refresh-git" title="Refresh read-only Git status" aria-label="Refresh Git status">↻</button></div>
+          <div id="wb-source-sidebar" class="wb-context-tools"></div>
+          <p class="wb-sidebar-note">Diffs are read-only. Staging and Git mutations are unavailable.</p>
+        </section>
+        <section class="wb-sidebar-group" data-sidebar-group="runalith" hidden>
+          <div class="wb-group-label">RUNALITH</div>
+          <button class="nav-item" data-container="runalith" data-view="workflows" aria-label="Workflows" title="Workflows"><span class="nav-symbol" aria-hidden="true">⌘</span><span>Workflows</span><span class="nav-count" id="nav-jobs-count">—</span></button>
+          <button class="nav-item" data-container="runalith" data-view="roles" aria-label="Roles and skills" title="Roles &amp; skills"><span class="nav-symbol" aria-hidden="true">◎</span><span>Roles &amp; skills</span><span class="nav-count" id="nav-roles-count">—</span></button>
+          <button class="nav-item" data-container="runalith" data-view="policies" aria-label="Policies" title="Policies"><span class="nav-symbol" aria-hidden="true">⚖</span><span>Policies</span><span class="nav-count" id="nav-policies-count">—</span></button>
+          <button class="nav-item" data-container="runalith" data-view="artifacts" aria-label="Artifacts" title="Artifacts"><span class="nav-symbol" aria-hidden="true">▧</span><span>Artifacts</span></button>
+        </section>
+        <section class="wb-sidebar-group" data-sidebar-group="observability" hidden>
+          <div class="wb-group-label">OBSERVABILITY</div>
+          <button class="nav-item" data-container="observability" data-view="batches" aria-label="Batch execution" title="Batch execution"><span class="nav-symbol" aria-hidden="true">▤</span><span>Batch execution</span><span class="nav-count" id="nav-batches-count">—</span></button>
+          <button class="nav-item" data-container="observability" data-view="events" aria-label="Event stream" title="Event stream"><span class="nav-symbol" aria-hidden="true">≋</span><span>Event stream</span><span class="nav-count" id="nav-events-count">—</span></button>
+        </section>
+        <section class="wb-sidebar-group" data-sidebar-group="problems" hidden>
+          <div class="wb-group-label">HEALTH &amp; DIAGNOSTICS</div>
+          <button class="wb-context-action" data-workbench-action="problems"><span aria-hidden="true">!</span><span>Problems</span><span id="wb-problem-count" class="nav-count">—</span></button>
+          <button class="wb-context-action" data-workbench-action="diagnostics"><span aria-hidden="true">⌁</span><span>Diagnostics</span></button>
+          <p class="wb-sidebar-note">Inspect local state. No run, retry or mutation actions are available.</p>
+        </section>
       </nav>
       <div class="sidebar-bottom">
         <div class="secure-card"><div class="secure-icon">⌑</div><div><strong>LOCAL-FIRST</strong><span>Read-only inspection</span></div><span class="secure-check">✓</span></div>
@@ -35,12 +68,12 @@
       </div>
     </aside>
 
-    <main class="main-column">
+    <main id="main-content" class="main-column" tabindex="-1">
       <header class="topbar">
         <div class="breadcrumb"><span>LOCAL</span><b>/</b><strong id="crumb-current">Overview</strong></div>
         <div class="top-actions">
-          <label class="global-search"><span>⌕</span><input id="global-search" type="search" placeholder="Search workflows…" aria-label="Search workflows (press Enter to open registry)" autocomplete="off"><kbd>↵</kbd></label>
-          <button class="icon-button" id="refresh-button" title="Refresh dashboard" aria-label="Refresh dashboard">↻</button>
+          <label class="global-search"><span>⌕</span><input id="global-search" type="search" placeholder="Search everything…" aria-label="Search all local records and files (press Enter)" aria-keyshortcuts="/" autocomplete="off"><kbd>↵</kbd></label>
+          <button class="icon-button" id="refresh-button" title="Refresh dashboard" aria-label="Refresh dashboard"><span aria-hidden="true">↻</span></button>
           <div class="user-chip"><span class="user-avatar">LO</span><div><strong>LOCAL OPERATOR</strong><span id="top-health">Connecting…</span></div><span class="chevron">⌄</span></div>
         </div>
       </header>
@@ -48,7 +81,7 @@
       <div class="content-wrap">
         <section class="hero-row">
           <div>
-            <div class="eyebrow"><span id="last-updated">SYNCING SNAPSHOT</span></div>
+          <div class="eyebrow"><span id="last-updated" data-sync-state="syncing">SYNCING SNAPSHOT</span><span class="sync-indicator" aria-hidden="true"></span></div>
             <h1 id="page-title">Operations <em>Overview</em></h1>
             <p id="page-subtitle">Workflow status, recent activity and exceptions.</p>
           </div>
@@ -137,11 +170,26 @@
         </section>
 
         <section id="files-view" class="view-panel hidden">
-          <div class="section-toolbar"><div><h2>Local files</h2><p>Read-only text and log previews from the local data directory.</p></div><div class="read-only-badge"><span>◉</span> READ-ONLY</div></div>
-          <div class="file-layout"><article class="panel file-browser"><div class="file-pathbar"><span class="path-icon">▤</span><span id="file-breadcrumb">/</span><button id="file-up" class="small-button" disabled>↑ Up</button><button id="file-refresh" class="small-button">↻ Refresh</button></div><div id="file-list" class="file-list"><div class="table-empty">Loading local directory…</div></div><div class="file-footnote"><span>⌑</span> Files are never modified or served as downloads. Database and binary files are excluded.</div></article><article class="panel file-preview-panel"><div class="preview-head"><div><div class="panel-kicker">TEXT PREVIEW</div><h3 id="file-preview-title">No file selected</h3></div><span class="preview-limit">MAX 64 KB</span></div><div class="preview-meta" id="file-preview-meta">Choose a log or text file to inspect it.</div><pre id="file-preview-content" class="file-code"><span class="code-placeholder">// Your selected file will appear here.</span></pre></article></div>
+          <div class="section-toolbar"><div><h2>Explorer</h2><p>Browse the configured workspace in the sidebar; inspect supported files here.</p></div><div class="read-only-badge"><span>◉</span> READ-ONLY</div></div>
+          <div class="wb-editor-host">
+            <article class="panel file-preview-panel">
+              <div class="preview-head"><div><div class="panel-kicker">READ-ONLY EDITOR</div><h3 id="file-preview-title">No file selected</h3></div><span class="preview-limit">MAX 64 KB</span></div>
+              <div class="preview-meta" id="file-preview-meta">Choose a supported text or log file from Explorer.</div>
+              <pre id="file-preview-content" class="file-code"><span class="code-placeholder">// Selected file content appears here. Editing and saving are disabled.</span></pre>
+            </article>
+            <article class="panel wb-source-control hidden" id="wb-source-control">
+              <div class="panel-head"><div><h2>Source Control</h2><p>Select a changed file in the sidebar to inspect its bounded diff.</p></div><label class="wb-diff-mode-label">Diff mode <select id="wb-diff-mode" class="wb-diff-mode" aria-label="Git diff mode"><option value="working-tree">Working tree</option><option value="staged">Staged</option><option value="unstaged">Unstaged</option></select></label></div>
+              <pre class="wb-diff" id="wb-diff">Choose a changed file from the Source Control sidebar.</pre>
+            </article>
+          </div>
+          <div class="wb-legacy-file-compat" hidden aria-hidden="true">
+            <div class="file-pathbar"><span class="path-icon">▤</span><span id="file-breadcrumb">/</span><button id="file-up" class="small-button" disabled>↑ Up</button><button id="file-refresh" class="small-button">↻ Refresh</button></div>
+            <div id="file-list" class="file-list"></div>
+          </div>
         </section>
 
-        <footer class="page-footer"><div>LOCAL <span class="footer-separator">/</span> WORKFLOW MONITOR</div><div><span class="footer-lock">⌑</span> READ-ONLY <span class="footer-separator">·</span> LOOPBACK ONLY <span class="footer-separator">·</span> <span id="footer-clock">—</span></div></footer>
+        <section id="wb-utility-view" class="view-panel hidden" aria-labelledby="wb-utility-heading"><div id="wb-utility-content" class="wb-utility-content"></div></section>
+        <footer class="page-footer"><div>RUNALITH <span class="footer-separator">/</span> LOCAL WORKBENCH</div><div><span class="footer-lock">⌑</span> READ-ONLY <span class="footer-separator">·</span> LOOPBACK ONLY <span class="footer-separator">·</span> <span id="footer-clock">—</span></div></footer>
       </div>
     </main>
   </div>

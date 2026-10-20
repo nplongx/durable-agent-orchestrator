@@ -5,6 +5,7 @@ import { runExecutionControlCommand } from '../src/runtime/execution-manager.js'
 import { tempDir } from './test-temp-dir.js';
 
 const root = tempDir('execution-control-process-boundary-');
+process.on('exit', () => { try { fs.rmSync(root, { recursive: true, force: true }); } catch {} });
 const success = await runExecutionControlCommand(process.execPath, ['-e', "process.stdout.write('CONTROL_OK'); process.stderr.write('CONTROL_ERR')"], {
   timeoutMs: 2000, maxOutputBytes: 1024
 });

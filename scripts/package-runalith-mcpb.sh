@@ -20,9 +20,21 @@ assert_regular_source() {
   done
   [[ "$(realpath -e "$current")" == "$current" ]] || { echo "Refusing non-canonical package source: $relative" >&2; exit 2; }
 }
-for SOURCE in README.md LICENSE package.json plugin/manifest.json tests/test-runalith-plugin.js tests/test-production-behavioral-qa.js tests/test-extracted-package-tool-schemas.mjs tests/test-execution-lease-fencing.js tests/test-mcp-stdio-backpressure.mjs tests/test-temp-dir.js tests/test-mcp-graceful-signal-shutdown-20261017.js tests/test-mcp-shutdown-backpressure-deadline-20261017.js tests/test-mcp-eof-shutdown-framing-20261017.js scripts/package-runalith-mcpb.sh scripts/collect-plugin-runtime.mjs scripts/plugin-package-metadata.mjs; do
+for SOURCE in README.md LICENSE package.json plugin/manifest.json tests/test-runalith-plugin.js tests/test-production-behavioral-qa.js tests/test-extracted-package-tool-schemas.mjs tests/test-execution-lease-fencing.js tests/test-execution-control-process-boundary.js tests/test-mcp-stdio-backpressure.mjs tests/test-temp-dir.js tests/test-execution-batch.js tests/test-execution-batch-concurrency.js tests/test-execution-batch-terminal-recovery.js tests/test-execution-success-contract.js tests/test-phase5-recovery.js tests/test-agent-tool-guidance.js tests/test-mcp-graceful-signal-shutdown-20261017.js tests/test-mcp-shutdown-backpressure-deadline-20261017.js tests/test-mcp-eof-shutdown-framing-20261017.js scripts/package-runalith-mcpb.sh scripts/collect-plugin-runtime.mjs scripts/plugin-package-metadata.mjs; do
   assert_regular_source "$SOURCE"
 done
+
+MANDATORY_VALIDATION_TESTS=(
+  tests/test-execution-batch.js
+  tests/test-execution-batch-concurrency.js
+  tests/test-execution-batch-terminal-recovery.js
+  tests/test-execution-success-contract.js
+  tests/test-phase5-recovery.js
+  tests/test-agent-tool-guidance.js
+  tests/test-execution-lease-fencing.js
+  tests/test-execution-control-process-boundary.js
+)
+
 VERSION="$(node -p "require('$ROOT/package.json').version")"
 OUT="${PLUGIN_BUNDLE_OUT:-$ROOT/dist/runalith-${VERSION}-candidate-$(date -u +%Y%m%dT%H%M%SZ).mcpb}"
 if [[ "$OUT" != /* ]]; then OUT="$ROOT/$OUT"; fi
@@ -64,12 +76,18 @@ const source = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
 fs.writeFileSync(outputPath, serializePluginPackageMetadata(source), { flag: 'wx', mode: 0o644 });
 NODE
 mkdir -p "$PAYLOAD/tests"
+cp "$ROOT/tests/test-temp-dir.js" "$PAYLOAD/tests/"
 cp "$ROOT/tests/test-runalith-plugin.js" "$PAYLOAD/tests/"
 cp "$ROOT/tests/test-production-behavioral-qa.js" "$PAYLOAD/tests/"
 cp "$ROOT/tests/test-mcp-stdio-backpressure.mjs" "$PAYLOAD/tests/"
 cp "$ROOT/tests/test-mcp-graceful-signal-shutdown-20261017.js" "$PAYLOAD/tests/"
 cp "$ROOT/tests/test-mcp-shutdown-backpressure-deadline-20261017.js" "$PAYLOAD/tests/"
 cp "$ROOT/tests/test-mcp-eof-shutdown-framing-20261017.js" "$PAYLOAD/tests/"
+for SOURCE in "${MANDATORY_VALIDATION_TESTS[@]}"; do
+  cp "$ROOT/$SOURCE" "$PAYLOAD/$SOURCE"
+  [[ -f "$PAYLOAD/$SOURCE" && ! -L "$PAYLOAD/$SOURCE" ]] || { echo "Mandatory validation test missing or non-regular in MCPB payload: $SOURCE" >&2; exit 2; }
+  cmp -s "$ROOT/$SOURCE" "$PAYLOAD/$SOURCE" || { echo "Mandatory validation test bytes differ in MCPB payload: $SOURCE" >&2; exit 2; }
+done
 node "$ROOT/scripts/collect-plugin-runtime.mjs" "$ROOT" "$PAYLOAD"
 # Normalize payload timestamps before archiving. ZIP's DOS timestamp fields
 # otherwise inherit fresh staging mtimes, making identical payload bytes produce
@@ -98,6 +116,10 @@ unzip -t "$BUNDLE" >/dev/null
 mkdir -p "$EXTRACTED"
 chmod 700 "$EXTRACTED"
 unzip -q "$BUNDLE" -d "$EXTRACTED"
+for SOURCE in "${MANDATORY_VALIDATION_TESTS[@]}"; do
+  [[ -f "$EXTRACTED/$SOURCE" && ! -L "$EXTRACTED/$SOURCE" ]] || { echo "Mandatory validation test missing from extracted MCPB archive: $SOURCE" >&2; exit 2; }
+  cmp -s "$ROOT/$SOURCE" "$EXTRACTED/$SOURCE" || { echo "Mandatory validation test bytes differ in extracted MCPB archive: $SOURCE" >&2; exit 2; }
+done
 STRICT_JSON_MODULE="$ROOT/src/runtime/strict-json.js" node --input-type=module - "$BUNDLE" <<'NODE'
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -163,11 +185,33 @@ NODE
 # as the MCP tool names/count. A candidate must not be published merely because
 # every declared tool name appears while its extracted schema is malformed.
 PHASE2_CANDIDATE_BUNDLE="$BUNDLE" PHASE2_ALLOW_EXTERNAL_CANDIDATE_BUNDLE=1 node "$ROOT/tests/test-extracted-package-tool-schemas.mjs"
-node "$ROOT/tests/test-execution-lease-fencing.js"
-node "$EXTRACTED/tests/test-mcp-stdio-backpressure.mjs"
-node "$EXTRACTED/tests/test-mcp-graceful-signal-shutdown-20261017.js"
-node "$EXTRACTED/tests/test-mcp-shutdown-backpressure-deadline-20261017.js"
-node "$EXTRACTED/tests/test-mcp-eof-shutdown-framing-20261017.js"
+
+# Log an explicit invocation boundary and exit code for each packaged regression.
+# These tests run from extracted archive bytes, never from a source-tree path.
+run_extracted_validation_test() {
+  local relative="$1"
+  local source="$ROOT/$relative"
+  local extracted="$EXTRACTED/$relative"
+  [[ -f "$source" && ! -L "$source" && -f "$extracted" && ! -L "$extracted" ]] || {
+    echo "Extracted validation test missing or non-regular: $relative" >&2
+    exit 2
+  }
+  cmp -s "$source" "$extracted" || {
+    echo "Extracted validation test bytes differ from source: $relative" >&2
+    exit 2
+  }
+  printf 'EXTRACTED_VALIDATION_TEST_BEGIN path=%s context=archive-extracted\n' "$relative"
+  local test_status=0
+  if node "$extracted"; then test_status=0; else test_status=$?; fi
+  printf 'EXTRACTED_VALIDATION_TEST_EXIT path=%s exit_code=%d context=archive-extracted\n' "$relative" "$test_status"
+  return "$test_status"
+}
+run_extracted_validation_test tests/test-execution-lease-fencing.js
+run_extracted_validation_test tests/test-execution-control-process-boundary.js
+run_extracted_validation_test tests/test-mcp-stdio-backpressure.mjs
+run_extracted_validation_test tests/test-mcp-graceful-signal-shutdown-20261017.js
+run_extracted_validation_test tests/test-mcp-shutdown-backpressure-deadline-20261017.js
+run_extracted_validation_test tests/test-mcp-eof-shutdown-framing-20261017.js
 
 # Run the complete acceptance workflow against bytes extracted from the exact archive.
 env -u OPENAI_API_KEY node "$EXTRACTED/tests/test-runalith-plugin.js"

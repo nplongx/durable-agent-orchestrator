@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 const DIRECTORY_FLAGS = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
 const READ_FLAGS = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW;
@@ -148,4 +149,121 @@ export function writeFileWithin(root, candidate, contents, { mode = 0o600, creat
   const parent = openDirectoryWithin(root, parts.join(path.sep) || '.', { create: createParents });
   try { writeFileAtDirectory(parent.fd, name, contents, { mode }); }
   finally { parent.close(); }
+}
+
+// Replace one regular workspace file using a same-directory temporary file and
+// descriptor-anchored operations. This is deliberately not a multi-file
+// transaction: callers receive per-file evidence and must report partial
+// application if a later file fails. expectedSha256 is a compare-before-write
+// fence; O_NOFOLLOW and the held parent descriptor prevent symlink traversal.
+export function replaceFileWithin(root, candidate, contents, { expectedSha256, maxBytes = 2_000_000 } = {}) {
+  if (typeof candidate !== 'string' || !candidate.trim() || path.isAbsolute(candidate) ||
+      candidate.includes('\\') || candidate.includes('\0') || candidate.split('/').includes('..')) {
+    throw new Error('secure filesystem replacement requires a normalized workspace-relative file path');
+  }
+  if (typeof contents !== 'string' && !Buffer.isBuffer(contents)) {
+    throw new Error('secure filesystem replacement contents must be a string or Buffer');
+  }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error('secure filesystem replacement maxBytes is invalid');
+  const bytes = Buffer.isBuffer(contents) ? Buffer.from(contents) : Buffer.from(contents, 'utf8');
+  if (bytes.length > maxBytes) throw new Error(`secure filesystem replacement exceeds ${maxBytes} bytes`);
+  if (expectedSha256 !== 'ABSENT' && (typeof expectedSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedSha256))) {
+    throw new Error('secure filesystem replacement expectedSha256 must be a lowercase SHA-256 digest or ABSENT');
+  }
+  const digest = value => crypto.createHash('sha256').update(value).digest('hex');
+  const resolved = resolveWithinRoot(root, candidate, 'replacement path');
+  const relative = path.relative(fs.realpathSync(root), resolved);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`)) {
+    throw new Error('secure filesystem replacement must name a file inside the workspace');
+  }
+  const parts = relative.split(path.sep);
+  const name = parts.pop();
+  const parent = openDirectoryWithin(root, parts.join(path.sep) || '.');
+  const targetPath = procPath(parent.fd, name);
+  const temporaryName = `.runalith-write-${crypto.randomUUID()}.tmp`;
+  const temporaryPath = procPath(parent.fd, temporaryName);
+  let temporaryCreated = false;
+  try {
+    let before = null;
+    let beforeStat = null;
+    try { beforeStat = lstatAtDirectory(parent.fd, name); }
+    catch (error) { if (error?.code !== 'ENOENT') throw error; }
+    if (beforeStat) {
+      if (beforeStat.isSymbolicLink() || !beforeStat.isFile() || beforeStat.nlink !== 1) {
+        throw new Error('secure filesystem replacement target must be a regular, non-symlink, single-link file');
+      }
+      before = readFileAtDirectory(parent.fd, name);
+    }
+    const beforeHash = before == null ? null : digest(before);
+    const afterHash = digest(bytes);
+
+    // A retry after a file rename but before its durable receipt may observe
+    // the intended bytes. Report this as already present, never as a new write.
+    if (beforeHash === afterHash) {
+      return { changed: false, outcome: 'already_present', path: relative.split(path.sep).join('/'), before_sha256: beforeHash, after_sha256: afterHash, size_bytes: bytes.length };
+    }
+    if (expectedSha256 === 'ABSENT' ? before != null : beforeHash !== expectedSha256) {
+      const error = new Error(`workspace file base hash mismatch: expected ${expectedSha256}, observed ${beforeHash || 'ABSENT'}`);
+      error.code = 'WORKSPACE_WRITE_BASE_HASH_MISMATCH';
+      error.expected_sha256 = expectedSha256;
+      error.observed_sha256 = beforeHash || 'ABSENT';
+      throw error;
+    }
+
+    const mode = beforeStat ? (beforeStat.mode & 0o777) : 0o600;
+    writeFileAtDirectory(parent.fd, temporaryName, bytes, { mode });
+    temporaryCreated = true;
+
+    // Re-read immediately before replace, and compare the same base again.
+    // The caller additionally holds the SQLite writer reservation while the
+    // change/receipt commits, serializing this plugin's own writer operations.
+    let currentStat = null;
+    try { currentStat = lstatAtDirectory(parent.fd, name); }
+    catch (error) { if (error?.code !== 'ENOENT') throw error; }
+    if (beforeStat) {
+      if (!currentStat || currentStat.isSymbolicLink() || !currentStat.isFile() || currentStat.nlink !== 1 ||
+          currentStat.dev !== beforeStat.dev || currentStat.ino !== beforeStat.ino) {
+        const error = new Error('workspace target identity changed before atomic replacement');
+        error.code = 'WORKSPACE_WRITE_TARGET_CHANGED';
+        throw error;
+      }
+      const latest = readFileAtDirectory(parent.fd, name);
+      if (digest(latest) !== beforeHash) {
+        const error = new Error('workspace file base hash mismatch at replacement fence');
+        error.code = 'WORKSPACE_WRITE_BASE_HASH_MISMATCH';
+        error.expected_sha256 = beforeHash;
+        error.observed_sha256 = digest(latest);
+        throw error;
+      }
+      // POSIX rename atomically replaces the directory entry. The path remains
+      // rooted at the opened parent descriptor and never follows a final link.
+      fs.renameSync(temporaryPath, targetPath);
+    } else {
+      if (currentStat) {
+        const error = new Error('workspace target was created before exclusive file creation');
+        error.code = 'WORKSPACE_WRITE_TARGET_CHANGED';
+        throw error;
+      }
+      // link is exclusive: an external creator cannot be silently overwritten
+      // when the expected base was ABSENT.
+      fs.linkSync(temporaryPath, targetPath);
+      fs.unlinkSync(temporaryPath);
+    }
+    temporaryCreated = false;
+    fs.fsyncSync(parent.fd);
+    const afterStat = lstatAtDirectory(parent.fd, name);
+    if (!afterStat.isFile() || afterStat.isSymbolicLink() || afterStat.nlink !== 1) {
+      throw new Error('secure filesystem replacement readback is not a regular single-link file');
+    }
+    const persisted = readFileAtDirectory(parent.fd, name);
+    if (digest(persisted) !== afterHash || !persisted.equals(bytes)) {
+      throw new Error('secure filesystem replacement readback hash mismatch');
+    }
+    return { changed: true, outcome: beforeStat ? 'replaced' : 'created', path: relative.split(path.sep).join('/'), before_sha256: beforeHash || 'ABSENT', after_sha256: afterHash, size_bytes: bytes.length };
+  } finally {
+    if (temporaryCreated) {
+      try { fs.unlinkSync(temporaryPath); } catch {}
+    }
+    parent.close();
+  }
 }

@@ -21,6 +21,7 @@ const { WorkflowStore } = await import('../src/runtime/job-store.js');
 const { ExecutionManager } = await import('../src/runtime/execution-manager.js');
 const store = new WorkflowStore();
 const manager = new ExecutionManager(store, { timeoutMs: 10000, executionTmpDir: runtimeDir });
+const nodeExecutable = JSON.stringify(process.execPath);
 let batch = null;
 
 function launchBatchOwner(label) {
@@ -48,7 +49,7 @@ function launchBatchOwner(label) {
   child.stdout.on('data', chunk => { stdout += chunk; });
   child.stderr.on('data', chunk => { stderr += chunk; });
   const done = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr })));
-  return { child, done };
+  return { child, done, get stdout() { return stdout; }, get stderr() { return stderr; } };
 }
 
 let owner;
@@ -58,7 +59,7 @@ try {
   store.approve(job.job_id, 'isolated local batch concurrency fixture', 'test-fixture');
   const parent = store.dispatch(job.job_id, { role: 'architect', description: 'Batch concurrency fixture parent' });
   const markerForSource = startedMarker.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-  const command = `node -e "require('node:fs').writeFileSync('${markerForSource}', 'started', {flag:'wx'}); setTimeout(() => console.log('BATCH_OWNER_ONLY'), 4000)"`;
+  const command = `${nodeExecutable} -e "require('node:fs').writeFileSync('${markerForSource}', 'started', {flag:'wx'}); setTimeout(() => console.log('BATCH_OWNER_ONLY'), 4000)"`;
   const task = store.createChildTask(job.job_id, {
     parentTaskId: parent.task_id, role: 'architect', description: 'one exact batch item across processes',
     metadata: { deterministic: true, command }
@@ -70,7 +71,7 @@ try {
   owner = launchBatchOwner('OWNER');
   const deadline = Date.now() + 20000;
   while (!fs.existsSync(startedMarker)) {
-    if (Date.now() >= deadline) throw new Error(`first batch owner never reached its actual local command: ${owner.child.pid}`);
+    if (Date.now() >= deadline) throw new Error(`first batch owner never reached its actual local command: ${owner.child.pid}; child_exit=${owner.child.exitCode}; stdout=${JSON.stringify(owner.stdout)}; stderr=${JSON.stringify(owner.stderr)}`);
     assert.equal(owner.child.exitCode, null, `owner exited before command start: ${owner.child.exitCode}`);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
   }
@@ -110,7 +111,7 @@ try {
   // Crash/restart boundary: all item rows are durable terminal evidence, but
   // the owner dies before writing the batch aggregate/status/event. Re-entry
   // must rebuild the aggregate without launching the task a second time.
-  const replayCommand = "node -e \"process.stdout.write('MUST_NOT_SPAWN')\"";
+  const replayCommand = `${nodeExecutable} -e "process.stdout.write('MUST_NOT_SPAWN')"`;
   const replayTask = store.createChildTask(job.job_id, {
     parentTaskId: parent.task_id, role: 'architect', description: 'terminal item aggregate recovery',
     metadata: { deterministic: true, command: replayCommand }

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -10,13 +11,42 @@ import { canonicalJson } from '../src/runtime/workflow/plan.js';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'orchestrator-dashboard-test-'));
 const dataDir = path.join(temp, 'data');
+const filesRoot = path.join(temp, 'workspace');
 const dbPath = path.join(dataDir, 'workflow.db');
-fs.mkdirSync(path.join(dataDir, 'runtime'), { recursive: true });
+fs.mkdirSync(path.join(filesRoot, 'runtime'), { recursive: true });
+fs.mkdirSync(path.join(filesRoot, 'docs'), { recursive: true });
+fs.mkdirSync(path.join(filesRoot, '.private'), { recursive: true });
 fs.mkdirSync(path.join(dataDir, 'case01-snapshots'), { recursive: true });
-fs.writeFileSync(path.join(dataDir, 'runtime', 'runner.log'), `hello from local runtime\napi_key=fixture-super-secret-token-123456\n${'x'.repeat(70_000)}`);
-fs.writeFileSync(path.join(dataDir, 'runtime', 'unsafe.bin'), Buffer.from([0,1,2,3]));
-fs.writeFileSync(path.join(dataDir, 'private.txt'), 'must not be exposed through outside symlink');
-try { fs.symlinkSync(path.join(dataDir, 'private.txt'), path.join(dataDir, 'runtime', 'linked.txt')); } catch {}
+fs.writeFileSync(path.join(filesRoot, 'README.md'), '# Workspace fixture\\n');
+fs.writeFileSync(path.join(filesRoot, 'package.json'), '{"name":"dashboard-files-root-fixture"}\\n');
+fs.writeFileSync(path.join(filesRoot, 'docs', 'start-here.md'), 'Workspace browse root is independent from the workflow database.\\n');
+fs.writeFileSync(path.join(filesRoot, 'runtime', 'runner.log'), `hello from local runtime\\napi_key=fixture-super-secret-token-123456\\n${'x'.repeat(70_000)}`);
+fs.writeFileSync(path.join(filesRoot, 'runtime', 'unsafe.bin'), Buffer.from([0,1,2,3]));
+fs.writeFileSync(path.join(filesRoot, '.private', 'private.txt'), 'must not be exposed through a hidden directory/symlink');
+fs.writeFileSync(path.join(filesRoot, '.env'), 'API_KEY=hidden-dotfile-secret');
+fs.writeFileSync(path.join(filesRoot, 'workflow.db'), 'database sentinel must be hidden');
+fs.writeFileSync(path.join(filesRoot, 'workflow.db-wal'), 'database WAL sentinel must be hidden');
+try { fs.symlinkSync(path.join(filesRoot, '.private', 'private.txt'), path.join(filesRoot, 'runtime', 'linked.txt')); } catch {}
+// Build an isolated local Git fixture to validate the read-only status/diff API.
+fs.writeFileSync(path.join(filesRoot, '.gitignore'), 'runtime/\ndocs/\n.env\nworkflow.db*\n.private/\n');
+fs.writeFileSync(path.join(filesRoot, 'sample.js'), 'export const value = 1;\n');
+fs.writeFileSync(path.join(filesRoot, 'delete-me.js'), 'export const removeMe = true;\n');
+fs.writeFileSync(path.join(filesRoot, 'staged.js'), 'export const stagedValue = 1;\n');
+fs.writeFileSync(path.join(filesRoot, 'rename-source.js'), 'export const renameValue = true;\n');
+execFileSync('git', ['init', '-q'], { cwd: filesRoot });
+execFileSync('git', ['config', 'user.name', 'Dashboard Fixture'], { cwd: filesRoot });
+execFileSync('git', ['config', 'user.email', 'dashboard-fixture@example.invalid'], { cwd: filesRoot });
+execFileSync('git', ['add', '.gitignore', 'README.md', 'sample.js', 'delete-me.js', 'staged.js', 'rename-source.js'], { cwd: filesRoot });
+execFileSync('git', ['commit', '-qm', 'fixture baseline'], { cwd: filesRoot });
+fs.writeFileSync(path.join(filesRoot, 'sample.js'), 'export const value = 2;\n');
+fs.writeFileSync(path.join(filesRoot, 'added.js'), 'export const newValue = true;\n');
+fs.writeFileSync(path.join(filesRoot, 'staged.js'), 'export const stagedValue = 2;\n');
+execFileSync('git', ['add', 'staged.js'], { cwd: filesRoot });
+fs.writeFileSync(path.join(filesRoot, 'staged.js'), 'export const stagedValue = 3;\n');
+fs.rmSync(path.join(filesRoot, 'delete-me.js'));
+execFileSync('git', ['mv', 'rename-source.js', 'renamed file.js'], { cwd: filesRoot });
+fs.writeFileSync(path.join(filesRoot, 'space name.js'), 'export const spaced = true;\n');
+fs.mkdirSync(path.join(dataDir, 'case01-snapshots'), { recursive: true });
 
 const db = new DatabaseSync(dbPath);
 db.exec(`
@@ -87,7 +117,32 @@ db.prepare('UPDATE tasks SET role=?,metadata_json=? WHERE task_id=?').run('custo
 db.prepare('UPDATE tasks SET metadata_json=? WHERE task_id=?').run(JSON.stringify({custom_role_id:'/home/red-team/private-skill',custom_role_version:1,custom_role_name:'Path-shaped invalid role ID'}), 'task-demo-002');
 db.close();
 
-const app = createDashboardServer({host:'127.0.0.1',port:0,dataDir,dbPath});
+const savedRunalithFilesRoot = process.env.RUNALITH_DASHBOARD_FILES_ROOT;
+const savedChatFilesRoot = process.env.CHAT_ON_STEROIDS_DASHBOARD_FILES_ROOT;
+delete process.env.RUNALITH_DASHBOARD_FILES_ROOT;
+delete process.env.CHAT_ON_STEROIDS_DASHBOARD_FILES_ROOT;
+const rootOptionProbe = createDashboardServer({host:'127.0.0.1',port:0,dataDir,dbPath,filesRoot});
+assert.equal(rootOptionProbe.filesRoot,fs.realpathSync(filesRoot),'explicit filesRoot should be independent of database dataDir');
+await rootOptionProbe.close();
+process.env.RUNALITH_DASHBOARD_FILES_ROOT = filesRoot;
+const runalithEnvProbe = createDashboardServer({host:'127.0.0.1',port:0,dataDir,dbPath});
+assert.equal(runalithEnvProbe.filesRoot,fs.realpathSync(filesRoot),'RUNALITH_DASHBOARD_FILES_ROOT should configure the browse root');
+await runalithEnvProbe.close();
+delete process.env.RUNALITH_DASHBOARD_FILES_ROOT;
+process.env.CHAT_ON_STEROIDS_DASHBOARD_FILES_ROOT = filesRoot;
+const chatEnvProbe = createDashboardServer({host:'127.0.0.1',port:0,dataDir,dbPath});
+assert.equal(chatEnvProbe.filesRoot,fs.realpathSync(filesRoot),'Chat On Steroids environment alias should configure the browse root');
+await chatEnvProbe.close();
+delete process.env.CHAT_ON_STEROIDS_DASHBOARD_FILES_ROOT;
+const compatibilityProbe = createDashboardServer({host:'127.0.0.1',port:0,dataDir,dbPath});
+assert.equal(compatibilityProbe.filesRoot,fs.realpathSync(dataDir),'explicit dataDir remains the browse-root fallback');
+await compatibilityProbe.close();
+const cwdProbe = createDashboardServer({host:'127.0.0.1',port:0,dbPath});
+assert.equal(cwdProbe.filesRoot,fs.realpathSync(process.cwd()),'normal launch defaults browsing to process.cwd()');
+await cwdProbe.close();
+if(savedRunalithFilesRoot==null) delete process.env.RUNALITH_DASHBOARD_FILES_ROOT; else process.env.RUNALITH_DASHBOARD_FILES_ROOT=savedRunalithFilesRoot;
+if(savedChatFilesRoot==null) delete process.env.CHAT_ON_STEROIDS_DASHBOARD_FILES_ROOT; else process.env.CHAT_ON_STEROIDS_DASHBOARD_FILES_ROOT=savedChatFilesRoot;
+const app = createDashboardServer({host:'127.0.0.1',port:0,dataDir,dbPath,filesRoot});
 let base = '';
 try {
   const address = await app.listen();
@@ -214,10 +269,47 @@ try {
   result = await get('/api/artifacts?type=research'); assert.equal(result.body.items.length,1); assert.equal(result.body.items[0].producer_role,'Fixture Evidence Analyst (fixture-analyst@1)'); assert.equal(result.body.items[0].content_length>48_000,true);
   result = await get('/api/artifacts/artifact-demo'); assert.equal(result.res.status,200); assert.equal(result.body.content_truncated,true); assert.equal(JSON.stringify(result.body).length<60_000,true); assert.equal(JSON.stringify(result.body).includes('fixture-artifact-secret-456789'),false);
 
-  // Text file browsing is confined and bounded; the DB, binaries and symlinks are not exposed.
+  // File browsing uses a separate workspace root while preserving existing file security guarantees.
+  result = await get('/api/health'); assert.equal(result.res.status,200);
+  assert.equal(result.body.data_root,path.basename(dataDir)); assert.equal(result.body.files_root,path.basename(filesRoot));
+  assert.equal(JSON.stringify(result.body).includes(filesRoot),false,'health labels must not leak absolute paths');
   result = await get('/api/files'); assert.equal(result.res.status,200);
-  assert.equal(result.body.entries.some(x=>x.name==='workflow.db'),false);
+  assert.equal(result.body.root_label,path.basename(filesRoot)); assert.equal(result.body.path,'');
+  assert.equal(result.body.entries.some(x=>x.name==='README.md'&&x.kind==='file'),true);
+  assert.equal(result.body.entries.some(x=>x.name==='package.json'&&x.kind==='file'),true);
+  assert.equal(result.body.entries.some(x=>x.name==='docs'&&x.kind==='directory'),true);
   assert.equal(result.body.entries.some(x=>x.name==='runtime'&&x.kind==='directory'),true);
+  assert.equal(result.body.entries.some(x=>['workflow.db','workflow.db-wal','.env','.private'].includes(x.name)),false);
+  result = await get('/api/files?path=docs'); assert.equal(result.res.status,200);
+  assert.equal(result.body.entries.some(x=>x.name==='start-here.md'&&x.kind==='file'),true);
+  result = await get('/api/files/preview?path=docs%2Fstart-here.md'); assert.equal(result.res.status,200);
+  assert.match(result.body.preview,/independent from the workflow database/);
+  result = await get('/api/git/status'); assert.equal(result.res.status,200);
+  assert.equal(result.body.git_available,true);
+  const gitByPath = new Map(result.body.entries.map(entry=>[entry.path,entry]));
+  assert.equal(gitByPath.get('sample.js')?.worktree_status,'modified','working-tree-only edits must be represented distinctly');
+  assert.equal(gitByPath.get('staged.js')?.index_status,'modified','staged edits must be represented in the index column');
+  assert.equal(gitByPath.get('staged.js')?.worktree_status,'modified','subsequent edits must remain distinguishable from staged edits');
+  assert.equal(gitByPath.get('added.js')?.kind,'untracked','untracked files must not be treated as clean');
+  assert.equal(gitByPath.get('delete-me.js')?.kind,'deleted','deleted files must remain reviewable');
+  assert.equal(gitByPath.get('renamed file.js')?.kind,'renamed','renames and filenames with spaces must be parsed as one path');
+  assert.equal(gitByPath.get('renamed file.js')?.old_path,'rename-source.js','rename source path should be preserved');
+  assert.equal(gitByPath.get('space name.js')?.kind,'untracked','spaces in supported paths must not corrupt status parsing');
+  assert.equal(result.body.entries.some(entry=>String(entry.path).startsWith('.')),false,'hidden paths must not leak through Git status');
+  assert.equal(JSON.stringify(result.body).includes(filesRoot),false,'Git status must not disclose absolute workspace paths');
+  result = await get('/api/git/diff?path=sample.js&mode=working-tree'); assert.equal(result.res.status,200);
+  assert.equal(result.body.git_available,true); assert.match(result.body.patch,/export const value = 1/); assert.match(result.body.patch,/export const value = 2/);
+  result = await get('/api/git/diff?path=staged.js&mode=staged'); assert.equal(result.res.status,200);
+  assert.match(result.body.patch,/stagedValue = 1/); assert.match(result.body.patch,/stagedValue = 2/);
+  result = await get('/api/git/diff?path=staged.js&mode=unstaged'); assert.equal(result.res.status,200);
+  assert.match(result.body.patch,/stagedValue = 2/); assert.match(result.body.patch,/stagedValue = 3/);
+  result = await get('/api/git/diff?path=added.js&mode=working-tree'); assert.equal(result.res.status,200);
+  assert.equal(result.body.status,'untracked'); assert.match(result.body.patch,/newValue/);
+  result = await get('/api/git/diff?path=space%20name.js&mode=working-tree'); assert.equal(result.res.status,200); assert.match(result.body.patch,/spaced/);
+  result = await get('/api/git/status?path=runtime'); assert.equal(result.res.status,200);
+  assert.equal(result.body.entries.some(entry=>String(entry.path).startsWith('runtime/')),false,'ignored/hidden/unapproved descendants stay out of Git results');
+  result = await get('/api/git/status?path=..'); assert.equal(result.res.status,400);
+  result = await get('/api/git/diff?path=../data/workflow.db&mode=working-tree'); assert.equal(result.res.status,403);
   result = await get('/api/files?path=runtime'); assert.equal(result.res.status,200);
   assert.equal(result.body.entries.some(x=>x.name==='runner.log'),true); assert.equal(result.body.entries.some(x=>x.name==='unsafe.bin'),false); assert.equal(result.body.entries.some(x=>x.name==='linked.txt'),false);
   result = await get('/api/files/preview?path=runtime%2Frunner.log'); assert.equal(result.res.status,200); assert.equal(result.body.truncated,true); assert.ok(result.body.preview.length<=64*1024); assert.match(result.body.preview,/api_key=\[REDACTED\]/); assert.equal(result.body.preview.includes('fixture-super-secret-token-123456'),false);
@@ -225,17 +317,20 @@ try {
   result = await get('/api/files/preview?path=workflow.db'); assert.equal(result.res.status,403);
   result = await get('/api/files/preview?path=runtime%2Funsafe.bin'); assert.equal(result.res.status,403);
   result = await get('/api/files/preview?path=runtime%2Flinked.txt'); assert.equal(result.res.status,403);
-
   // Serving security headers, local-only Host/Origin guard, and read-only method boundary.
-  result = await get('/'); assert.equal(result.res.status,200); assert.match(result.res.headers.get('content-security-policy'),/default-src 'self'/); assert.equal(result.res.headers.get('x-content-type-options'),'nosniff'); assert.match(result.body,/<title>Local Workflow Monitor<\/title>/); assert.match(result.body,/WORKFLOW<span> \/ <\/span>MONITOR/); assert.match(result.body,/LOCAL DASHBOARD/); assert.doesNotMatch(result.body,/ORBIT \/ OPS|ORBIT DASHBOARD/,'user-facing dashboard labels use generic wording'); assert.match(result.body,/Search workflows…/); assert.match(result.body,/data-view="roles"/); assert.match(result.body,/data-view="policies"/); assert.match(result.body,/id="policy-list"/); assert.match(result.body,/id="policy-attachment-list"/); assert.match(result.body,/data-view="batches"/); assert.match(result.body,/id="role-list"/); assert.match(result.body,/id="builtin-role-profile-pin-list"/); assert.match(result.body,/id="batch-list"/); assert.match(result.body,/id="individual-execution-list"/);
-  assert.match(result.body,/id="attention-list"/); assert.match(result.body,/id="clear-workflow-filters"/); assert.match(result.body,/ux-overrides\.css/);
-  result = await get('/ux-overrides.css'); assert.equal(result.res.status,200); assert.match(result.body,/\.attention-panel/); assert.match(result.body,/\.pin-button/); assert.match(result.body,/\.attention-list\s*\{\s*display:\s*grid/); assert.match(result.body,/\.attention-head\s*\{\s*display:\s*flex/); assert.match(result.body,/\.registry-summary/); assert.match(result.body,/\.registry-summary\.batch-summary-grid/); assert.match(result.body,/\.individual-executions-panel \.data-table/); assert.match(result.body,/\.role-skill-card/); assert.match(result.body,/\.batch-item-card/); assert.match(result.body,/color-scheme:\s*light/); assert.match(result.body,/--bg:\s*#f2f4f3/); assert.match(result.body,/max-width:\s*720px/); assert.doesNotMatch(result.body,/linear-gradient|radial-gradient|filter:\s*blur|backdrop-filter:\s*blur|hover:scale/);
-  result = await get('/app.js'); assert.equal(result.res.status,200); assert.match(result.body,/function isStaleJob/); assert.match(result.body,/function copyText/); assert.match(result.body,/sessionStorage/); assert.match(result.body,/data-quick-status/); assert.match(result.body,/auto-refresh every 20s/); assert.match(result.body,/setInterval\([^\n]+20000\)/); assert.match(result.body,/el\('details','payload-block'\)/); assert.match(result.body,/assign_children/); assert.match(result.body,/function loadRoles\(/); assert.match(result.body,/builtin-role-profile-pin-list/); assert.match(result.body,/proposal pin; approval\/execution not implied/); assert.match(result.body,/function loadBatches\(/); assert.match(result.body,/individual-execution-list/); assert.match(result.body,/finishedCell\.append\(finished\?relativeTime\(finished\)/); assert.match(result.body,/taskRoleLabel\(/); assert.match(result.body,/querySelector\('\.filter-rail'\)\?\.classList\.add\('hidden'\)/); assert.match(result.body,/workflow-results-meta.*state\.jobTotal.*search applied/); assert.match(result.body,/updatedTd\.append\(relativeTime\(job\.updated_at\)\)/); assert.match(result.body,/actionsTd\.append\(actions\)/);
+  result = await get('/'); assert.equal(result.res.status,200); assert.match(result.res.headers.get('content-security-policy'),/default-src 'self'/); assert.equal(result.res.headers.get('x-content-type-options'),'nosniff'); assert.match(result.body,/<title>Runalith Local Workbench<\/title>/); assert.match(result.body,/RUNALITH<span> \/ <\/span>WORKBENCH/); assert.match(result.body,/RUNALITH <span class="footer-separator">\/<\/span> LOCAL WORKBENCH/); assert.doesNotMatch(result.body,/LOCAL <span class="footer-separator">\/<\/span> WORKFLOW MONITOR/,'legacy shell branding removed'); assert.match(result.body,/LOCAL DASHBOARD/); assert.doesNotMatch(result.body,/ORBIT \/ OPS|ORBIT DASHBOARD/,'user-facing dashboard labels use generic wording'); assert.match(result.body,/Search everything…/); assert.match(result.body,/id="wb-primary-sidebar"/); assert.match(result.body,/id="wb-sidebar-groups"/); assert.match(result.body,/data-sidebar-group="explorer"/); assert.match(result.body,/data-sidebar-group="sourceControl"/); assert.match(result.body,/data-sidebar-group="runalith"/); assert.match(result.body,/id="wb-explorer-sidebar"/); assert.match(result.body,/id="wb-source-sidebar"/); assert.match(result.body,/id="wb-utility-view"/); assert.match(result.body,/id="wb-utility-content"/); assert.doesNotMatch(result.body,/<nav class="primary-nav" aria-label="Primary navigation">/,'legacy all-domains sidebar navigation has been replaced by contextual groups'); assert.match(result.body,/data-view="roles"/); assert.match(result.body,/data-view="policies"/); assert.match(result.body,/id="policy-list"/); assert.match(result.body,/id="policy-attachment-list"/); assert.match(result.body,/data-view="batches"/); assert.match(result.body,/id="role-list"/); assert.match(result.body,/id="builtin-role-profile-pin-list"/); assert.match(result.body,/id="batch-list"/); assert.match(result.body,/id="individual-execution-list"/);
+  assert.match(result.body,/id="attention-list"/); assert.match(result.body,/id="clear-workflow-filters"/); assert.match(result.body,/ux-overrides\.css/); assert.ok(result.body.includes('aria-keyshortcuts="/"')); assert.ok(result.body.includes('class="skip-link" href="#main-content"')); assert.ok(result.body.includes('aria-current="page"')); assert.ok(result.body.includes('id="last-updated" data-sync-state="syncing"'));
+  result = await get('/workbench.css'); assert.equal(result.res.status,200); assert.match(result.body,/\.wb-activity/); assert.match(result.body,/prefers-reduced-motion/);
+  result = await get('/workbench.js'); assert.equal(result.res.status,200); assert.match(result.body,/tabs\.setAttribute\('role','navigation'\)/); assert.match(result.body,/aria-current/); assert.doesNotMatch(result.body,/tabs\.setAttribute\('role','tablist'\)/,'the view strip is navigation, not an invalid tablist'); assert.match(result.body,/Source Control/); assert.match(result.body,/wb-command-palette/); assert.match(result.body,/loadTreePath/); assert.match(result.body,/OPEN EDITORS/); assert.match(result.body,/wb-diff-mode/); assert.match(result.body,/searchWorkspace/); assert.match(result.body,/runGlobalSearch/); assert.match(result.body,/renderProblems/); assert.match(result.body,/renderDiagnostics/); assert.match(result.body,/openQuickOpen/); assert.match(result.body,/data-sidebar-group/);
+  result = await get('/ux-overrides.css'); assert.equal(result.res.status,200); assert.match(result.body,/\.attention-panel/); assert.match(result.body,/\.pin-button/); assert.match(result.body,/\.attention-list\s*\{\s*display:\s*grid/); assert.match(result.body,/\.attention-head\s*\{\s*display:\s*flex/); assert.match(result.body,/\.registry-summary/); assert.match(result.body,/\.registry-summary\.batch-summary-grid/); assert.match(result.body,/\.individual-executions-panel \.data-table/); assert.match(result.body,/\.role-skill-card/); assert.match(result.body,/\.batch-item-card/); assert.match(result.body,/color-scheme:\s*light/); assert.match(result.body,/--bg:\s*#f2f4f3/); assert.match(result.body,/max-width:\s*720px/); assert.doesNotMatch(result.body,/linear-gradient|radial-gradient|filter:\s*blur|backdrop-filter:\s*blur|hover:scale/); assert.ok(result.body.includes('.skip-link:focus')); assert.ok(result.body.includes('.sync-indicator')); assert.ok(result.body.includes('scrollbar-width: thin')); assert.ok(result.body.includes('overflow-x: auto;')); assert.ok(result.body.includes('@media (prefers-reduced-motion: reduce)'));
+  result = await get('/app.js'); assert.equal(result.res.status,200); assert.match(result.body,/function isStaleJob/); assert.ok(result.body.includes('function setSyncUi(mode)')); assert.ok(result.body.includes("setSyncUi('syncing')")); assert.ok(result.body.includes('aria-busy')); assert.ok(result.body.includes("if(mode==='syncing' && !state.lastSync) label.textContent='SYNCING SNAPSHOT';"),'retry before first success restores the syncing label'); assert.ok(result.body.includes("label.textContent='SYNC FAILED'"),'initial refresh failure has an explicit visible label'); assert.ok(result.body.includes('Refresh failed. Last successful snapshot:'),'later failures keep last-success context in the tooltip'); assert.ok(result.body.includes('aria-current')); assert.match(result.body,/function copyText/); assert.match(result.body,/sessionStorage/); assert.match(result.body,/data-quick-status/); assert.match(result.body,/auto-refresh every 20s/); assert.match(result.body,/setInterval\([^\n]+20000\)/); assert.match(result.body,/el\('details','payload-block'\)/); assert.match(result.body,/assign_children/); assert.match(result.body,/function loadRoles\(/); assert.match(result.body,/builtin-role-profile-pin-list/); assert.match(result.body,/proposal pin; approval\/execution not implied/); assert.match(result.body,/function loadBatches\(/); assert.match(result.body,/individual-execution-list/); assert.match(result.body,/finishedCell\.append\(finished\?relativeTime\(finished\)/); assert.match(result.body,/taskRoleLabel\(/); assert.match(result.body,/querySelector\('\.filter-rail'\)\?\.classList\.add\('hidden'\)/); assert.match(result.body,/workflow-results-meta.*state\.jobTotal.*search applied/); assert.match(result.body,/updatedTd\.append\(relativeTime\(job\.updated_at\)\)/); assert.match(result.body,/actionsTd\.append\(actions\)/);
   assert.match(result.body,/async function loadPolicies\(/); assert.match(result.body,/api\/policies/); assert.match(result.body,/policy-event-list/);
   result = await get('/not-an-asset.js'); assert.equal(result.res.status,404);
   result = await get('/api/health',{'origin':'http://attacker.example'}); assert.equal(result.res.status,403);
   result = await rawGet('/api/health',{'host':'attacker.example'}); assert.equal(result.res.status,403);
   const post = await fetch(`${base}/api/jobs`,{method:'POST'}); assert.equal(post.status,405);
+  const gitPost = await fetch(`${base}/api/git/status`,{method:'POST'}); assert.equal(gitPost.status,405);
+  const gitDiffPost = await fetch(`${base}/api/git/diff?path=sample.js`,{method:'POST'}); assert.equal(gitDiffPost.status,405);
   assert.throws(()=>createDashboardServer({host:'0.0.0.0',port:0,dataDir,dbPath}),/loopback|127\.0\.0\.1/);
 
   // The connection is native read-only: attempting to open a write connection with readOnly fails.

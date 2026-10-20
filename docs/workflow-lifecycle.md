@@ -31,17 +31,20 @@ flowchart TD
 
 Choose the tool based on the current lifecycle stage, not just the tool name. “Read-only” tools inspect state; “state-changing” tools persist approvals, tasks, revisions, or results. All runtime preconditions continue to apply.
 
+The registered MCP tool list returned by `tools/list` is the host-callable contract. Local connector wrappers, helper functions, shell commands, and functions available only inside a plugin implementation are not MCP tools unless separately registered there. Use the live schema and description as the source of truth; docs and wrapper names do not grant authority.
+
 | Stage / question | Use this tool | Avoid / next action |
 |---|---|---|
 | Which built-in workflow template fits? | `workflow_catalog` (read-only) | Does not create a run; then draft a bounded request for `workflow_create`. |
 | Need a new local run proposal? | `workflow_create` (state-changing proposal) | Does not approve or dispatch; inspect the proposal and intended plan, then obtain explicit user approval. |
+| Can this proposal actually execute as intended? | `workflow_preflight` (read-only) | Run before approval. It checks version, workspace, permissions, path scopes, policy/profile snapshots, and immutable-plan consistency; blocked proposals need correction in a new proposal, not approval retries. |
 | Have the proposal and immutable plan been inspected and explicitly approved? | `workflow_approve` (state-changing) | Do not approve based only on a valid input schema; after approval call `workflow_dispatch`. |
 | Approved workflow needs to start or planned child tasks need recovery? | `workflow_dispatch`, then `workflow_prepare_tasks` | Do not dispatch an unapproved proposal; preparing tasks is not executing them. |
 | Need the next dependency-ready work item? | `workflow_coordinator_step` for ordinary high-level orchestration, or `workflow_next_task` when handling a returned task explicitly | Do not skip dependencies. Specialist reasoning uses `workflow_complete_task`; deterministic work uses `task_execute_local` or eligible `execute_batch`. |
 | What is the current state or event sequence? | `workflow_get`, `workflow_events`, `workflow_artifacts` (read-only) | These do not repair state. Use `workflow_diagnose` to correlate a blocker. |
 | Is a candidate artifact structurally valid? | `workflow_validate_artifact` (read-only) | Schema validity does not establish result lineage, approval, or overall success; persist only through the task's valid completion path. |
 | Reviewer found implementation/security/blocking issues? | Diagnose first; use `workflow_request_rework` only when its supported review preconditions hold | Do not use reviewer revision to erase non-evidence findings. Rework invalidates affected active artifacts and still requires the gates to pass again. |
-| Accepted review is blocked solely by `evidenceIssues`? | `workflow_request_reviewer_revision`, only for eligible `standard-engineering` v2 state | Not valid for rejected reviews or remaining implementation/security/blocking issues; it never approves synthesis. |
+| Accepted review is blocked solely by `evidenceIssues`? | `workflow_request_reviewer_revision`, only for eligible `standard-engineering` v2+ state | Not valid for rejected reviews or remaining implementation/security/blocking issues; it never approves synthesis. |
 | Is all required work and evidence complete? | `workflow_complete_synthesis`, or `workflow_coordinator_step.synthesis` on the coordinator path | The runtime independently evaluates task state, artifact lineage, reviewer/QA gates, and declared predicates; a narrative claim cannot override a failed predicate. |
 | Need a custom workflow definition? | `custom_workflow_create` / `custom_workflow_update` → `custom_workflow_preview` → `custom_workflow_approve` → `custom_workflow_run_create` → `workflow_approve` → `workflow_dispatch` | Definition-preview approval and run approval are separate gates. None of the definition tools alone executes a run. |
 
@@ -62,6 +65,8 @@ Example request body:
 
 The workspace is an example path: choose a real local checkout appropriate to the intended operation. Before approving, inspect the returned proposal and intended task plan. If using custom role overlays, create/import the roles first and bind exact existing role versions; IDs in examples are not automatically created records. See [Agent Skills](agent-skills.md).
 
+For an existing-workspace edit, request `required_operations: ["workspace.write"]` and explicit `workspace_write_scopes`, for example `[{"role":"writer","paths":[{"path":"docs","kind":"directory"}]}]`. This is supported only by built-in `standard-engineering` v3+ and built-in `engineer`/`writer` roles. It grants no shell, deletion, rename, directory-creation, or out-of-scope access. Run `workflow_preflight` before approval; approval repeats the feasibility gate.
+
 Creating a proposal does **not** approve, dispatch, or execute it.
 
 ## 2. Approve explicitly, then dispatch
@@ -75,6 +80,7 @@ After approval, call `workflow_dispatch` with the `job_id` to start the workflow
 Call `workflow_next_task` to obtain the next dependency-ready task, role-specific contract, and eligible predecessor evidence. Do not skip a blocked dependency or invent a result for a task that has not been issued.
 
 - **Reasoning/specialist task:** complete the requested work, then call `workflow_complete_task` with the exact `task_id`, the actual result `content`, and the typed `artifact`. A failed task can be recorded with `outcome: "failed"`; do not turn missing evidence into a success result.
+- **Scoped workspace edit:** only the currently running built-in `engineer`/`writer` task with an approved `standard-engineering` v3+ plan-pinned scope may call `workflow_write_files`. Supply one `patch_id`, each relative `path`, current `base_sha256` (or `ABSENT` only for exclusive creation inside an approved directory), and new `content`. Persisted receipt IDs are the mutation evidence and belong in the typed task artifact. Multi-file writes are not atomic; inspect per-file receipts and report partial failures honestly. If scope or mode must change, create and approve a new proposal.
 - **Deterministic local task:** use `task_execute_local` for a single plan-bound command or `execute_batch` for a set of eligible, prepared tasks in the same approved workflow. Callers do not supply arbitrary command/executable/working-directory details. See [Durable batch execution](batch-execution.md).
 - **High-level coordinator path:** `workflow_coordinator_step` can advance an already-approved workflow, execute only authorized deterministic local steps, and return the next specialist task or synthesis contract. It never approves a proposal or bypasses runtime evidence gates.
 
@@ -104,8 +110,8 @@ If a review says `decision: "accept"` but still has non-empty `implementationIss
 
 ### Authorized rework paths
 
-- `workflow_request_rework` is a scoped, provenance-preserving specialist rework path for the supported `standard-engineering` v2 review flow after a completed reviewer decision. It invalidates affected active artifacts and creates linked role-revision tasks; it does not change the approved plan hash, approve synthesis, or mark work completed.
-- `workflow_request_reviewer_revision` is narrower: it is only for a `standard-engineering` v2 review that was accepted but blocked solely by a documented non-empty `evidenceIssues` list. It is not a way to revise a rejected review or clear implementation/security findings.
+- `workflow_request_rework` is a scoped, provenance-preserving specialist rework path for supported `standard-engineering` v2+ review flows after a completed reviewer decision. Other workflow IDs, including `engineering@2`, receive a non-retryable unsupported-operation error and must use a new proposal.
+- `workflow_request_reviewer_revision` is narrower: it is only for a `standard-engineering` v2+ review that was accepted but blocked solely by a documented non-empty `evidenceIssues` list. It is not a way to revise a rejected review or clear implementation/security findings.
 - A failed deterministic execution is not silently rerun by these rework tools. Diagnose the actual execution state and follow the specific recovery contract.
 
 If the request or intended plan must change, create a new proposal and obtain approval for that proposal instead of editing the existing immutable plan.

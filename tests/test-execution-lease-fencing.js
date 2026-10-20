@@ -6,6 +6,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tempDir } from './test-temp-dir.js';
 
 const root = tempDir('execution-lease-fencing-');
+let store = null;
+// The test pins a local Node executable (~126 MiB) into its disposable runtime.
+// Clean only this test's private temp root on normal exit or assertion failure.
+process.once('exit', () => {
+  try { store?.db.close(); } catch {}
+  try { fs.rmSync(root, { recursive: true, force: true }); } catch {}
+});
 const dataDir = path.join(root, 'data');
 const barrierDir = path.join(root, 'finish-barrier');
 const executionTmpDir = path.join(dataDir, 'runtime');
@@ -19,7 +26,7 @@ process.env.NODE_ENV = 'test';
 const jobStorePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src/runtime/job-store.js');
 const executionManagerPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../src/runtime/execution-manager.js');
 const { WorkflowStore } = await import(pathToFileURL(jobStorePath));
-const store = new WorkflowStore();
+store = new WorkflowStore();
 const job = store.createJob({ conversationKey: `lease-fence-${process.pid}`, title: 'Completion lease fence regression' });
 const task = store.ensureTask(job.job_id, { role: 'executor', description: 'must not commit after lease expiry' });
 assert.throws(() => store.acquireTaskLease(task.task_id, {

@@ -29,6 +29,7 @@ fs.chmodSync(tmuxStub, 0o700);
 const { WorkflowStore } = await import('../src/runtime/job-store.js');
 const { ExecutionManager } = await import('../src/runtime/execution-manager.js');
 const store = new WorkflowStore();
+const nodeExecutable = JSON.stringify(process.execPath);
 
 try {
   const job = store.createJob({ conversationKey: `batch-terminal-recovery-${process.pid}`, title: 'Batch terminal-task recovery' });
@@ -39,7 +40,7 @@ try {
   // before finishExecutionBatchItem runs. Recovery must use the immutable
   // batch claim embedded in execution.started and replay the durable terminal
   // validator; it must not launch the task again.
-  const command = "node -e \"process.stdout.write('DURABLE_TERMINAL_RESULT')\"";
+  const command = `${nodeExecutable} -e "process.stdout.write('DURABLE_TERMINAL_RESULT')"`;
   const task = store.createChildTask(job.job_id, {
     parentTaskId: parent.task_id, role: 'architect', description: 'terminal result awaiting batch-item persistence',
     metadata: { deterministic: true, command }
@@ -79,7 +80,7 @@ try {
   // but the manager died before finishExecution committed any task result. The
   // package runtime must recover from that exact marker and start-event claim,
   // not strand the batch as RUNNING or spawn the deterministic command twice.
-  const markerCommand = "node -e \"process.stdout.write('RECOVERED_FROM_EXIT_MARKER')\"";
+  const markerCommand = `${nodeExecutable} -e "process.stdout.write('RECOVERED_FROM_EXIT_MARKER')"`;
   const markerTask = store.createChildTask(job.job_id, {
     parentTaskId: parent.task_id, role: 'architect', description: 'exit marker exists before result transaction',
     metadata: { deterministic: true, command: markerCommand }
@@ -131,17 +132,18 @@ try {
   // Reconcile an inconsistent legacy batch where an older runtime marked the
   // item FAILED even though task execution remained unresolved. Retrying that
   // batch must not write another false item failure or authorize a new spawn.
+  const legacyCommand = `${nodeExecutable} --version`;
   const legacyTask = store.createChildTask(job.job_id, {
     parentTaskId: parent.task_id, role: 'architect', description: 'legacy failed item with still-running task',
-    metadata: { deterministic: true, command: "node --version" }
+    metadata: { deterministic: true, command: legacyCommand }
   });
   const legacyBatch = store.createExecutionBatch(job.job_id, {
-    parentTaskId: parent.task_id, role: 'architect', items: [{ taskId: legacyTask.task_id, command: 'node --version' }]
+    parentTaskId: parent.task_id, role: 'architect', items: [{ taskId: legacyTask.task_id, command: legacyCommand }]
   });
   const legacyItem = store.listExecutionBatchItems(legacyBatch.batch_id)[0];
   assert.ok(store.markExecutionBatchItemRunning(legacyBatch.batch_id, legacyItem.item_id, { expectedAttempt: 1 }));
   store.prepareExecutionForBatchClaim(legacyTask.task_id, {
-    executionSessionId: 'exec-legacy-unresolved-batch-item', attempt: 1, command: 'node --version', cwd: root,
+    executionSessionId: 'exec-legacy-unresolved-batch-item', attempt: 1, command: legacyCommand, cwd: root,
     startedAt: new Date().toISOString(), tmuxName: 'cos-exec-exec-legacy-unresolved-batch-item', boundaryIdentity: null
   }, { batchId: legacyBatch.batch_id, itemId: legacyItem.item_id, batchAttempt: 1, itemAttempt: 1 });
   store.finishExecutionBatchItem(legacyBatch.batch_id, legacyItem.item_id, {
@@ -171,7 +173,7 @@ try {
   // reports accepted session creation then fails local PID persistence while
   // still reporting the exact session as present. No task command is actually
   // executed. The batch item and batch must remain non-terminal/uncertain.
-  const ambiguousCommand = `node -e "require('node:fs').writeFileSync(${JSON.stringify(shouldNeverRun)}, 'executed')"`;
+  const ambiguousCommand = `${nodeExecutable} -e "require('node:fs').writeFileSync(${JSON.stringify(shouldNeverRun)}, 'executed')"`;
   const ambiguousTask = store.createChildTask(job.job_id, {
     parentTaskId: parent.task_id, role: 'architect', description: 'accepted spawn with ambiguous local outcome',
     metadata: { deterministic: true, command: ambiguousCommand }

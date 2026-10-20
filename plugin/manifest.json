@@ -37,6 +37,10 @@
       "description": "List supported local workflow templates, including hybrid-engineering for pinned role/Skill overlays and deterministic Batch Execution."
     },
     {
+      "name": "workflow_recommend_resources",
+      "description": "Proactively match task intent against saved workflows, custom roles, skills and policy packs. Read-only discovery; reuse remains subject to immutable contract compatibility and approval gates."
+    },
+    {
       "name": "workflow_policy_catalog",
       "description": "List the closed JSON policy-rule types and exact runtime enforcement points supported by this plugin."
     },
@@ -66,7 +70,11 @@
     },
     {
       "name": "workflow_create",
-      "description": "Create a local proposal with optional pinned custom role/Skill overlays and closed JSON success predicates. hybrid-engineering combines those overlays with deterministic tasks eligible for durable Batch Execution; approval and execution remain separate."
+      "description": "Create a local proposal with optional pinned role profiles, closed success predicates, and explicit workspace.write scopes for built-in standard-engineering v3+ engineer/writer tasks. Infeasible operation/scope contracts fail before persistence; approval and execution remain separate."
+    },
+    {
+      "name": "workflow_preflight",
+      "description": "Read-only feasibility check of workflow version, permissions, scoped workspace-write paths, and immutable-plan consistency before approval."
     },
     {
       "name": "workflow_list",
@@ -77,8 +85,16 @@
       "description": "Inspect workflow plan, tasks, approvals, and evidence metadata."
     },
     {
+      "name": "workflow_liveness_diagnostics",
+      "description": "Read-only active-job liveness diagnostics using durable activity timestamps and task-lease heartbeat/expiry. Flags stale candidates without mutating state, retrying, or dispatching work."
+    },
+    {
       "name": "workflow_approve",
-      "description": "Explicitly approve a proposal and compile its immutable plan."
+      "description": "Explicitly approve a proposal after feasibility checks and compile its immutable plan."
+    },
+    {
+      "name": "workflow_write_files",
+      "description": "Apply hash-fenced file changes only inside the current built-in engineer/writer task's approved standard-engineering v3+ path scope; emits durable per-file receipts and reports partial writes."
     },
     {
       "name": "workflow_dispatch",
@@ -98,11 +114,11 @@
     },
     {
       "name": "workflow_request_rework",
-      "description": "Request a provenance-preserving specialist rework cycle for a blocked standard-engineering v2 workflow after a completed reviewer decision. Invalidates the affected active artifacts, creates linked role revision tasks, and preserves the immutable plan and all approval/CTO gates. Does not mark work complete."
+      "description": "Request a provenance-preserving specialist rework cycle for a blocked standard-engineering v2+ workflow after a completed reviewer decision. Invalidates affected active artifacts, creates linked role revision tasks, and preserves immutable plan and approval gates. Unsupported workflow IDs need a new proposal."
     },
     {
       "name": "workflow_request_reviewer_revision",
-      "description": "Request a provenance-preserving reviewer revision only when a standard-engineering v2 accepted review is blocked solely by documented evidenceIssues; never approves synthesis or weakens the immutable success contract."
+      "description": "Request a provenance-preserving reviewer revision only when a standard-engineering v2+ accepted review is blocked solely by documented evidenceIssues; never approves synthesis or weakens the immutable success contract."
     },
     {
       "name": "workflow_complete_task",

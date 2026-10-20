@@ -37,7 +37,10 @@ const CONTRACTS = Object.freeze({
   },
   writer: {
     id: 'agent.writer', version: 1, role: 'writer', capability: 'documentation.write',
-    executor: 'ChatOnSteroids', inputs: ['requirements', 'implementation'], outputs: ['documentation'], permissions: ['workspace.read', 'artifact.create'],
+    executor: 'ChatOnSteroids', inputs: ['requirements', 'implementation'], outputs: ['documentation'],
+    // Capability declaration only: runtime writes still require a scope pinned
+    // in the approved standard-engineering v3 immutable execution plan.
+    permissions: ['workspace.read', 'workspace.write', 'artifact.create'],
     allowedTools: [], completionCriteria: ['docs_match_implementation', 'user_facing_changes_documented']
   },
   reviewer: {

@@ -25,7 +25,7 @@ const ROLE_GUIDANCE = Object.freeze({
     'Deliverable: Summarize the behavior changed, every touched path, implementation choices, and exact verification commands with their observed exit/results.',
     'Evidence: Inspect git status/diff before editing and after; report partial runs and failures plainly. A command being proposed is not evidence it ran.',
     'Stop/escalate: Stop before expanding scope, altering public contracts, weakening a gate, editing official release/authorization/audit records, or requiring remote/cloud/host operations.',
-    'Tool selection: Use local file/command tools for source changes and tests. For workflow progress use workflow_coordinator_step as the normal lifecycle interface; do not manually complete deterministic tasks—those require task_execute_local or execute_batch under the approved plan.'
+    'Tool selection: Workspace edits are permitted only when this exact running task has a standard-engineering v3+ immutable plan contract with workspace.write and explicit path scopes. Use workflow_write_files with current base_sha256 values and cite returned receipt IDs in the implementation artifact; inspect workflow_preflight before approval. Never substitute artifact.create for workspace.write, and never use shell/file tools to bypass plan scope. Deterministic commands still require task_execute_local or execute_batch.'
   ].join('\n'),
   security: [
     'Focus: Independently assess trust boundaries, authorization, filesystem/state mutation, input validation, artifact provenance, and whether descriptions could encourage bypasses.',
@@ -53,14 +53,14 @@ const ROLE_GUIDANCE = Object.freeze({
     'Deliverable: Provide a concise lifecycle/decision table, correct examples, cross-links, recovery guidance, and a record of what was verified.',
     'Evidence: Trace claims to implementation or test sources; label limitations and separate current behavior from recommendations. Do not claim release or host installation.',
     'Stop/escalate: If source behavior is ambiguous or contradictory, call it out instead of documenting an invented contract; never hand-edit a generated artifact when its generator is authoritative.',
-    'Tool selection: Edit the source guide, then run npm run docs:generate-reference and npm run docs:check; use workflow_get/events/artifacts for workflow facts, and workflow_diagnose for recovery guidance.'
+    'Tool selection: artifact.create records a typed result; it does not authorize editing an existing workspace file. Only a pinned standard-engineering v3+ workspace.write scope plus workflow_write_files permits bounded edits. Edit the source guide, then run npm run docs:generate-reference and npm run docs:check; use workflow_get/events/artifacts for workflow facts, and workflow_diagnose for recovery guidance.'
   ].join('\n'),
   reviewer: [
     'Focus: Review independently against the requirements, architecture, diff, security, QA, platform, and documentation evidence; do not rubber-stamp predecessor conclusions.',
     'Deliverable: Record separate implementation, security, evidence, and scope findings; reconcile each acceptance criterion and choose accept, needs_changes, or reject.',
     'Evidence: Cite concrete paths/tests and exact artifacts; missing, stale, or contradictory evidence is a finding, not proof of success.',
     'Stop/escalate: Treat approval/security/evidence-gate weakening, fabricated execution evidence, scope creep, or unverified claims as blocking; never repair them by changing the review result alone.',
-    'Tool selection: Read with workflow_get/events/artifacts and workflow_diagnose. Use workflow_request_rework for supported blocked reviewer outcomes; workflow_request_reviewer_revision is only for an accepted standard-engineering v2 review blocked solely by evidenceIssues.'
+    'Tool selection: Read with workflow_get/events/artifacts and workflow_diagnose. Use workflow_request_rework for supported blocked reviewer outcomes; workflow_request_reviewer_revision is only for an accepted standard-engineering v2+ review blocked solely by evidenceIssues. Incompatible workflow IDs require a new proposal, not retries.'
   ].join('\n')
 });
 

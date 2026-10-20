@@ -17,6 +17,12 @@ const { GitHubActionsProvider } = await import('../src/runtime/github-actions-pr
 const { canonicalProviderDispatchRequest, createProviderDispatchIdentity, providerDispatchKey } = await import('../src/runtime/provider-dispatch-identity.js');
 const store = new WorkflowStore();
 const timestamp = () => new Date().toISOString();
+// Synthetic Git SHA/digest values below exist only to exercise isolated SQLite
+// result/artifact transaction rollback mechanics. They do not represent a real
+// repository revision, worker authenticity, or an independent output attestation.
+const TEST_ONLY_SYNTHETIC_INPUT_COMMIT = 'a'.repeat(40);
+const TEST_ONLY_SYNTHETIC_OUTPUT_COMMIT = 'b'.repeat(40);
+const TEST_ONLY_SYNTHETIC_EVIDENCE_HASH = 'c'.repeat(64);
 const architectureOutput = JSON.stringify({
   components: ['isolated provider result fixture'], interfaces: [], failure_modes: [],
   implementation_boundary: 'test-only; validates durable result/artifact transaction'
@@ -39,11 +45,11 @@ function resultFor({ job, task, lease }, providerRunId) {
   return {
     schema_version: 1, job_id: job.job_id, task_id: task.task_id, lease_id: lease.lease_id,
     attempt: lease.attempt, owner_epoch: lease.owner_epoch, provider_run_attempt: 1,
-    status: 'SUCCEEDED', input_commit: 'a'.repeat(40), output_commit: 'b'.repeat(40),
+    status: 'SUCCEEDED', input_commit: TEST_ONLY_SYNTHETIC_INPUT_COMMIT, output_commit: TEST_ONLY_SYNTHETIC_OUTPUT_COMMIT,
     exit_code: 0, provider_run_id: providerRunId, evidence_artifact: `artifact-${providerRunId}`,
     evidence_refs: ['task-payload.json', 'execution.json', 'stdout.txt', 'stderr.txt', 'git-status.txt'],
     started_at: started, finished_at: timestamp(), agent_output: architectureOutput,
-    evidence_verification: { evidence_hash: 'c'.repeat(64), errors: [], valid: true }
+    evidence_verification: { evidence_hash: TEST_ONLY_SYNTHETIC_EVIDENCE_HASH, errors: [], valid: true }
   };
 }
 

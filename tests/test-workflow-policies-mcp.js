@@ -80,7 +80,7 @@ try {
   assert.equal(initialized.error, undefined, initialized.error?.message);
   const listed = await rpc('tools/list', {});
   const toolNames = listed.result.tools.map(tool => tool.name);
-  assert.equal(toolNames.length, 46);
+  assert.equal(toolNames.length, 50);
   for (const name of ['workflow_policy_catalog', 'workflow_policy_create', 'workflow_policy_list', 'workflow_policy_get', 'workflow_policy_update', 'workflow_policy_validate', 'workflow_policy_attach']) {
     assert.ok(toolNames.includes(name), `the runtime must expose ${name}`);
     assert.equal(listed.result.tools.find(tool => tool.name === name).inputSchema.additionalProperties, false);
@@ -185,7 +185,7 @@ try {
   } finally { audit.close(); }
   await toolError('workflow_get', { job_id: proposal.job_id }, /immutable execution plan hash|policy contract is invalid|policy snapshot hash mismatch/i);
 
-  console.log('WORKFLOW POLICY MCP E2E PASS (46-tool schema parity, strict rule rejection, CRUD immutable versions, pre-approval attach, plan hash pinning, attachment gates, append-only audit and tamper rejection)');
+  console.log('WORKFLOW POLICY MCP E2E PASS (50-tool schema parity, strict rule rejection, CRUD immutable versions, pre-approval attach, plan hash pinning, attachment gates, append-only audit and tamper rejection)');
 } finally {
   child.stdin.end();
   await new Promise(resolve => {

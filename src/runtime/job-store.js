@@ -949,7 +949,7 @@ export class WorkflowStore {
     }
     return { ...plan, plan_hash: row.plan_hash, compiled_at: row.compiled_at, approved_at: row.approved_at };
   }
-  compileExecutionPlan(jobId, { workspace = process.env.WORKFLOW_WORKSPACE, customWorkflow = null, successContract = undefined, roleProfiles = null } = {}) {
+  compileExecutionPlan(jobId, { workspace = process.env.WORKFLOW_WORKSPACE, customWorkflow = null, successContract = undefined, roleProfiles = null, requiredOperations = null, workspaceWriteScopes = null, batchExecutionPolicy = undefined } = {}) {
     const job = this.getJob(jobId);
     if (!job) throw new Error('job not found: ' + jobId);
     const existing = this.getExecutionPlan(jobId);
@@ -963,7 +963,20 @@ export class WorkflowStore {
     // fail the immutable-plan comparison. Explicit [] remains meaningful for
     // callers that deliberately compiled a proposal with no overlays.
     const pinnedRoleProfiles = roleProfiles ?? resolveRoleProfileBindings(this.db, proposalPayload.role_profile_bindings || []);
-    const plan = compileWorkflowPlan(job, { workspace, customWorkflow, successContract: pinnedSuccessContract, policyPacks, roleProfiles: pinnedRoleProfiles });
+    const plan = compileWorkflowPlan(job, {
+      workspace,
+      customWorkflow,
+      successContract: pinnedSuccessContract,
+      policyPacks,
+      roleProfiles: pinnedRoleProfiles,
+      requiredOperations: requiredOperations ?? proposalPayload.required_operations ?? [],
+      workspaceWriteScopes: workspaceWriteScopes ?? proposalPayload.workspace_write_scopes ?? [],
+      workflowVersion: existing?.workflow_id === 'standard-engineering' ? existing.workflow_version : null,
+      batchExecutionPolicy: batchExecutionPolicy !== undefined
+        ? batchExecutionPolicy
+        : existing ? (Object.hasOwn(existing, 'batch_execution_policy') ? existing.batch_execution_policy : null) : undefined,
+      validationProfileSelector: proposalPayload.validation_profile ?? null
+    });
     const planJson = canonicalJson(Object.fromEntries(Object.entries(plan).filter(([key]) => key !== 'plan_hash')));
     if (existing) {
       const storedPlan = this.db.prepare('SELECT plan_json, plan_hash FROM workflow_plans WHERE job_id = ?').get(jobId);
@@ -1892,9 +1905,21 @@ export class WorkflowStore {
     // by a caller and treated as an ordinary verified result). A future trusted
     // attestation path must add a separate verifier-owned proof contract; a
     // worker-supplied provenance label is never sufficient.
-    if (evidenceVerification && Object.prototype.hasOwnProperty.call(evidenceVerification, 'output_commit_provenance')) {
+    const hasOutputCommitField = Object.prototype.hasOwnProperty.call(result, 'output_commit');
+    const hasNonEmptyOutputCommitClaim = hasOutputCommitField &&
+      result.output_commit !== null && result.output_commit !== undefined && result.output_commit !== '';
+    const hasWorkerProvenanceMarker = evidenceVerification &&
+      Object.prototype.hasOwnProperty.call(evidenceVerification, 'output_commit_provenance');
+    const successfulResultNeedsIndependentCommit = result.status === 'SUCCEEDED';
+    // No verifier-owned independent output-commit attestation is implemented in
+    // the current P3 trust domain. A worker-controlled marker can be stripped,
+    // duplicated or coordinated with execution.json; it is never authority.
+    // Every successful result therefore needs the same stable quarantine reason,
+    // even when output_commit is absent, null or empty. A failed execution with
+    // no commit claim can still reconcile as an ordinary execution failure.
+    if (hasNonEmptyOutputCommitClaim || successfulResultNeedsIndependentCommit || hasWorkerProvenanceMarker) {
       return { status: 'REJECTED', reason: 'output_commit_attestation_required',
-        output_commit_provenance: evidenceVerification.output_commit_provenance };
+        output_commit_provenance: hasWorkerProvenanceMarker ? evidenceVerification.output_commit_provenance : null };
     }
     try { validateDurableExecutionResult(wireResult); }
     catch (error) { return { status: 'REJECTED', reason: 'invalid_execution_result_schema', error: error.message }; }
@@ -3490,13 +3515,14 @@ export class WorkflowStore {
           const workflowId = String(plan?.workflow_id || '').toLowerCase();
           const role = String(task.role || '').toLowerCase();
           const plannedTask = plan?.children?.find(item => item.id === metadata.workflow_plan_task_id);
-          const artifactType = workflowId === 'hybrid-engineering' && plannedTask?.execution?.deterministic === true
+          const artifactType = ((workflowId === 'hybrid-engineering' && plannedTask?.execution?.deterministic === true) ||
+            (workflowId === 'standard-engineering' && plannedTask?.execution?.batch_validation_task === true)
             ? plannedTask.execution.output_artifact_type
             : workflowId === 'production' && ['architect','qa'].includes(role)
             ? getAgentArtifactType(task.role)
             : workflowId === 'engineering' && role === 'engineer' ? 'implementation'
               : workflowId === 'engineering' ? ({ security: 'security-review', qa: 'qa-report', platform: 'platform-review', writer: 'documentation' })[role]
-                : null;
+                : null);
           if (artifactType) {
             const artifact = this.getArtifact(`${artifactType}-${priorResult.result_id}`);
             const eventIdValue = eventId(task.job_id, 'artifact.created', artifact?.artifact_id || `${artifactType}-${priorResult.result_id}`);
@@ -3536,6 +3562,9 @@ export class WorkflowStore {
       const engineeringWorkflow = workflowId === 'engineering';
       const productionWorkflow = workflowId === 'production';
       const hybridWorkflow = workflowId === 'hybrid-engineering';
+      const batchValidationTask = workflowId === 'standard-engineering' &&
+        planForExecution?.children?.some(item => item.id === metadata.workflow_plan_task_id &&
+          item.execution?.deterministic === true && item.execution?.batch_validation_task === true);
       if (outcome === 'success' && engineeringWorkflow && String(task.role || '').toLowerCase() === 'engineer') {
         this.createArtifact({
           artifact_id: `implementation-${resultId}`, job_id: task.job_id, task_id: task.task_id,
@@ -3565,11 +3594,11 @@ export class WorkflowStore {
           evidence: [resultId, implementation.artifact_id]
         });
       }
-      // Hybrid deterministic tasks publish a typed artifact only after the
+      // Deterministic validation tasks publish a typed artifact only after the
       // approved ExecutionManager command succeeds. Keep it in the same SQLite
       // savepoint as result/session/attempt/completion evidence so recovery can
-      // validate the exact result -> artifact -> terminal-event lineage.
-      if (outcome === 'success' && hybridWorkflow) {
+      // validate exact result -> artifact -> terminal-event lineage.
+      if (outcome === 'success' && (hybridWorkflow || batchValidationTask)) {
         const plannedTask = planForExecution?.children?.find(item => item.id === metadata.workflow_plan_task_id);
         const artifactType = plannedTask?.execution?.deterministic === true
           ? plannedTask.execution.output_artifact_type
@@ -3585,8 +3614,14 @@ export class WorkflowStore {
               user_facing_changes: [],
               verification: [`execution_session_id=${executionSessionId}`, `exit_code=${normalizedExitCode}`, evidence]
             };
+          } else if (artifactType === 'qa-report' && batchValidationTask) {
+            artifactContent = {
+              checks: [`deterministic validation command: ${command}`],
+              results: [`execution_session_id=${executionSessionId}`, `exit_code=${normalizedExitCode}`, evidence],
+              decision: 'accept'
+            };
           } else {
-            throw new Error(`hybrid deterministic task has unsupported typed output artifact: ${artifactType}`);
+            throw new Error(`deterministic batch task has unsupported typed output artifact: ${artifactType}`);
           }
           this.createArtifact({
             artifact_id: `${artifactType}-${resultId}`, job_id: task.job_id, task_id: taskId,

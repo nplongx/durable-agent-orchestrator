@@ -421,3 +421,107 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   #batch-list { min-width: 680px; }
   .individual-executions-panel .data-table { min-width: 920px; }
 }
+/* Dashboard UX refresh: sync clarity, keyboard access and usable mobile navigation. */
+.skip-link {
+  position: fixed; z-index: 1000; top: 8px; left: 8px; padding: 9px 12px;
+  transform: translateY(-160%); border: 1px solid #285d49; border-radius: 6px;
+  background: #fff; color: #214c3e; font-size: 12px; font-weight: 650;
+  text-decoration: none; box-shadow: 0 3px 12px rgba(25, 50, 36, .12);
+}
+.skip-link:focus { transform: translateY(0); outline: 2px solid #286b53; outline-offset: 2px; }
+#main-content:focus { outline: none; }
+.eyebrow { display: inline-flex; align-items: center; gap: 8px; }
+.sync-indicator { display: inline-block; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #63866f; }
+#last-updated[data-sync-state="syncing"] + .sync-indicator { background: #9a762c; animation: sync-pulse 1s ease-in-out infinite; }
+#last-updated[data-sync-state="error"] + .sync-indicator { background: #a23c43; }
+.icon-button span { display: inline-block; line-height: 1; }
+.icon-button.is-refreshing span, .primary-button.is-refreshing span { animation: dashboard-spin .9s linear infinite; }
+.icon-button:disabled, .primary-button:disabled { cursor: progress; opacity: .7; }
+.primary-button:disabled:hover { background: #285d49; border-color: #285d49; }
+.nav-item, .quick-filter, .small-button, .copy-button, .pin-button, .icon-button, .primary-button,
+.job-tab, .pagination button, .inspector-link, .artifact-card, .file-row { scroll-margin-top: 72px; }
+button:disabled { cursor: not-allowed; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
+[tabindex]:focus-visible, a:focus-visible { outline: 2px solid #286b53; outline-offset: 3px; }
+.data-table tbody tr[tabindex="0"]:focus-visible { outline-offset: -2px; }
+.table-wrap { max-width: 100%; overscroll-behavior-x: contain; scrollbar-gutter: stable; }
+.toolbar-fields input, .toolbar-fields select, .small-select { min-height: 38px; }
+.section-toolbar { gap: 12px; }
+.section-toolbar > div:first-child { min-width: 0; }
+.section-toolbar h2 { overflow-wrap: anywhere; }
+.attention-item { min-width: 0; }
+.attention-main > strong { line-height: 1.4; }
+.registry-stat, .metric-card, .panel { min-width: 0; }
+.payload-pre, .file-code { overflow-wrap: anywhere; }
+.toast { max-width: min(460px, calc(100vw - 24px)); }
+@keyframes dashboard-spin { to { transform: rotate(360deg); } }
+@keyframes sync-pulse { 50% { opacity: .35; } }
+
+@media (max-width: 720px) {
+  .app-shell { display: block; min-height: 100vh; }
+  .sidebar {
+    position: sticky; z-index: 30; top: 0; display: grid;
+    grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px;
+    width: 100%; height: auto; padding: 8px 10px; overflow: hidden;
+    border-right: 0; border-bottom: 1px solid #dce3e0; background: #fbfcfb;
+  }
+  .brand-lockup { padding: 0; justify-content: flex-start; }
+  .brand-lockup > div:not(.brand-mark) { display: none; }
+  .brand-mark { width: 30px; height: 30px; }
+  .workspace-label, .sidebar-bottom { display: none; }
+  .primary-nav {
+    min-width: 0; flex-direction: row; flex-wrap: nowrap; gap: 4px;
+    overflow-x: auto; overscroll-behavior-x: contain; padding: 2px 2px 5px;
+    scrollbar-width: thin; scrollbar-color: #c7d4cc transparent;
+  }
+  .nav-item {
+    flex: 0 0 auto; width: auto; min-height: 35px; gap: 6px; padding: 7px 9px;
+    border-radius: 5px; white-space: nowrap; font-size: 11px;
+  }
+  .nav-item > span:not(.nav-symbol) { display: inline; }
+  .nav-item .nav-count, .nav-item .nav-arrow { display: none; }
+  .nav-symbol { width: auto; font-size: 13px; }
+  .nav-item.active:before { top: auto; right: 8px; bottom: -1px; left: 8px; width: auto; height: 2px; }
+  .main-column { min-width: 0; }
+  .topbar { gap: 8px; height: auto; min-height: 54px; padding: 8px 10px; }
+  .breadcrumb { min-width: 0; flex: 0 1 auto; white-space: nowrap; }
+  .top-actions { min-width: 0; flex: 1; gap: 6px; justify-content: flex-end; }
+  .global-search { display: flex; width: min(36vw, 210px) !important; min-width: 104px; height: 34px; flex: 1 1 110px; padding: 0 7px; }
+  .global-search input { display: block !important; width: 100%; min-width: 0; font-size: 11px; }
+  .global-search kbd { display: none !important; }
+  .icon-button { flex: 0 0 34px; width: 34px; }
+  .user-chip { display: none; }
+  .content-wrap { padding: 18px 12px 14px; }
+  .hero-row { flex-direction: column; align-items: stretch; gap: 9px; }
+  .hero-controls { align-self: stretch; flex-wrap: wrap; justify-content: space-between; }
+  .read-only-badge, .primary-button { min-height: 36px; }
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .metric-card { min-height: 100px; padding: 11px; }
+  .metric-value { font-size: 27px; }
+  .dashboard-grid, .bottom-grid { gap: 9px; }
+  .attention-tools { flex-wrap: wrap; }
+  .attention-tools .quick-filter { flex: 1 1 auto; min-height: 34px; }
+  .section-toolbar { align-items: stretch; flex-direction: column; }
+  .toolbar-fields { display: flex; width: 100%; flex-wrap: wrap; gap: 7px; }
+  .toolbar-fields input, .toolbar-fields select { flex: 1 1 145px; min-width: 0; }
+  .filter-rail > * { min-height: 34px; }
+  .table-panel .data-table { min-width: 760px; }
+  .role-layout, .batch-layout, .stream-layout, .artifact-layout, .file-layout { grid-template-columns: minmax(0, 1fr); }
+  .role-inspector, .batch-inspector, .stream-aside, .artifact-inspector { position: static; grid-row: auto; }
+  .job-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .job-detail-header { flex-direction: column; }
+  .page-footer { line-height: 1.55; }
+}
+@media (max-width: 380px) {
+  .sidebar { gap: 7px; padding: 7px; }
+  .brand-mark { width: 27px; height: 27px; }
+  .nav-item { padding: 7px 8px; }
+  .breadcrumb > span, .breadcrumb > b { display: none; }
+  .global-search { min-width: 96px; }
+  .content-wrap { padding-right: 9px; padding-left: 9px; }
+  .job-detail-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #last-updated[data-sync-state="syncing"] + .sync-indicator,
+  .icon-button.is-refreshing span, .primary-button.is-refreshing span { animation: none !important; }
+}

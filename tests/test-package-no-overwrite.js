@@ -67,7 +67,7 @@ try {
   const fakeBin = path.join(temp, 'fake-bin');
   fs.mkdirSync(fakeBin);
   const nodeWrapper = path.join(fakeBin, 'node');
-  fs.writeFileSync(nodeWrapper, `#!/usr/bin/env bash\nfor arg in "$@"; do\n  if [[ "$arg" == */tests/test-runalith-plugin.js ]]; then\n    echo 'intentional integration-test failure for publication-safety test' >&2\n    exit 91\n  fi\ndone\nexec "$REAL_NODE" "$@"\n`);
+  fs.writeFileSync(nodeWrapper, `#!/usr/bin/env bash\nfor arg in "$@"; do\n  if [[ "$arg" == */tests/test-runalith-plugin.js ]]; then\n    printf '%s\\n' 'Bundled plugin runtime smoke test PASS (initialize + tools/list: 50/50 manifest tools exposed)' 'Runalith local MCP E2E: PASS'\n    echo 'intentional nonzero integration-test failure after deceptive PASS-looking output' >&2\n    exit 91\n  fi\ndone\nexec "$REAL_NODE" "$@"\n`);
   fs.chmodSync(nodeWrapper, 0o755);
   const failedBuild = path.join(temp, 'must-not-publish.mcpb');
   const failedBuildResult = spawnSync('bash', [script], {
@@ -80,7 +80,12 @@ try {
       REAL_NODE: process.execPath,
     },
   });
-  assert.notEqual(failedBuildResult.status, 0, 'injected package integration failure must fail the build');
+  assert.match(failedBuildResult.stdout, /Bundled plugin runtime smoke test PASS/,
+    'fixture must emit an intentionally deceptive success-looking marker before returning nonzero');
+  assert.match(failedBuildResult.stdout, /Runalith local MCP E2E: PASS/,
+    'a second PASS-looking marker must not override the actual command status');
+  assert.equal(failedBuildResult.status, 91,
+    `actual nonzero integration-test exit must propagate despite PASS-looking stdout: ${failedBuildResult.stderr}`);
   assert.equal(fs.existsSync(failedBuild), false, 'failed package validation must not publish an output artifact');
   assert.equal(fs.readdirSync(temp).some(name => name.startsWith('.plugin-package-stage.')), false,
     'failed package validation must clean its staging directory');
@@ -107,7 +112,14 @@ try {
   for (const relative of [
     'README.md', 'LICENSE', 'package.json', 'plugin/manifest.json',
     'tests/test-runalith-plugin.js', 'tests/test-production-behavioral-qa.js',
-    'tests/test-execution-lease-fencing.js', 'tests/test-mcp-stdio-backpressure.mjs', 'tests/test-temp-dir.js',
+    'tests/test-execution-lease-fencing.js', 'tests/test-execution-control-process-boundary.js',
+    'tests/test-mcp-stdio-backpressure.mjs', 'tests/test-temp-dir.js',
+    'tests/test-execution-batch.js', 'tests/test-execution-batch-concurrency.js',
+    'tests/test-execution-batch-terminal-recovery.js', 'tests/test-execution-success-contract.js',
+    'tests/test-phase5-recovery.js', 'tests/test-agent-tool-guidance.js',
+    'tests/test-mcp-graceful-signal-shutdown-20261017.js',
+    'tests/test-mcp-shutdown-backpressure-deadline-20261017.js',
+    'tests/test-mcp-eof-shutdown-framing-20261017.js',
     'scripts/package-runalith-mcpb.sh', 'scripts/collect-plugin-runtime.mjs', 'scripts/plugin-package-metadata.mjs'
   ]) fs.copyFileSync(path.join(root, relative), path.join(schemaSourceRoot, relative));
   fs.symlinkSync(externalReadme, path.join(schemaSourceRoot, 'tests/test-extracted-package-tool-schemas.mjs'));
@@ -129,7 +141,14 @@ try {
   const preflightInputs = [
     'README.md', 'LICENSE', 'package.json', 'plugin/manifest.json',
     'tests/test-runalith-plugin.js', 'tests/test-production-behavioral-qa.js', 'tests/test-extracted-package-tool-schemas.mjs',
-    'tests/test-execution-lease-fencing.js', 'tests/test-mcp-stdio-backpressure.mjs', 'tests/test-temp-dir.js',
+    'tests/test-execution-lease-fencing.js', 'tests/test-execution-control-process-boundary.js',
+    'tests/test-mcp-stdio-backpressure.mjs', 'tests/test-temp-dir.js',
+    'tests/test-execution-batch.js', 'tests/test-execution-batch-concurrency.js',
+    'tests/test-execution-batch-terminal-recovery.js', 'tests/test-execution-success-contract.js',
+    'tests/test-phase5-recovery.js', 'tests/test-agent-tool-guidance.js',
+    'tests/test-mcp-graceful-signal-shutdown-20261017.js',
+    'tests/test-mcp-shutdown-backpressure-deadline-20261017.js',
+    'tests/test-mcp-eof-shutdown-framing-20261017.js',
     'scripts/package-runalith-mcpb.sh', 'scripts/collect-plugin-runtime.mjs', 'scripts/plugin-package-metadata.mjs'
   ];
   for (const [relative, expectedMessage] of [

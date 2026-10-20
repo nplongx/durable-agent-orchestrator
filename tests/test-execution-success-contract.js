@@ -13,9 +13,75 @@ process.env.NODE_ENV = 'test';
 
 const { WorkflowStore } = await import('../src/runtime/job-store.js');
 const { ExecutionManager, isVerifiedSuccessfulLocalExecution, isSuccessfulLocalExecutionSummary } = await import('../src/runtime/execution-manager.js');
+const { resolveTaskBatchRoute } = await import('../src/runtime/workflow/plan.js');
 const store = new WorkflowStore();
 
 try {
+  const unattestedJob = store.createJob({ conversationKey: `success-contract-unattested-${process.pid}`, title: 'Unattested output-commit rejection' });
+  const unattestedTask = store.ensureTask(unattestedJob.job_id, { role: 'architect', description: 'worker output commit must fail closed' });
+  const unattestedLease = store.acquireTaskLease(unattestedTask.task_id, {
+    leaseId: `success-contract-unattested-lease-${process.pid}`,
+    workerId: `success-contract-unattested-worker-${process.pid}`, ttlMs: 120000, attempt: 1
+  });
+  const startedAt = new Date().toISOString();
+  const finishTime = new Date(Date.now() + 1).toISOString();
+  const untrustedOutputClaim = {
+    schema_version: 1, job_id: unattestedJob.job_id, task_id: unattestedTask.task_id, lease_id: unattestedLease.lease_id,
+    attempt: unattestedLease.attempt, owner_epoch: unattestedLease.owner_epoch, provider_run_attempt: 1,
+    status: 'SUCCEEDED', input_commit: 'a'.repeat(40), output_commit: 'b'.repeat(40), exit_code: 0,
+    provider_run_id: `success-contract-untrusted-provider-${process.pid}`,
+    evidence_artifact: 'test-only-synthetic-worker-claim',
+    evidence_refs: ['task-payload.json', 'execution.json'], started_at: startedAt, finished_at: finishTime, error: null,
+    evidence_verification: { valid: true, errors: [], evidence_hash: 'c'.repeat(64) }
+  };
+  const snapshotUntrustedState = () => {
+    const task = store.getTask(unattestedTask.task_id);
+    const lease = store.getTaskLease(unattestedLease.lease_id);
+    return {
+      taskStatus: task.status, executionStatus: task.execution_status, executionAttempt: task.execution_attempt,
+      leaseState: lease.state,
+      resultCount: store.db.prepare('SELECT COUNT(*) AS n FROM results WHERE task_id=?').get(unattestedTask.task_id).n,
+      artifactCount: store.db.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE task_id=?').get(unattestedTask.task_id).n,
+      attemptCount: store.db.prepare('SELECT COUNT(*) AS n FROM attempts WHERE task_id=?').get(unattestedTask.task_id).n,
+      completionEvents: store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE job_id=? AND type IN ('task.completed','task.failed','task.local_completed','task.local_failed') AND json_extract(payload_json,'$.taskId')=?")
+        .get(unattestedJob.job_id, unattestedTask.task_id).n,
+      verifiedEvents: store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE job_id=? AND type IN ('task.execution.verified','task.execution.checkpointed','task.execution.rejected') AND json_extract(payload_json,'$.taskId')=?")
+        .get(unattestedJob.job_id, unattestedTask.task_id).n,
+      leaseCompletionEvents: store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE job_id=? AND type='task.lease.completed' AND json_extract(payload_json,'$.taskId')=?")
+        .get(unattestedJob.job_id, unattestedTask.task_id).n
+    };
+  };
+  const untrustedBefore = snapshotUntrustedState();
+  const markedWorkerClaim = {
+    ...untrustedOutputClaim,
+    evidence_verification: {
+      ...untrustedOutputClaim.evidence_verification,
+      output_commit_provenance: 'worker_reported_and_execution_json_bound_not_independently_attested'
+    }
+  };
+  const missingOutputCommit = { ...untrustedOutputClaim };
+  delete missingOutputCommit.output_commit;
+  const nullOutputCommit = { ...untrustedOutputClaim, output_commit: null };
+  const emptyOutputCommit = { ...untrustedOutputClaim, output_commit: '' };
+  const successShapeVariants = [
+    ['stripped worker provenance', untrustedOutputClaim],
+    ['worker provenance marker present', markedWorkerClaim],
+    ['successful result without output_commit', missingOutputCommit],
+    ['successful result with null output_commit', nullOutputCommit],
+    ['successful result with empty output_commit', emptyOutputCommit]
+  ];
+  for (const [label, candidate] of successShapeVariants) {
+    const rejected = store.applyVerifiedExecutionResult(candidate);
+    assert.equal(rejected.status, 'REJECTED', `${label} must be rejected before durable success is applied`);
+    assert.equal(rejected.reason, 'output_commit_attestation_required', `${label} must use the stable quarantine classifier`);
+    assert.deepEqual(snapshotUntrustedState(), untrustedBefore,
+      `${label} must not publish a result, artifact, attempt, completion event or terminal lease transition`);
+    const replay = store.applyVerifiedExecutionResult(candidate);
+    assert.equal(replay.status, 'REJECTED');
+    assert.equal(replay.reason, 'output_commit_attestation_required', `${label} replay remains fail-closed`);
+    assert.deepEqual(snapshotUntrustedState(), untrustedBefore, `${label} replay must be a non-mutating rejection`);
+  }
+
   const validLocalExecution = {
     task_id: 'task-local-success', execution_attempt: 1,
     status: 'completed', execution_status: 'completed', execution_exit_code: 0,
@@ -271,8 +337,12 @@ try {
   store.approve(productionJob.job_id, 'isolated dependency binding fixture', 'test-fixture', { workspace: root });
   const productionPlan = store.getExecutionPlan(productionJob.job_id);
   assert.equal(productionPlan.workflow_id, 'production');
+  assert.equal(productionPlan.schema_version, 2);
+  assert.equal(productionPlan.batch_execution_policy.mode, 'required');
   const productionParent = store.dispatch(productionJob.job_id, { role: 'cto', description: 'dependency binding parent' });
   const architectSpec = productionPlan.children.find(item => item.role === 'architect');
+  assert.equal(resolveTaskBatchRoute(productionPlan, architectSpec).required, true,
+    'deterministic local tasks must bind to an immutable mandatory batch route');
   const plannedTask = store.createChildTask(productionJob.job_id, {
     parentTaskId: productionParent.task_id,
     role: architectSpec.role,
@@ -303,11 +373,37 @@ try {
       cwd: architectSpec.execution.cwd,
       env: {}
     }), /durable dependencies (?:are malformed|differ from the immutable execution plan)/,
-    'the direct ExecutionManager caller must fail before any OS process is spawned');
+    'the direct ExecutionManager caller must still validate immutable dependencies before enforcing the batch route');
     assert.equal(store.getTask(plannedTask.task_id).execution_attempt ?? 0, 0,
       'dependency tampering must not allocate a durable execution attempt');
   }
   store.db.prepare('UPDATE tasks SET dependency_json=? WHERE task_id=?').run(originalDependencies, plannedTask.task_id);
+  const directExecutionAttempt = () => validationManager.executeStructuredTask(plannedTask.task_id, {
+    executable: architectSpec.execution.executable,
+    args: architectSpec.execution.args,
+    timeoutMs: architectSpec.execution.timeout_ms,
+    cwd: architectSpec.execution.cwd,
+    env: {}
+  });
+  await assert.rejects(directExecutionAttempt, /batch-required.*direct ExecutionManager execution/,
+    'a valid deterministic plan task still cannot bypass the durable batch route');
+  await assert.rejects(directExecutionAttempt, /batch-required.*direct ExecutionManager execution/,
+    'repeated low-level bypass must remain denied');
+  const directDenialRows = store.db.prepare("SELECT payload_json FROM events WHERE job_id=? AND type='batch_execution.policy_denied' AND json_extract(payload_json,'$.rejectedRoute')='execution_manager_single_task' AND json_extract(payload_json,'$.taskId')=?")
+    .all(productionJob.job_id, plannedTask.task_id);
+  assert.equal(directDenialRows.length, 1, 'low-level bypass audit must be idempotent');
+  const directDenial = JSON.parse(directDenialRows[0].payload_json);
+  assert.equal(directDenial.reasonCode, 'batch_route_required');
+  assert.equal(directDenial.policyVersion, 1);
+  assert.equal(Object.hasOwn(directDenial, 'command'), false);
+  assert.equal(Object.hasOwn(directDenial, 'args'), false);
+  assert.equal(Object.hasOwn(directDenial, 'env'), false);
+  assert.equal(JSON.stringify(directDenial).includes(architectSpec.execution.executable), false,
+    'low-level denial audit must not store the caller command/executable');
+  assert.equal(JSON.stringify(directDenial).includes(JSON.stringify(architectSpec.execution.args)), false,
+    'low-level denial audit must not store command arguments');
+  assert.equal(store.getTask(plannedTask.task_id).execution_attempt ?? 0, 0,
+    'the batch-route guard must reject before allocating an OS execution attempt');
   assert.doesNotThrow(() => store.assertPreparedExecutionPlan(store.getTask(plannedTask.task_id), {
     command: structuredCommand, cwd: architectSpec.execution.cwd
   }), 'restoring the exact immutable dependency list should restore validation');

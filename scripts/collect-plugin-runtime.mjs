@@ -25,7 +25,13 @@ function assertRegularSource(relative) {
 const queue = [
   'server/index.js',
   'src/runtime/job-store.js',
+  // The read-only liveness tool is imported through runtimePrefix rather than
+  // a static relative path, so package it explicitly with the runtime closure.
+  'src/runtime/job-liveness.js',
   'src/runtime/execution-manager.js',
+  // The packaged Phase-5 recovery regression loads this module via a fixture
+  // forwarder; include it in the staged test runtime closure explicitly.
+  'src/runtime/recovery-manager.js',
   'src/runtime/workflow/artifacts.js',
   'src/runtime/workflow/agent-contracts.js',
   // server/index.js selects the workflow helper through a runtimePrefix
@@ -34,11 +40,17 @@ const queue = [
   'src/runtime/workflow/case01-artifact-acceptance.js',
   'src/runtime/workflow/custom-roles.js',
   'src/runtime/workflow/custom-workflows.js',
+  // Proactive reusable-resource discovery is selected through runtimePrefix.
+  'src/runtime/workflow/resource-recommender.js',
   // The immutable system coordinator and specialist prompt helper are loaded
   // through runtimePrefix in the server entry point, so keep these dynamic
   // import dependencies explicit in the packaged runtime closure.
   'src/runtime/workflow/system-coordinator.js',
-  'src/runtime/workflow/specialist-role-guidance.js'
+  'src/runtime/workflow/specialist-role-guidance.js',
+  // These structured error/recovery modules are also selected through the
+  // runtimePrefix import in server/index.js and cannot be discovered statically.
+  'src/runtime/workflow/recovery-compatibility.js',
+  'src/runtime/workflow/tool-errors.js'
 ];
 const visited = new Set();
 // Include static imports, dynamic imports, and side-effect-only imports. If a

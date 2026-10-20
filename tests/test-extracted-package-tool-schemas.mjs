@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const bundle = process.env.PHASE2_CANDIDATE_BUNDLE;
@@ -111,6 +112,81 @@ try {
   assert.equal(workflowCreate.properties.title.maxLength, 180);
   assert.equal(workflowCreate.properties.task.type, 'string');
   assert.equal(workflowCreate.properties.task.maxLength, 12000);
+
+  const validationProfileSchema = workflowCreate.properties.validation_profile;
+  assert.ok(validationProfileSchema && typeof validationProfileSchema === 'object', 'workflow_create must expose its versioned validation profile selector');
+  assert.deepEqual(validationProfileSchema.properties.profile_id.enum, ['core-release-validation', 'plugin-e2e', 'mcpb-package-build', 'mcpb-package-build-isolated', 'mcpb-workspace-smoke']);
+  const expectedMcpbPackageWrapper = "import { spawnSync } from 'node:child_process'; const result = spawnSync('npm', ['run', 'pack:runalith-mcpb'], { cwd: process.cwd(), stdio: 'inherit' }); if (result.error) { console.error(result.error.message); process.exitCode = 1; } else { process.exitCode = result.status ?? 1; }";
+  const policyRuntime = await import(pathToFileURL(path.join(extracted, 'src/runtime/workflow/policy-contract.js')).href);
+  const packageProfile = policyRuntime.resolveValidationProfileSnapshot({ profile_id: 'mcpb-package-build', profile_version: 1 });
+  assert.match(packageProfile.content_hash, /^[a-f0-9]{64}$/);
+  assert.equal(packageProfile.route, 'mcpb-package-build');
+  const packageProfileTasks = policyRuntime.materializeValidationProfileTasks(packageProfile, extracted);
+  assert.equal(packageProfileTasks.length, 1, 'MCPB packaging profile must pin exactly one outer package command');
+  const packageTask = packageProfileTasks[0];
+  assert.equal(packageTask.id, 'standard-mcpb-package-build');
+  assert.equal(packageTask.execution.executable, 'node');
+  assert.deepEqual(packageTask.execution.args, ['--input-type=module', '-e', expectedMcpbPackageWrapper]);
+  assert.equal(packageTask.execution.timeout_ms, 600000);
+  assert.deepEqual(packageTask.dependencies, ['standard-engineer']);
+  const compilerRuntime = await import(pathToFileURL(path.join(extracted, 'src/runtime/workflow/compiler.js')).href);
+  const packageProfilePlan = compilerRuntime.compileWorkflowPlan({ job_id: 'mcpb-package-profile-contract-test', title: 'Software delivery: MCPB package validation profile' }, {
+    workspace: extracted, requiredOperations: ['workspace.write'],
+    workspaceWriteScopes: [{ role: 'engineer', paths: [{ path: 'server/index.js', kind: 'file' }] }],
+    validationProfileSelector: { profile_id: 'mcpb-package-build', profile_version: 1 }
+  });
+  assert.equal(packageProfilePlan.validation_profile.content_hash, packageProfile.content_hash);
+  assert.deepEqual(packageProfilePlan.batch_execution_policy.validation_task_ids, ['standard-mcpb-package-build']);
+  assert.deepEqual(packageProfilePlan.children.filter(item => item.execution?.deterministic === true).map(item => item.id), ['standard-mcpb-package-build']);
+  const expectedMcpbPackageIsolatedWrapper = "import { spawnSync } from 'node:child_process'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'runalith-npm-config-')); const userConfig = path.join(temp, 'user.npmrc'); const globalConfig = path.join(temp, 'global.npmrc'); try {   fs.writeFileSync(userConfig, '', { mode: 0o600 });   fs.writeFileSync(globalConfig, '', { mode: 0o600 });   const env = { ...process.env, NPM_CONFIG_USERCONFIG: userConfig, NPM_CONFIG_GLOBALCONFIG: globalConfig, npm_config_userconfig: userConfig, npm_config_globalconfig: globalConfig };   const result = spawnSync('npm', ['run', 'pack:runalith-mcpb'], { cwd: process.cwd(), stdio: 'inherit', env });   if (result.error) { console.error(result.error.message); process.exitCode = 1; } else { process.exitCode = result.status ?? 1; } } finally { fs.rmSync(temp, { recursive: true, force: true }); }";
+  const isolatedPackageProfile = policyRuntime.resolveValidationProfileSnapshot({ profile_id: 'mcpb-package-build-isolated', profile_version: 1 });
+  assert.match(isolatedPackageProfile.content_hash, /^[a-f0-9]{64}$/);
+  assert.equal(isolatedPackageProfile.route, 'mcpb-package-build-isolated');
+  const isolatedPackageTasks = policyRuntime.materializeValidationProfileTasks(isolatedPackageProfile, extracted);
+  assert.equal(isolatedPackageTasks.length, 1);
+  const isolatedPackageTask = isolatedPackageTasks[0];
+  assert.equal(isolatedPackageTask.id, 'standard-mcpb-package-build-isolated');
+  assert.equal(isolatedPackageTask.execution.executable, 'node');
+  assert.deepEqual(isolatedPackageTask.execution.args, ['--input-type=module', '-e', expectedMcpbPackageIsolatedWrapper]);
+  assert.equal(isolatedPackageTask.execution.timeout_ms, 600000);
+  assert.deepEqual(isolatedPackageTask.dependencies, ['standard-engineer']);
+  const isolatedPackagePlan = compilerRuntime.compileWorkflowPlan({ job_id: 'mcpb-isolated-package-profile-contract-test', title: 'Software delivery: isolated MCPB package validation profile' }, {
+    workspace: extracted, requiredOperations: ['workspace.write'],
+    workspaceWriteScopes: [{ role: 'engineer', paths: [{ path: 'server/index.js', kind: 'file' }] }],
+    validationProfileSelector: { profile_id: 'mcpb-package-build-isolated', profile_version: 1 }
+  });
+  assert.equal(isolatedPackagePlan.validation_profile.content_hash, isolatedPackageProfile.content_hash);
+  assert.deepEqual(isolatedPackagePlan.batch_execution_policy.validation_task_ids, ['standard-mcpb-package-build-isolated']);
+  assert.deepEqual(isolatedPackagePlan.children.filter(item => item.execution?.deterministic === true).map(item => item.id), ['standard-mcpb-package-build-isolated']);
+
+
+
+  const workspaceSmokeProfile = policyRuntime.resolveValidationProfileSnapshot({ profile_id: 'mcpb-workspace-smoke', profile_version: 1 });
+  assert.match(workspaceSmokeProfile.content_hash, /^[a-f0-9]{64}$/);
+  assert.equal(workspaceSmokeProfile.route, 'mcpb-workspace-smoke');
+  const workspaceSmokeTasks = policyRuntime.materializeValidationProfileTasks(workspaceSmokeProfile, extracted);
+  const expectedWorkspaceSmokeIds = [
+    'standard-mcpb-workspace-smoke-execution-batch',
+    'standard-mcpb-workspace-smoke-execution-concurrency',
+    'standard-mcpb-workspace-smoke-terminal-recovery',
+    'standard-mcpb-workspace-smoke-success-contract',
+    'standard-mcpb-workspace-smoke-phase5-recovery',
+    'standard-mcpb-workspace-smoke-agent-tool-guidance'
+  ];
+  assert.deepEqual(workspaceSmokeTasks.map(item => item.id), expectedWorkspaceSmokeIds);
+  assert.equal(new Set(workspaceSmokeTasks.map(item => item.id)).size, workspaceSmokeTasks.length);
+  assert.ok(workspaceSmokeTasks.every(item => item.execution.executor === 'ExecutionManager' &&
+    item.execution.deterministic === true && item.execution.timeout_ms === 300000 &&
+    item.execution.output_artifact_type === 'qa-report' && item.execution.batch_validation_task === true &&
+    item.dependencies.length === 1 && item.dependencies[0] === 'standard-engineer'));
+  const workspaceSmokePlan = compilerRuntime.compileWorkflowPlan({ job_id: 'mcpb-workspace-smoke-profile-contract-test', title: 'Software delivery: embedded package smoke profile' }, {
+    workspace: extracted, requiredOperations: ['workspace.write'],
+    workspaceWriteScopes: [{ role: 'engineer', paths: [{ path: 'server/index.js', kind: 'file' }] }],
+    validationProfileSelector: { profile_id: 'mcpb-workspace-smoke', profile_version: 1 }
+  });
+  assert.equal(workspaceSmokePlan.validation_profile.content_hash, workspaceSmokeProfile.content_hash);
+  assert.deepEqual(workspaceSmokePlan.batch_execution_policy.validation_task_ids, expectedWorkspaceSmokeIds);
+  assert.deepEqual(workspaceSmokePlan.children.filter(item => item.execution?.deterministic === true).map(item => item.id), expectedWorkspaceSmokeIds);
 
   const workflowApprove = schemaFor('workflow_approve');
   assertRequired('workflow_approve', ['job_id', 'confirmation']);

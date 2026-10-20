@@ -8,9 +8,36 @@ process.env.WORKFLOW_DATA_DIR = dir;
 process.env.WORKFLOW_DB = path.join(dir, 'workflow.db');
 
 const { WorkflowStore } = await import('../job-store.js');
-const { ExecutionManager } = await import('../execution-manager.js');
+const { ExecutionManager, assertExecutionBatchRetryLineage } = await import('../execution-manager.js');
 
 const store = new WorkflowStore();
+const nodeExecutable = JSON.stringify(process.execPath);
+
+const profileBoundJob = store.createJob({
+  conversationKey: 'validation-profile-durable-binding',
+  title: 'Engineering Standard delivery validation profile binding'
+});
+store.recordEvent(profileBoundJob.job_id, 'job.proposal_requested', {
+  task: 'Exercise durable versioned validation profile selector propagation',
+  workspace: process.cwd(),
+  workflowId: 'standard-engineering',
+  executionTarget: 'local',
+  success_contract: { goal: 'Durable versioned validation profile selector binding' },
+  required_operations: ['workspace.write'],
+  workspace_write_scopes: [{ role: 'engineer', paths: [{ path: 'server/index.js', kind: 'file' }] }],
+  validation_profile: { profile_id: 'core-release-validation', profile_version: 1 }
+}, profileBoundJob.job_id);
+store.approve(profileBoundJob.job_id, 'approved', 'local-test-user', { workspace: process.cwd() });
+const profileBoundPlan = store.getExecutionPlan(profileBoundJob.job_id);
+assert.equal(profileBoundPlan.validation_profile.profile_id, 'core-release-validation');
+assert.equal(profileBoundPlan.validation_profile.profile_version, 1);
+assert.match(profileBoundPlan.validation_profile.content_hash, /^[a-f0-9]{64}$/);
+assert.equal(profileBoundPlan.children.some(task => task.id === 'standard-docs-generate-reference'), true);
+assert.equal(profileBoundPlan.children.some(task => task.id === 'standard-docs-check'), true);
+assert.equal(profileBoundPlan.children.some(task => task.id === 'standard-plugin-e2e'), false);
+assert.equal(store.getCurrentProposal(profileBoundJob.job_id).payload.validation_profile.profile_id, 'core-release-validation');
+assert.equal(store.compileExecutionPlan(profileBoundJob.job_id, { workspace: process.cwd() }).plan_hash, profileBoundPlan.plan_hash,
+  'runtime plan revalidation must reuse the exact durable profile selector and snapshot');
 // A batch row created while a Job is active must not remain an execution
 // capability after the parent Job terminalizes. Exercise both claim-time and
 // post-claim/preparation races using only the isolated local SQLite fixture.
@@ -18,7 +45,7 @@ const store = new WorkflowStore();
   const terminalJob = store.createJob({ conversationKey: 'batch-terminal-job-fence', title: 'Batch parent terminal fence' });
   store.approve(terminalJob.job_id, 'approved');
   const terminalParent = store.dispatch(terminalJob.job_id, { role: 'cto', description: 'terminal fence parent' });
-  const command = "node -e \"process.stdout.write('MUST_NOT_RUN_AFTER_JOB_TERMINAL')\"";
+  const command = `${nodeExecutable} -e "process.stdout.write('MUST_NOT_RUN_AFTER_JOB_TERMINAL')"`;
   const taskA = store.createChildTask(terminalJob.job_id, {
     parentTaskId: terminalParent.task_id, role: 'executor', description: 'claim after terminal parent',
     metadata: { deterministic: true, command }
@@ -99,15 +126,20 @@ const store = new WorkflowStore();
     .get(spawnFenceJob.job_id).n, 0, 'terminalizing the parent after preparation must block durable spawn authorization');
   assert.equal(store.getExecutionBatch(spawnFenceBatch.batch_id).status, 'FAILED');
   assert.equal(store.listExecutionBatchItems(spawnFenceBatch.batch_id)[0].status, 'FAILED');
-  assert.equal(store.getTask(spawnFenceTask.task_id).execution_status, 'failed');
+  assert.equal(store.getTask(spawnFenceTask.task_id).execution_status, 'failed', JSON.stringify({
+    job: (({ state, status }) => ({ state, status }))(store.getJob(spawnFenceJob.job_id)),
+    task: (({ status, execution_status, execution_attempt, execution_stderr, execution_finished_at }) =>
+      ({ status, execution_status, execution_attempt, execution_stderr, execution_finished_at }))(store.getTask(spawnFenceTask.task_id)),
+    item: (({ status, error, stderr, exit_code }) => ({ status, error, stderr, exit_code }))(store.listExecutionBatchItems(spawnFenceBatch.batch_id)[0])
+  }, null, 2));
 }
 const job = store.createJob({ conversationKey: 'batch-test', title: 'Execution batch test' });
 store.approve(job.job_id, 'approved');
 const cto = store.dispatch(job.job_id, { role: 'cto', description: 'batch parent' });
 const tasks = [
-  store.createChildTask(job.job_id, { parentTaskId: cto.task_id, role: 'architect', description: 'check A', metadata: { deterministic: true, command: "node -e \"const s=Date.now(); setTimeout(()=>process.stdout.write(s+','+Date.now()),250)\"" } }),
-  store.createChildTask(job.job_id, { parentTaskId: cto.task_id, role: 'architect', description: 'check B', metadata: { deterministic: true, command: "node -e \"const s=Date.now(); setTimeout(()=>process.stdout.write(s+','+Date.now()),250)\"" } }),
-  store.createChildTask(job.job_id, { parentTaskId: cto.task_id, role: 'architect', description: 'check C', metadata: { deterministic: true, command: "node -e \"process.stderr.write('CERR'); process.exit(3)\"" } })
+  store.createChildTask(job.job_id, { parentTaskId: cto.task_id, role: 'architect', description: 'check A', metadata: { deterministic: true, command: `${nodeExecutable} -e "const s=Date.now(); setTimeout(()=>process.stdout.write(s+','+Date.now()),250)"` } }),
+  store.createChildTask(job.job_id, { parentTaskId: cto.task_id, role: 'architect', description: 'check B', metadata: { deterministic: true, command: `${nodeExecutable} -e "const s=Date.now(); setTimeout(()=>process.stdout.write(s+','+Date.now()),250)"` } }),
+  store.createChildTask(job.job_id, { parentTaskId: cto.task_id, role: 'architect', description: 'check C', metadata: { deterministic: true, command: `${nodeExecutable} -e "process.stderr.write('CERR'); process.exit(3)"` } })
 ];
 const batchCountBeforeInvalidInput = store.db.prepare('SELECT COUNT(*) AS n FROM execution_batches').get().n;
 const canonicalCommand = JSON.parse(tasks[0].metadata_json).command;
@@ -183,7 +215,7 @@ assert.ok(Math.min(...successful.map(x => x[1] - x[0])) >= 200, `worker did not 
 assert.equal(store.listExecutionBatchItems(batch.batch_id).every(i => i.execution_session_id), true);
 const retryTarget = result.items.find(i => i.exit_code === 3);
 assert.ok(retryTarget);
-const retryCommand = "node -e \"process.stdout.write('RETRIED')\"";
+const retryCommand = `${nodeExecutable} -e "process.stdout.write('RETRIED')"`;
 store.db.prepare("UPDATE tasks SET metadata_json=? WHERE task_id=?").run(JSON.stringify({ deterministic: true, command: retryCommand }), retryTarget.task_id);
 store.db.prepare("UPDATE execution_batch_items SET command=? WHERE batch_id=? AND item_id=?").run(retryCommand, batch.batch_id, retryTarget.item_id);
 const retried = await manager.executeBatch(batch.batch_id);
@@ -207,11 +239,43 @@ for (const priorSuccess of result.items.filter(item => item.status === 'COMPLETE
 assert.equal(store.getTask(retryTarget.task_id).execution_attempt, 2,
   'only the previously failed item advances to its second execution attempt');
 
+// Run the same durable retry-lineage verifier used by synthesis against real
+// execution.batch.created/retry_started/failed/completed rows emitted above.
+const durableCreationEvents = store.db.prepare("SELECT type,payload_json FROM events WHERE job_id=? AND type='execution.batch.created' AND json_extract(payload_json,'$.batchId')=?")
+  .all(job.job_id, batch.batch_id)
+  .map(event => ({ type: event.type, payload: JSON.parse(event.payload_json) }));
+const durableRetryEvents = store.db.prepare("SELECT type,payload_json FROM events WHERE job_id=? AND type='execution.batch.retry_started' AND json_extract(payload_json,'$.batchId')=? ORDER BY created_at ASC,rowid ASC")
+  .all(job.job_id, batch.batch_id)
+  .map(event => ({ type: event.type, payload: JSON.parse(event.payload_json) }));
+const durableTerminalEvents = store.db.prepare("SELECT type,payload_json FROM events WHERE job_id=? AND type IN ('execution.batch.completed','execution.batch.failed') AND json_extract(payload_json,'$.batchId')=? ORDER BY created_at ASC,rowid ASC")
+  .all(job.job_id, batch.batch_id)
+  .map(event => ({ type: event.type, payload: JSON.parse(event.payload_json) }));
+const retryLineage = assertExecutionBatchRetryLineage({
+  batchId: batch.batch_id,
+  creationEvents: durableCreationEvents,
+  retryEvents: durableRetryEvents,
+  terminalEvents: durableTerminalEvents,
+  finalAttempt: retried.attempt,
+  items: store.listExecutionBatchItems(batch.batch_id)
+});
+assert.deepEqual(retryLineage, { initialAttempt: 1, finalAttempt: 2, retryCount: 1, itemCount: 3 },
+  'synthesis evidence verifier must accept genuine durable retry lineage with two attempt-1 successes and one attempt-2 success');
+assert.throws(() => assertExecutionBatchRetryLineage({
+  batchId: batch.batch_id, creationEvents: durableCreationEvents, retryEvents: [],
+  terminalEvents: durableTerminalEvents, finalAttempt: retried.attempt,
+  items: store.listExecutionBatchItems(batch.batch_id)
+}), /retry history is missing/i, 'missing retry provenance must not satisfy synthesis evidence');
+assert.throws(() => assertExecutionBatchRetryLineage({
+  batchId: batch.batch_id, creationEvents: durableCreationEvents, retryEvents: durableRetryEvents,
+  terminalEvents: durableTerminalEvents.slice(1), finalAttempt: retried.attempt,
+  items: store.listExecutionBatchItems(batch.batch_id)
+}), /terminal event history does not cover/i, 'missing prior failure terminal must block synthesis evidence');
+
 // A process exit code of zero is not sufficient for batch success when the
 // execution manager deliberately marks the durable task failed because output
 // evidence exceeded its capture limit. This exercises the actual supervisor,
 // collector, task terminal ledger and batch item/aggregate caller end-to-end.
-const outputLimitedCommand = 'node -e "process.stdout.write(Buffer.alloc(5242880, 65))"';
+const outputLimitedCommand = `${nodeExecutable} -e "process.stdout.write(Buffer.alloc(5242880, 65))"`;
 const outputLimitedTask = store.createChildTask(job.job_id, {
   parentTaskId: cto.task_id, role: 'architect', description: 'zero-exit output-limit batch must fail',
   metadata: { deterministic: true, command: outputLimitedCommand }
@@ -236,11 +300,11 @@ console.log('EXECUTION BATCH ZERO-EXIT / OUTPUT-LIMIT DURABLE FAILURE / NO FALSE
 // to measure scheduler concurrency without starting 17 real child processes.
 const fanoutTasks = Array.from({ length: 17 }, (_, index) => store.createChildTask(job.job_id, {
   parentTaskId: cto.task_id, role: 'architect', description: `bounded fan-out ${index}`,
-  metadata: { deterministic: true, command: 'node --version' }
+  metadata: { deterministic: true, command: nodeExecutable }
 }));
 const fanoutBatch = store.createExecutionBatch(job.job_id, {
   parentTaskId: cto.task_id, role: 'architect',
-  items: fanoutTasks.map(task => ({ taskId: task.task_id, command: 'node --version' }))
+  items: fanoutTasks.map(task => ({ taskId: task.task_id, command: nodeExecutable }))
 });
 let activeLanes = 0;
 let maxActiveLanes = 0;

@@ -72,7 +72,8 @@ const ROLE_CONTRACTS = Object.freeze({
     role: 'writer',
     capability: TaskCapability.DOCUMENTATION_WRITE,
     executor: 'ChatOnSteroids',
-    permissions: Object.freeze(['workspace.read', 'artifact.create'])
+    // Every write still requires the runtime's plan-pinned workspace scope.
+    permissions: Object.freeze(['workspace.read', 'workspace.write', 'artifact.create'])
   }),
   cto: Object.freeze({
     role: 'cto',

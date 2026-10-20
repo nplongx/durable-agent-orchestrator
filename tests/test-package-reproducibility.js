@@ -42,6 +42,15 @@ function packageInputSnapshot(label) {
   const explicit = [
     'README.md', 'LICENSE', 'plugin/manifest.json',
     'tests/test-runalith-plugin.js',
+    'tests/test-temp-dir.js',
+    'tests/test-execution-lease-fencing.js',
+    'tests/test-execution-control-process-boundary.js',
+    'tests/test-execution-batch.js',
+    'tests/test-execution-batch-concurrency.js',
+    'tests/test-execution-batch-terminal-recovery.js',
+    'tests/test-execution-success-contract.js',
+    'tests/test-phase5-recovery.js',
+    'tests/test-agent-tool-guidance.js',
     'tests/test-mcp-stdio-backpressure.mjs',
     'tests/test-mcp-graceful-signal-shutdown-20261017.js',
     'tests/test-mcp-shutdown-backpressure-deadline-20261017.js',
@@ -56,8 +65,6 @@ function packageInputSnapshot(label) {
   // bytes into the build-input fingerprint separately from packaged entries.
   const validationSources = [
     'tests/test-extracted-package-tool-schemas.mjs',
-    'tests/test-execution-lease-fencing.js',
-    'tests/test-temp-dir.js',
   ];
   for (const relative of validationSources) {
     const sourcePath = path.join(root, relative);
@@ -225,10 +232,27 @@ try {
     assert.deepEqual(firstArchive.extracted.get(relative), bytes, `packaged entry must match exact source bytes: ${relative}`);
     assert.deepEqual(secondArchive.extracted.get(relative), bytes, `second packaged entry must match exact source bytes: ${relative}`);
   }
-  assert.equal(firstArchive.names.length, 45,
-    'candidate payload must include the strict JSON parser dependency, hybrid workflow catalog/definition, pinned role-profile and policy runtime modules, packaged MCP stdio backpressure and shutdown regressions, pinned production behavioral QA harness, and exact runtime closure');
+  assert.equal(firstArchive.names.length, expectedArchiveNames.size,
+    'archive entry count is derived from exact expected membership, never a historical hard-coded count');
+  for (const requiredTest of [
+    'tests/test-execution-lease-fencing.js',
+    'tests/test-execution-control-process-boundary.js',
+    'tests/test-execution-batch.js',
+    'tests/test-execution-batch-concurrency.js',
+    'tests/test-execution-batch-terminal-recovery.js',
+    'tests/test-execution-success-contract.js',
+    'tests/test-phase5-recovery.js',
+    'tests/test-agent-tool-guidance.js'
+  ]) {
+    assert.ok(firstArchive.extracted.has(requiredTest), `exact package closure must contain ${requiredTest}`);
+    assert.ok(secondArchive.extracted.has(requiredTest), `second reproducible archive must contain ${requiredTest}`);
+  }
   assert.ok(firstArchive.extracted.has('src/runtime/strict-json.js'), 'strict JSON consumer hardening must ship its parser dependency in the MCP bundle');
+  assert.ok(firstArchive.extracted.has('src/runtime/job-liveness.js'), 'runtimePrefix-loaded job liveness diagnostics must ship in the extracted MCP bundle');
   assert.ok(firstArchive.extracted.has('src/runtime/workflow/specialist-role-guidance.js'), 'the runtimePrefix-loaded specialist prompt helper must ship in the extracted MCP bundle');
+  for (const dependency of ['src/runtime/workflow/workspace-write-contract.js', 'src/runtime/workflow/recovery-compatibility.js', 'src/runtime/workflow/tool-errors.js']) {
+    assert.ok(firstArchive.extracted.has(dependency), `runtimePrefix-loaded workspace-write/recovery dependency must ship: ${dependency}`);
+  }
 
   // Exercise the collector against a disposable source tree containing a
   // side-effect-only static import. The package source closure must include

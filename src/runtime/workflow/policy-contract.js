@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import path from 'node:path';
 import { parseStrictJson } from '../strict-json.js';
 import { normalizeSuccessContract } from './success-contract.js';
 
@@ -512,3 +513,230 @@ export function recordWorkflowPolicyViolation(db, workflowStore, { jobId, policy
 }
 
 export function policyRuleIdForSnapshot(policyId, ruleId) { return policyPredicateId(normalizePolicyId(policyId), ruleId); }
+
+
+const MCPB_PACKAGE_BUILD_WRAPPER = "import { spawnSync } from 'node:child_process'; const result = spawnSync('npm', ['run', 'pack:runalith-mcpb'], { cwd: process.cwd(), stdio: 'inherit' }); if (result.error) { console.error(result.error.message); process.exitCode = 1; } else { process.exitCode = result.status ?? 1; }";
+const MCPB_PACKAGE_BUILD_ISOLATED_WRAPPER = "import { spawnSync } from 'node:child_process'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'runalith-npm-config-')); const userConfig = path.join(temp, 'user.npmrc'); const globalConfig = path.join(temp, 'global.npmrc'); try {   fs.writeFileSync(userConfig, '', { mode: 0o600 });   fs.writeFileSync(globalConfig, '', { mode: 0o600 });   const env = { ...process.env, NPM_CONFIG_USERCONFIG: userConfig, NPM_CONFIG_GLOBALCONFIG: globalConfig, npm_config_userconfig: userConfig, npm_config_globalconfig: globalConfig };   const result = spawnSync('npm', ['run', 'pack:runalith-mcpb'], { cwd: process.cwd(), stdio: 'inherit', env });   if (result.error) { console.error(result.error.message); process.exitCode = 1; } else { process.exitCode = result.status ?? 1; } } finally { fs.rmSync(temp, { recursive: true, force: true }); }";
+
+const VALIDATION_PROFILES = Object.freeze({
+  'core-release-validation': Object.freeze({
+    schema_version: 1,
+    profile_id: 'core-release-validation',
+    profile_version: 1,
+    execution_target: 'local',
+    route: 'core-validation',
+    task_contracts: Object.freeze([
+      { task_id: 'standard-batch-test-execution-batch', role: 'batch-test-execution-batch', executable: 'node', args: ['--test', '$WORKSPACE/tests/test-execution-batch.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true },
+      { task_id: 'standard-batch-test-execution-concurrency', role: 'batch-test-execution-concurrency', executable: 'node', args: ['--test', '$WORKSPACE/tests/test-execution-batch-concurrency.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true },
+      { task_id: 'standard-batch-test-terminal-recovery', role: 'batch-test-terminal-recovery', executable: 'node', args: ['--test', '$WORKSPACE/tests/test-execution-batch-terminal-recovery.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true },
+      { task_id: 'standard-batch-test-success-contract', role: 'batch-test-success-contract', executable: 'node', args: ['--test', '$WORKSPACE/tests/test-execution-success-contract.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true },
+      { task_id: 'standard-batch-test-phase5-recovery', role: 'batch-test-phase5-recovery', executable: 'node', args: ['--test', '$WORKSPACE/tests/test-phase5-recovery.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true },
+      { task_id: 'standard-batch-test-agent-tool-guidance', role: 'batch-test-agent-tool-guidance', executable: 'node', args: ['--test', '$WORKSPACE/tests/test-agent-tool-guidance.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true },
+      { task_id: 'standard-docs-generate-reference', role: 'validation-docs-generate-reference', executable: 'node', args: ['$WORKSPACE/scripts/generate-mcp-reference.mjs'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'documentation', batch_validation_task: true },
+      { task_id: 'standard-docs-check', role: 'validation-docs-check', executable: 'node', args: ['$WORKSPACE/scripts/check-docs.mjs'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer', 'standard-docs-generate-reference'], output_artifact_type: 'qa-report', batch_validation_task: true }
+    ])
+  }),
+  'mcpb-package-build': Object.freeze({
+    schema_version: 1,
+    profile_id: 'mcpb-package-build',
+    profile_version: 1,
+    execution_target: 'local',
+    route: 'mcpb-package-build',
+    task_contracts: Object.freeze([
+      { task_id: 'standard-mcpb-package-build', role: 'validation-mcpb-package-build', executable: 'node', args: ['--input-type=module', '-e', MCPB_PACKAGE_BUILD_WRAPPER], cwd: '$WORKSPACE', timeout_ms: 600000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true }
+    ])
+  }),
+  'mcpb-package-build-isolated': Object.freeze({
+    schema_version: 1,
+    profile_id: 'mcpb-package-build-isolated',
+    profile_version: 1,
+    execution_target: 'local',
+    route: 'mcpb-package-build-isolated',
+    task_contracts: Object.freeze([
+      { task_id: 'standard-mcpb-package-build-isolated', role: 'validation-mcpb-package-build-isolated', executable: 'node', args: ['--input-type=module', '-e', MCPB_PACKAGE_BUILD_ISOLATED_WRAPPER], cwd: '$WORKSPACE', timeout_ms: 600000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true }
+    ])
+  }),
+  'mcpb-workspace-smoke': Object.freeze({
+    schema_version: 1,
+    profile_id: 'mcpb-workspace-smoke',
+    profile_version: 1,
+    execution_target: 'local',
+    route: 'mcpb-workspace-smoke',
+    task_contracts: Object.freeze([
+      { task_id: 'standard-mcpb-workspace-smoke-execution-batch', role: 'validation-mcpb-workspace-smoke-execution-batch', executable: 'node', args: ['--test', '$WORKSPACE/tests/test-execution-batch.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true },
+      { task_id: 'standard-mcpb-workspace-smoke-execution-concurrency', role: 'validation-mcpb-workspace-smoke-execution-concurrency', executable: 'node', args: ['--test', '$WORKSPACE/tests/test-execution-batch-concurrency.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true },
+      { task_id: 'standard-mcpb-workspace-smoke-terminal-recovery', role: 'validation-mcpb-workspace-smoke-terminal-recovery', executable: 'node', args: ['--test', '$WORKSPACE/tests/test-execution-batch-terminal-recovery.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true },
+      { task_id: 'standard-mcpb-workspace-smoke-success-contract', role: 'validation-mcpb-workspace-smoke-success-contract', executable: 'node', args: ['--test', '$WORKSPACE/tests/test-execution-success-contract.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true },
+      { task_id: 'standard-mcpb-workspace-smoke-phase5-recovery', role: 'validation-mcpb-workspace-smoke-phase5-recovery', executable: 'node', args: ['--test', '$WORKSPACE/tests/test-phase5-recovery.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true },
+      { task_id: 'standard-mcpb-workspace-smoke-agent-tool-guidance', role: 'validation-mcpb-workspace-smoke-agent-tool-guidance', executable: 'node', args: ['--test', '$WORKSPACE/tests/test-agent-tool-guidance.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true }
+    ])
+  }),
+  'plugin-e2e': Object.freeze({
+    schema_version: 1,
+    profile_id: 'plugin-e2e',
+    profile_version: 1,
+    execution_target: 'local',
+    route: 'outer-e2e',
+    task_contracts: Object.freeze([
+      { task_id: 'standard-plugin-e2e', role: 'validation-plugin-e2e', executable: 'node', args: ['$WORKSPACE/tests/test-runalith-plugin.js'], cwd: '$WORKSPACE', timeout_ms: 300000, dependencies: ['standard-engineer'], output_artifact_type: 'qa-report', batch_validation_task: true }
+    ])
+  })
+});
+
+const VALIDATION_PROFILE_SNAPSHOT_KEYS = new Set([
+  'schema_version', 'profile_id', 'profile_version', 'execution_target', 'route', 'task_contracts', 'content_hash'
+]);
+
+function deepFreezeValidationProfile(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreezeValidationProfile(child);
+  return Object.freeze(value);
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function validationProfileContentHash(definition) {
+  return sha256(canonicalJson(definition));
+}
+
+export function resolveValidationProfileSnapshot(selector) {
+  assertPlainRecord(selector, 'validation_profile');
+  assertOnlyKeys(selector, new Set(['profile_id', 'profile_version']), 'validation_profile');
+  const profileId = requiredText(selector.profile_id, 'validation_profile.profile_id', 80);
+  if (!Number.isSafeInteger(selector.profile_version) || selector.profile_version < 1) {
+    throw new Error('validation_profile.profile_version must be a positive safe integer');
+  }
+  const definition = VALIDATION_PROFILES[profileId];
+  if (!definition || definition.profile_version !== selector.profile_version) {
+    throw new Error('unknown validation profile or version: ' + profileId + '@' + selector.profile_version);
+  }
+  if (definition.execution_target !== 'local' || !Array.isArray(definition.task_contracts) || !definition.task_contracts.length) {
+    throw new Error('validation profile definition is invalid: ' + profileId + '@' + selector.profile_version);
+  }
+  const ids = definition.task_contracts.map(task => task.task_id);
+  if (new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !id.trim())) {
+    throw new Error('validation profile task identities are invalid: ' + profileId + '@' + selector.profile_version);
+  }
+  if (profileId === 'core-release-validation' &&
+      (definition.route !== 'core-validation' || ids.includes('standard-plugin-e2e') ||
+       !ids.includes('standard-docs-generate-reference') || !ids.includes('standard-docs-check') ||
+       definition.task_contracts.find(task => task.task_id === 'standard-docs-check')?.dependencies?.includes('standard-docs-generate-reference') !== true)) {
+    throw new Error('core release validation profile violates its command/dependency/recursion contract');
+  }
+  if (profileId === 'mcpb-workspace-smoke') {
+    const expectedSmokeTasks = [
+      ['standard-mcpb-workspace-smoke-execution-batch', 'validation-mcpb-workspace-smoke-execution-batch', '$WORKSPACE/tests/test-execution-batch.js'],
+      ['standard-mcpb-workspace-smoke-execution-concurrency', 'validation-mcpb-workspace-smoke-execution-concurrency', '$WORKSPACE/tests/test-execution-batch-concurrency.js'],
+      ['standard-mcpb-workspace-smoke-terminal-recovery', 'validation-mcpb-workspace-smoke-terminal-recovery', '$WORKSPACE/tests/test-execution-batch-terminal-recovery.js'],
+      ['standard-mcpb-workspace-smoke-success-contract', 'validation-mcpb-workspace-smoke-success-contract', '$WORKSPACE/tests/test-execution-success-contract.js'],
+      ['standard-mcpb-workspace-smoke-phase5-recovery', 'validation-mcpb-workspace-smoke-phase5-recovery', '$WORKSPACE/tests/test-phase5-recovery.js'],
+      ['standard-mcpb-workspace-smoke-agent-tool-guidance', 'validation-mcpb-workspace-smoke-agent-tool-guidance', '$WORKSPACE/tests/test-agent-tool-guidance.js']
+    ];
+    if (definition.route !== 'mcpb-workspace-smoke' || definition.task_contracts.length !== expectedSmokeTasks.length ||
+        definition.task_contracts.some((task, index) => {
+          const [taskId, role, testPath] = expectedSmokeTasks[index];
+          return task.task_id !== taskId || task.role !== role || task.executable !== 'node' ||
+            canonicalJson(task.args) !== canonicalJson(['--test', testPath]) || task.cwd !== '$WORKSPACE' ||
+            task.timeout_ms !== 300000 || canonicalJson(task.dependencies) !== canonicalJson(['standard-engineer']) ||
+            task.output_artifact_type !== 'qa-report' || task.batch_validation_task !== true;
+        })) {
+      throw new Error('MCPB workspace smoke profile violates its exact packaged local validation contract');
+    }
+  }
+  if (profileId === 'plugin-e2e' &&
+      (definition.route !== 'outer-e2e' || ids.length !== 1 || ids[0] !== 'standard-plugin-e2e' ||
+       definition.task_contracts[0].args?.join('/') !== '$WORKSPACE/tests/test-runalith-plugin.js')) {
+    throw new Error('plugin E2E profile must contain only the isolated outer plugin test command');
+  }
+  if (profileId === 'mcpb-package-build' &&
+      (definition.route !== 'mcpb-package-build' || ids.length !== 1 || ids[0] !== 'standard-mcpb-package-build' ||
+       definition.task_contracts[0]?.role !== 'validation-mcpb-package-build' ||
+       definition.task_contracts[0]?.executable !== 'node' ||
+       canonicalJson(definition.task_contracts[0]?.args) !== canonicalJson(['--input-type=module', '-e', "import { spawnSync } from 'node:child_process'; const result = spawnSync('npm', ['run', 'pack:runalith-mcpb'], { cwd: process.cwd(), stdio: 'inherit' }); if (result.error) { console.error(result.error.message); process.exitCode = 1; } else { process.exitCode = result.status ?? 1; }"]) ||
+       definition.task_contracts[0]?.timeout_ms !== 600000 ||
+       canonicalJson(definition.task_contracts[0]?.dependencies) !== canonicalJson(['standard-engineer']) ||
+       definition.task_contracts[0]?.output_artifact_type !== 'qa-report' ||
+       definition.task_contracts[0]?.batch_validation_task !== true)) {
+    throw new Error('MCPB package validation profile violates its exact local command/timeout/dependency contract');
+  }
+  if (profileId === 'mcpb-package-build-isolated' &&
+      (definition.route !== 'mcpb-package-build-isolated' || ids.length !== 1 || ids[0] !== 'standard-mcpb-package-build-isolated' ||
+       definition.task_contracts[0]?.role !== 'validation-mcpb-package-build-isolated' ||
+       definition.task_contracts[0]?.executable !== 'node' ||
+       canonicalJson(definition.task_contracts[0]?.args) !== canonicalJson(['--input-type=module', '-e', "import { spawnSync } from 'node:child_process'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'runalith-npm-config-')); const userConfig = path.join(temp, 'user.npmrc'); const globalConfig = path.join(temp, 'global.npmrc'); try {   fs.writeFileSync(userConfig, '', { mode: 0o600 });   fs.writeFileSync(globalConfig, '', { mode: 0o600 });   const env = { ...process.env, NPM_CONFIG_USERCONFIG: userConfig, NPM_CONFIG_GLOBALCONFIG: globalConfig, npm_config_userconfig: userConfig, npm_config_globalconfig: globalConfig };   const result = spawnSync('npm', ['run', 'pack:runalith-mcpb'], { cwd: process.cwd(), stdio: 'inherit', env });   if (result.error) { console.error(result.error.message); process.exitCode = 1; } else { process.exitCode = result.status ?? 1; } } finally { fs.rmSync(temp, { recursive: true, force: true }); }"]) ||
+       definition.task_contracts[0]?.timeout_ms !== 600000 ||
+       canonicalJson(definition.task_contracts[0]?.dependencies) !== canonicalJson(['standard-engineer']) ||
+       definition.task_contracts[0]?.output_artifact_type !== 'qa-report' ||
+       definition.task_contracts[0]?.batch_validation_task !== true)) {
+    throw new Error('Isolated MCPB package profile violates its exact npm-config/command/timeout/dependency contract');
+  }
+  const profiles = Object.values(VALIDATION_PROFILES);
+  for (let left = 0; left < profiles.length; left += 1) {
+    for (let right = left + 1; right < profiles.length; right += 1) {
+      const otherIds = profiles[right].task_contracts.map(task => task.task_id);
+      if (profiles[left].task_contracts.some(task => otherIds.includes(task.task_id))) {
+        throw new Error('validation profiles must not share task IDs; recursive execution is forbidden');
+      }
+    }
+  }
+  const snapshot = { ...cloneJson(definition), content_hash: validationProfileContentHash(definition) };
+  return deepFreezeValidationProfile(snapshot);
+}
+
+export function validateValidationProfileSnapshot(snapshot) {
+  assertPlainRecord(snapshot, 'execution plan validation_profile');
+  assertOnlyKeys(snapshot, VALIDATION_PROFILE_SNAPSHOT_KEYS, 'execution plan validation_profile');
+  if (snapshot.schema_version !== 1) throw new Error('unsupported validation profile snapshot schema_version');
+  const expected = resolveValidationProfileSnapshot({
+    profile_id: snapshot.profile_id,
+    profile_version: snapshot.profile_version
+  });
+  if (canonicalJson(snapshot) !== canonicalJson(expected)) {
+    throw new Error('immutable validation profile snapshot/hash mismatch: ' + String(snapshot.profile_id) + '@' + String(snapshot.profile_version));
+  }
+  return expected;
+}
+
+export function materializeValidationProfileTasks(snapshot, workspace) {
+  const profile = validateValidationProfileSnapshot(snapshot);
+  if (typeof workspace !== 'string' || !workspace.trim()) throw new Error('validation profile requires a concrete local workspace');
+  const root = path.resolve(workspace);
+  return profile.task_contracts.map(contract => {
+    if (contract.cwd !== '$WORKSPACE' || contract.executable !== 'node' ||
+        !Array.isArray(contract.args) || contract.args.some(arg => typeof arg !== 'string') ||
+        !Number.isSafeInteger(contract.timeout_ms) || contract.timeout_ms < 1000 ||
+        !Array.isArray(contract.dependencies) || contract.output_artifact_type == null ||
+        contract.batch_validation_task !== true) {
+      throw new Error('validation profile command contract is malformed: ' + contract.task_id);
+    }
+    const args = contract.args.map(arg => arg === '$WORKSPACE'
+      ? root
+      : arg.startsWith('$WORKSPACE/')
+        ? path.resolve(root, arg.slice('$WORKSPACE/'.length))
+        : arg);
+    return {
+      id: contract.task_id,
+      role: contract.role,
+      capability: null,
+      dependencies: [...contract.dependencies],
+      execution: {
+        executor: 'ExecutionManager',
+        executable: contract.executable,
+        args,
+        command: [contract.executable, ...args].join(' '),
+        cwd: root,
+        timeout_ms: contract.timeout_ms,
+        deterministic: true,
+        batch_validation_task: true,
+        output_artifact_type: contract.output_artifact_type,
+        validation_profile_id: profile.profile_id,
+        validation_profile_version: profile.profile_version,
+        validation_profile_task_id: contract.task_id,
+        execution_mode: 'local-only',
+        local_only: true
+      }
+    };
+  });
+}

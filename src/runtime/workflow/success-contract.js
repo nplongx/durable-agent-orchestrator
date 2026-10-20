@@ -223,7 +223,17 @@ export function evaluateSuccessPredicate(predicate, { plan, tasks = [], artifact
       const tasksAreLocal = plannedTasks.every(task => {
         const execution = task.execution || {};
         if (execution.deterministic === true) return execution.executor === 'ExecutionManager';
-        if (execution.executor === 'ChatOnSteroidsHost') return execution.execution_mode === 'host-conversation';
+        if (execution.executor === 'ChatOnSteroidsHost') {
+          if (execution.execution_mode === 'host-conversation') return true;
+          if (execution.execution_mode !== 'host-conversation-scoped-workspace-write') return false;
+          const scope = (plan?.workspace_write_scopes || []).find(item => item.role === task.role);
+          const contract = execution.workspace_write_contract;
+          return plan?.custom_workflow !== true && plan?.workflow_id === 'standard-engineering' &&
+            Number(plan?.workflow_version) >= 3 && plan?.required_operations?.includes('workspace.write') === true &&
+            contract?.version === 1 && contract?.operation === 'workspace.write' &&
+            contract?.role === task.role && Array.isArray(scope?.paths) &&
+            stableJson(contract.paths) === stableJson(scope.paths);
+        }
         if (execution.executor === 'ChatOnSteroids') return execution.deterministic === false &&
           (execution.execution_mode == null || execution.execution_mode === 'host-conversation');
         return execution.deterministic === false && !execution.executor &&

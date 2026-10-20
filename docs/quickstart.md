@@ -60,6 +60,14 @@ The runtime speaks newline-delimited JSON-RPC on stdin/stdout and does not open 
 
 Start with `workflow_catalog` to inspect available templates. When experimenting, use a disposable workspace and a low-risk task. Do not point local execution at a production checkout or sensitive data directory.
 
+### Mandatory batch execution for deterministic tasks
+
+When an approved plan contains deterministic local `ExecutionManager` tasks, inspect its pinned `batch_execution_policy` before execution. New schema-v2 plans record the route and evidence requirements in the immutable plan hash. Eligible tasks go through `execute_batch` only; do not use `task_execute_local` as a fallback. The batch API accepts one through 32 prepared task IDs, so a one-item batch is valid.
+
+For code-writing workflows, preflight is expected to require exact deterministic validation task contracts. After execution, inspect per-item results and durable evidence rather than trusting a narrative summary. If approval predates the policy schema, preserve its original plan hash and diagnose the workflow rather than rewriting its stored plan.
+
+**Current change status:** not release-ready. Retry-lineage verification, broader fingerprint roots, direct-completion binding checks, policy-denial audits and schema-v1 migration guards have been updated. Regression fixtures now cover missing/mismatched completion bindings, root-wrapper drift and full synthesis after a same-ID batch retry. No tests, syntax checks, documentation generation or docs checks have run. Preserve the approved plan hash. Run validation only after a separate immutable plan pins exact commands and is explicitly approved; dispatch the approved deterministic tasks only through `execute_batch`.
+
 ## 5. Optional: start the read-only dashboard
 
 In a separate terminal:
